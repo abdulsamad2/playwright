@@ -1,0 +1,221 @@
+{
+  "eventInfo": {
+    "title": "Cody Jinks - The Hippies and Cowboys Tour",
+    "dateTime": "Fri • May 30, 2025 • 7:00 PM"
+  },
+  "tickets": [
+    {
+      "section": "Sec 305 • Row BB",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row CC",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row DD",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row EE",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row FF",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row GG",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row AA",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row BB",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row CC",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row DD",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row EE",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row DD",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row EE",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row FF",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row GG",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row HH",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row Y",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 305 • Row Z",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row Y",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 303 • Row Z",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row Y",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row Z",
+      "ticketType": "Standard Adult",
+      "price": "$42.50"
+    },
+    {
+      "section": "Sec 304 • Row S",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 304 • Row T",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 304 • Row V",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 304 • Row W",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row S",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row T",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row V",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row W",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row X",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row J",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row K",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row L",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row M",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row N",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row P",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row Q",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row R",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    },
+    {
+      "section": "Sec 305 • Row H",
+      "ticketType": "Standard Adult",
+      "price": "$55.90"
+    }
+  ],
+  "metadata": {
+    "lastUpdate": "4:16:02 PM",
+    "iterationNumber": 2,
+    "scrapeStartTime": "2025-02-08T11:14:47.817Z",
+    "scrapeEndTime": "2025-02-08T11:16:02.632Z",
+    "scrapeDurationSeconds": 74.815,
+    "totalRunningTimeMinutes": "2.09",
+    "ticketStats": {
+      "totalTickets": 40,
+      "ticketCountChange": 40,
+      "previousTicketCount": 0
+    }
+  }
+}
