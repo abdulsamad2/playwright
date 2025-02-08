@@ -52,12 +52,12 @@ const DEVICES = [
 
   // // Desktop Devices
   // { name: "Desktop Chrome", viewport: { width: 1920, height: 1080 } },
-  // { name: "Desktop Edge", viewport: { width: 1920, height: 1080 } },
+  { name: "Desktop Edge", viewport: { width: 1920, height: 1080 } },
   // { name: "Desktop Firefox", viewport: { width: 1280, height: 720 } },
   // { name: "Desktop Safari", viewport: { width: 1440, height: 900 } },
 
   // // Common Desktop Resolutions
-  // { name: "HD Desktop", viewport: { width: 1366, height: 768 } },
+  { name: "HD Desktop", viewport: { width: 1366, height: 768 } },
   // { name: "Full HD", viewport: { width: 1920, height: 1080 } },
   // { name: "2K Display", viewport: { width: 2560, height: 1440 } },
   // { name: "4K Display", viewport: { width: 3840, height: 2160 } },
