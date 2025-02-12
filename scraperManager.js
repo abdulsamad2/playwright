@@ -58,10 +58,24 @@ export class ScrapingManager {
       // Find existing event or create new one
       let event = await Event.findOne({ url });
 
+      // Parse the date string correctly
+      const parseDateString = (dateStr) => {
+        // Example format: "Fri • Jun 13, 2025 • 7:30 PM"
+        const parts = dateStr.split("•").map((s) => s.trim());
+        if (parts.length === 3) {
+          const [dayOfWeek, date, time] = parts;
+          const dateTime = new Date(`${date} ${time}`);
+          if (!isNaN(dateTime.getTime())) {
+            return dateTime;
+          }
+        }
+        throw new Error(`Invalid date format: ${dateStr}`);
+      };
+
       if (!event) {
         event = new Event({
           title: eventData.title,
-          dateTime: new Date(eventData.dateTime),
+          dateTime: parseDateString(eventData.dateTime),
           url: url,
           availableSeats: consecutiveGroups.reduce(
             (sum, group) => sum + group.seatCount,
@@ -73,6 +87,7 @@ export class ScrapingManager {
         // Update only metadata if seating hasn't changed
         event.metadata = metadata;
         event.lastUpdated = new Date();
+        event.dateTime = parseDateString(eventData.dateTime);
         event.availableSeats = consecutiveGroups.reduce(
           (sum, group) => sum + group.seatCount,
           0
@@ -81,12 +96,10 @@ export class ScrapingManager {
 
       await event.save();
 
-      // Only update consecutive groups if there are changes
+      // Rest of your code remains the same...
       if (this.hasSeatingChanged(url, consecutiveGroups)) {
-        // Remove existing consecutive groups for this event
         await ConsecutiveGroup.deleteMany({ eventId: event._id });
 
-        // Create new consecutive groups
         const groupPromises = consecutiveGroups.map((group) => {
           return new ConsecutiveGroup({
             eventId: event._id,
