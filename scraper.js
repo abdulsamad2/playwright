@@ -57,7 +57,7 @@ class Scraper {
         username: selectedProxy.username,
         password: selectedProxy.password,
       },
-      headless: false,
+      headless: true,
     };
 
     this.browser = await selectedBrowser.engine.launch(launchOptions);
