@@ -6,6 +6,7 @@ import seatService from "./services/seatService.js";
 import morgan from "morgan";
 import dotenv from "dotenv";
 import cors from "cors";
+import fs from "fs";
 
 dotenv.config();
 

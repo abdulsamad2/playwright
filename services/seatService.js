@@ -1,5 +1,6 @@
 import _ from "lodash";
 import { Event, SeatGroup, ErrorLog } from "../models/index.js";
+import fs from "fs";
 
 class SeatService {
   processSeats(tickets) {
@@ -7,6 +8,8 @@ class SeatService {
       console.log("No tickets to process");
       return [];
     }
+    //
+      // fs.writeFileSync("result.json", JSON.stringify(tickets, null, 2));
 
     console.log(`Processing ${tickets.length} tickets`);
 

@@ -1,120 +1,8 @@
 import { firefox, chromium, webkit } from "playwright";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 import { proxyArray } from "./proxyList.js";
-
-const BROWSERS = [
-  { name: "firefox", engine: firefox },
-  // { name: "chromium", engine: chromium },
-  // { name: "webkit", engine: webkit },
-  // { name: "edge", engine: chromium },
-  // { name: "safari", engine: webkit },
-];
-
-const DEVICES = [
-  // Android Phones
-  {
-    name: "Pixel 8 Pro",
-    viewport: { width: 412, height: 915 },
-    isMobile: true,
-  },
-  { name: "Pixel 7", viewport: { width: 412, height: 892 }, isMobile: true },
-  {
-    name: "Samsung Galaxy S24 Ultra",
-    viewport: { width: 412, height: 915 },
-    isMobile: true,
-  },
-  {
-    name: "Samsung Galaxy S23",
-    viewport: { width: 393, height: 851 },
-    isMobile: true,
-  },
-  {
-    name: "Samsung Galaxy A54",
-    viewport: { width: 390, height: 844 },
-    isMobile: true,
-  },
-  { name: "OnePlus 11", viewport: { width: 412, height: 915 }, isMobile: true },
-  {
-    name: "Xiaomi 13 Pro",
-    viewport: { width: 393, height: 851 },
-    isMobile: true,
-  },
-
-  // iOS Phones
-  {
-    name: "iPhone 15 Pro Max",
-    viewport: { width: 430, height: 932 },
-    isMobile: true,
-  },
-  { name: "iPhone 14", viewport: { width: 390, height: 844 }, isMobile: true },
-  {
-    name: "iPhone 13 Mini",
-    viewport: { width: 375, height: 812 },
-    isMobile: true,
-  },
-  {
-    name: "iPhone SE (3rd Gen)",
-    viewport: { width: 375, height: 667 },
-    isMobile: true,
-  },
-
-  // Android Tablets
-  {
-    name: "Samsung Galaxy Tab S9",
-    viewport: { width: 800, height: 1280 },
-    isMobile: true,
-  },
-  {
-    name: "Lenovo Tab P11 Pro",
-    viewport: { width: 1600, height: 2560 },
-    isMobile: true,
-  },
-  {
-    name: "Google Pixel Tablet",
-    viewport: { width: 1600, height: 2560 },
-    isMobile: true,
-  },
-
-  // iPads
-  {
-    name: 'iPad Pro 12.9" (6th Gen)',
-    viewport: { width: 1024, height: 1366 },
-    isMobile: true,
-  },
-  {
-    name: "iPad Air (5th Gen)",
-    viewport: { width: 820, height: 1180 },
-    isMobile: true,
-  },
-  {
-    name: "iPad Mini (6th Gen)",
-    viewport: { width: 768, height: 1024 },
-    isMobile: true,
-  },
-
-  // Desktop Monitors and Laptops
-  { name: "Desktop Full HD", viewport: { width: 1920, height: 1080 } },
-  { name: "Desktop 4K", viewport: { width: 3840, height: 2160 } },
-  { name: 'MacBook Pro 16"', viewport: { width: 1728, height: 1117 } },
-  { name: "MacBook Air M2", viewport: { width: 1512, height: 982 } },
-  { name: "Dell XPS 15", viewport: { width: 1920, height: 1200 } },
-  {
-    name: "Lenovo ThinkPad X1 Carbon",
-    viewport: { width: 1920, height: 1080 },
-  },
-
-  // Common Resolutions
-  { name: "HD Ready", viewport: { width: 1280, height: 720 } },
-  { name: "HD+", viewport: { width: 1366, height: 768 } },
-  { name: "Full HD", viewport: { width: 1920, height: 1080 } },
-  { name: "2K", viewport: { width: 2560, height: 1440 } },
-  { name: "Ultrawide Monitor", viewport: { width: 3440, height: 1440 } },
-
-  // Smaller Screens and Unique Sizes
-  { name: "Small Laptop", viewport: { width: 1280, height: 800 } },
-  { name: "Netbook", viewport: { width: 1024, height: 600 } },
-  { name: "Large Desktop", viewport: { width: 2560, height: 1600 } },
-];
+import fs from "fs";
+import { BROWSERS, DEVICES } from "./config.js";
 
 class Scraper {
   constructor() {
@@ -169,7 +57,7 @@ class Scraper {
         username: selectedProxy.username,
         password: selectedProxy.password,
       },
-      headless: true,
+      headless: false,
     };
 
     this.browser = await selectedBrowser.engine.launch(launchOptions);
@@ -328,50 +216,289 @@ class Scraper {
 
         const title = await page.title();
         console.log("Page Title:", title);
+        // click on button
+     const data = await page.evaluate(async () => {
+       const SELECTORS = {
+         ACCEPT_BUTTON: '[data-bdd="accept-modal-accept-button"]',
+         SVG_MAP:
+           "#map-container > div.zoomer > div.zoomer__controls > button.zoomer__control--zoomin",
+         SEAT: 'circle[data-component="svg__seat"]',
+         EVENT_TITLE: "h1",
+         EVENT_DATE: "#edp-event-header div.sc-1eku3jf-12.BANxv span > span",
+         ROW: 'g[data-component="svg__row"]',
+         SECTION: 'g[data-component="svg__block"]',
+         PRICE_POPUP: ".standard-admission",
+         TOOLTIP: '[role="tooltip"]',
+       };
 
-        const data = await page.evaluate(() => {
-          const tickets = Array.from(
-            document.querySelectorAll(".sc-1cro0l1-0")
-          ).map((ticket) => {
-            const section = ticket
-              .querySelector('[data-bdd="quick-pick-item-desc"]')
-              ?.textContent?.trim();
-            const ticketType = ticket
-              .querySelector("div.sc-m796ke-6.ijdmtk > span")
-              ?.textContent?.trim();
-            const price = ticket
-              .querySelector('[data-bdd="quick-pick-price-button"]')
-              ?.textContent?.trim();
-            const title = document.querySelector("h1")?.textContent?.trim();
-            const dateTime = document
-              .querySelector(
-                "#edp-event-header div.sc-1eku3jf-12.BANxv span > span"
-              )
-              ?.textContent?.trim();
-            console.log(section, ticketType, price, title, dateTime);
-            return {
-              section,
-              ticketType,
-              price,
-            };
-          });
+       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-          return {
-            eventInfo: {
-              title: document.querySelector("h1")?.textContent?.trim() || "",
-              dateTime:
-                document
-                  .querySelector(
-                    "#edp-event-header div.sc-1eku3jf-12.BANxv span > span"
-                  )
-                  ?.textContent?.trim() || "",
-            },
-            tickets: tickets,
-          };
-        });
+       const simulateHover = async (element) => {
+         // Create mouse events
+         const events = [
+           new MouseEvent("pointerover", { bubbles: true }),
+           new MouseEvent("mouseenter", { bubbles: true }),
+           new MouseEvent("mouseover", { bubbles: true }),
+           new MouseEvent("pointermove", { bubbles: true }),
+           new MouseEvent("mousemove", { bubbles: true }),
+         ];
 
-        // Return the data as a JSON string
-        return JSON.stringify(data, null, 2);
+         // Dispatch all events
+         for (const event of events) {
+           element.dispatchEvent(event);
+         }
+
+         // Wait for tooltip to appear
+         await sleep(150);
+       };
+
+       const getPriceFromTooltip = () => {
+         // Try multiple selectors to find price
+         const selectors = [
+           ".standard-admission",
+           '[role="tooltip"] .standard-admission',
+           '[role="tooltip"] [class*="price"]',
+           '[class*="tooltip"] [class*="price"]',
+           '[class*="popup"] [class*="price"]',
+         ];
+
+         for (const selector of selectors) {
+           const element = document.querySelector(selector);
+           if (element) {
+             const text = element.textContent;
+             const priceMatch = text.match(/\$(\d+(\.\d{2})?)/);
+             if (priceMatch) return parseFloat(priceMatch[1]);
+           }
+         }
+
+         return null;
+       };
+
+       const scrapeSeats = async () => {
+         try {
+           // Handle accept button
+           try {
+             const acceptButton = await waitForElement(
+               SELECTORS.ACCEPT_BUTTON,
+               1000
+             );
+             if (acceptButton) {
+               acceptButton.click();
+               await sleep(200);
+             }
+           } catch (e) {}
+
+           // Handle map zoom
+           const svg = await waitForElement(SELECTORS.SVG_MAP);
+           if (!svg) throw new Error("SVG map not found");
+
+           for (let i = 0; i < 5; i++) {
+             svg.click();
+             await sleep(200);
+           }
+
+           await waitForElement(SELECTORS.SEAT, 1000);
+
+           // Get sections and rows
+           const seatElements = document.querySelectorAll(SELECTORS.SEAT);
+           const sections = new Map();
+           const rows = new Map();
+
+           seatElements.forEach((seat) => {
+             const sectionElement = seat.closest(SELECTORS.SECTION);
+             const rowElement = seat.closest(SELECTORS.ROW);
+
+             if (sectionElement && !sections.has(sectionElement)) {
+               sections.set(
+                 sectionElement,
+                 sectionElement.getAttribute("data-section-name")
+               );
+             }
+             if (rowElement && !rows.has(rowElement)) {
+               rows.set(rowElement, rowElement.getAttribute("data-row-name"));
+             }
+           });
+
+           // Batch process seats with improved price scraping
+           const seats = [];
+           const availableSeats = Array.from(seatElements).filter((seat) =>
+             seat.classList.contains("is-available")
+           );
+
+           // Process seats in smaller batches to avoid overwhelming the UI
+           const BATCH_SIZE = 5;
+           for (let i = 0; i < availableSeats.length; i += BATCH_SIZE) {
+             const batch = availableSeats.slice(i, i + BATCH_SIZE);
+
+             // Process each seat in the batch
+             for (const seat of batch) {
+               const sectionElement = seat.closest(SELECTORS.SECTION);
+               const rowElement = seat.closest(SELECTORS.ROW);
+
+               // Clear any existing tooltips
+               document
+                 .querySelectorAll('[role="tooltip"]')
+                 .forEach((el) => el.remove());
+
+               // Try to get price multiple times if needed
+               let price = null;
+               let attempts = 0;
+               while (!price && attempts < 3) {
+                 await simulateHover(seat);
+                 price = getPriceFromTooltip();
+                 attempts++;
+                 if (!price) await sleep(100); // Wait before retry
+               }
+
+               if (price) {
+                 seats.push({
+                   id: seat.getAttribute("id"),
+                   seatNumber: seat.getAttribute("data-seat-name"),
+                   row: rows.get(rowElement),
+                   section: sections.get(sectionElement),
+                   isAvailable: true,
+                   price,
+                 });
+               }
+             }
+
+             // Small delay between batches
+             await sleep(100);
+           }
+
+           // Rest of your code for grouping seats and creating consecutive groups...
+           const validSeats = seats.filter(
+             (seat) => seat.id && seat.seatNumber
+           );
+
+           const groupedSeats = {};
+           validSeats.forEach((seat) => {
+             if (!groupedSeats[seat.section]) {
+               groupedSeats[seat.section] = {};
+             }
+             if (!groupedSeats[seat.section][seat.row]) {
+               groupedSeats[seat.section][seat.row] = [];
+             }
+             groupedSeats[seat.section][seat.row].push(seat);
+           });
+
+           const consecutiveGroups = [];
+
+           Object.entries(groupedSeats).forEach(([section, rows]) => {
+             Object.entries(rows).forEach(([row, seats]) => {
+               const sortedSeats = seats.sort(
+                 (a, b) => parseInt(a.seatNumber) - parseInt(b.seatNumber)
+               );
+               let currentGroup = [sortedSeats[0]];
+
+               for (let i = 1; i < sortedSeats.length; i++) {
+                 const currentSeat = sortedSeats[i];
+                 const previousSeat = sortedSeats[i - 1];
+
+                 if (
+                   parseInt(currentSeat.seatNumber) ===
+                   parseInt(previousSeat.seatNumber) + 1
+                 ) {
+                   currentGroup.push(currentSeat);
+                 } else {
+                   if (currentGroup.length >= 2) {
+                     consecutiveGroups.push({
+                       section,
+                       row,
+                       seatCount: currentGroup.length,
+                       seatRange: `${currentGroup[0].seatNumber} to ${
+                         currentGroup[currentGroup.length - 1].seatNumber
+                       }`,
+                       seats: currentGroup.map((s) => ({
+                         number: s.seatNumber,
+                         price: s.price,
+                       })),
+                     });
+                   }
+                   currentGroup = [currentSeat];
+                 }
+               }
+
+               if (currentGroup.length >= 2) {
+                 consecutiveGroups.push({
+                   section,
+                   row,
+                   seatCount: currentGroup.length,
+                   seatRange: `${currentGroup[0].seatNumber} to ${
+                     currentGroup[currentGroup.length - 1].seatNumber
+                   }`,
+                   seats: currentGroup.map((s) => ({
+                     number: s.seatNumber,
+                     price: s.price,
+                   })),
+                 });
+               }
+             });
+           });
+
+           const [eventTitle, eventDate] = await Promise.all([
+             document
+               .querySelector(SELECTORS.EVENT_TITLE)
+               ?.textContent?.trim() || "",
+             document
+               .querySelector(SELECTORS.EVENT_DATE)
+               ?.textContent?.trim() || "",
+           ]);
+
+           return {
+             eventInfo: {
+               title: eventTitle,
+               dateTime: eventDate,
+             },
+             seatingInfo: {
+               availableSeats: validSeats.length,
+               consecutiveGroups,
+               seats: validSeats,
+             },
+           };
+         } catch (error) {
+           console.error("Error during scraping:", error);
+           throw error;
+         }
+       };
+
+       // waitForElement function remains the same
+       const waitForElement = (selector, timeout = 5000) => {
+         return new Promise((resolve, reject) => {
+           const element = document.querySelector(selector);
+           if (element) {
+             resolve(element);
+             return;
+           }
+
+           const observer = new MutationObserver(() => {
+             const element = document.querySelector(selector);
+             if (element) {
+               observer.disconnect();
+               resolve(element);
+             }
+           });
+
+           observer.observe(document.body, {
+             childList: true,
+             subtree: true,
+           });
+
+           setTimeout(() => {
+             observer.disconnect();
+             resolve(null);
+           }, timeout);
+         });
+       };
+
+       return scrapeSeats();
+     });
+        console.log("Data:", data);
+        const jsonString = JSON.stringify(data, null, 2);
+        fs.writeFileSync("result.json", jsonString);
+        // save to mongodb using mongoose 
+        return jsonString;
+        // Execute the scraping
       } catch (error) {
         retries++;
         console.error(`Attempt ${retries} failed:`, error.message);
