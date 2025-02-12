@@ -1,6 +1,5 @@
 import Scraper from "./scraper.js";
-import seatService from "./services/seatService.js";
-import { Event, ErrorLog } from "./models/index.js";
+import { Event, ConsecutiveGroup, ErrorLog } from "./models/index.js";
 import _ from "lodash";
 import { Worker, isMainThread, parentPort, workerData } from "worker_threads";
 import os from "os";
@@ -9,10 +8,9 @@ export class ScrapingManager {
   constructor() {
     this.activeScrapers = new Map();
     this.maxConcurrentScrapes = 600;
-    this.previousTicketCounts = new Map();
-    this.previousScrapedData = new Map();
+    this.previousConsecutiveGroups = new Map();
     this.workerPool = [];
-    this.maxWorkers = os.cpus().length; // Use number of CPU cores
+    this.maxWorkers = os.cpus().length;
   }
 
   async logError(url, errorType, error, additionalInfo = {}) {
@@ -32,21 +30,85 @@ export class ScrapingManager {
       console.error("Error logging to database:", logError);
     }
   }
-  hasDataChanged(url, newData) {
-    const previousData = this.previousScrapedData.get(url);
-    if (!previousData) return true;
 
-    // Only compare standard admission tickets
-    const previousTickets = _.sortBy(
-      previousData.seatingInfo.seats.filter((seat) => seat.isStandardAdmission),
-      ["section", "row", "seatNumber", "price"]
-    );
-    const newTickets = _.sortBy(
-      newData.seatingInfo.seats.filter((seat) => seat.isStandardAdmission),
-      ["section", "row", "seatNumber", "price"]
-    );
+  hasSeatingChanged(url, newGroups) {
+    const previousGroups = this.previousConsecutiveGroups.get(url);
+    if (!previousGroups) return true;
 
-    return !_.isEqual(previousTickets, newTickets);
+    // Sort and compare consecutive groups
+    const sortGroups = (groups) =>
+      _.sortBy(groups, ["section", "row", "seatRange"]);
+    const normalizeGroups = (groups) =>
+      groups.map((group) => ({
+        section: group.section,
+        row: group.row,
+        seatCount: group.seatCount,
+        seatRange: group.seatRange,
+        seats: _.sortBy(group.seats, "number"),
+      }));
+
+    const previousSorted = sortGroups(normalizeGroups(previousGroups));
+    const newSorted = sortGroups(normalizeGroups(newGroups));
+
+    return !_.isEqual(previousSorted, newSorted);
+  }
+
+  async saveOrUpdateEvent(eventData, consecutiveGroups, metadata, url) {
+    try {
+      // Find existing event or create new one
+      let event = await Event.findOne({ url });
+
+      if (!event) {
+        event = new Event({
+          title: eventData.title,
+          dateTime: new Date(eventData.dateTime),
+          url: url,
+          availableSeats: consecutiveGroups.reduce(
+            (sum, group) => sum + group.seatCount,
+            0
+          ),
+          metadata: metadata,
+        });
+      } else {
+        // Update only metadata if seating hasn't changed
+        event.metadata = metadata;
+        event.lastUpdated = new Date();
+        event.availableSeats = consecutiveGroups.reduce(
+          (sum, group) => sum + group.seatCount,
+          0
+        );
+      }
+
+      await event.save();
+
+      // Only update consecutive groups if there are changes
+      if (this.hasSeatingChanged(url, consecutiveGroups)) {
+        // Remove existing consecutive groups for this event
+        await ConsecutiveGroup.deleteMany({ eventId: event._id });
+
+        // Create new consecutive groups
+        const groupPromises = consecutiveGroups.map((group) => {
+          return new ConsecutiveGroup({
+            eventId: event._id,
+            section: group.section,
+            row: group.row,
+            seatCount: group.seatCount,
+            seatRange: group.seatRange,
+            seats: group.seats.map((seat) => ({
+              number: seat.number,
+              price: seat.price,
+            })),
+          }).save();
+        });
+
+        await Promise.all(groupPromises);
+        this.previousConsecutiveGroups.set(url, consecutiveGroups);
+      }
+
+      return event;
+    } catch (error) {
+      throw new Error(`Database save error: ${error.message}`);
+    }
   }
 
   async startScraping(url) {
@@ -71,7 +133,6 @@ export class ScrapingManager {
       };
 
       this.activeScrapers.set(url, scrapingInfo);
-      this.previousTicketCounts.set(url, 0);
 
       this.scrapeUrlContinuously(url);
       return { status: "started", url };
@@ -81,7 +142,7 @@ export class ScrapingManager {
     }
   }
 
- async scrapeUrlContinuously(url) {
+  async scrapeUrlContinuously(url) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const scrapingInfo = this.activeScrapers.get(url);
     if (!scrapingInfo) return;
@@ -89,7 +150,9 @@ export class ScrapingManager {
     try {
       while (scrapingInfo.status === "active") {
         const iterationStart = Date.now();
-        console.log(`Starting scrape iteration ${scrapingInfo.iteration} for: ${url}`);
+        console.log(
+          `Starting scrape iteration ${scrapingInfo.iteration} for: ${url}`
+        );
 
         let retryCount = 0;
         const maxRetries = 3;
@@ -98,78 +161,48 @@ export class ScrapingManager {
         while (retryCount < maxRetries && !success) {
           try {
             const rawData = await scrapingInfo.scraper.scrape(url);
-            const scrapedData = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
-
-            if (!this.hasDataChanged(url, scrapedData)) {
-              console.log("No changes detected in standard admission seats, skipping database update");
-              success = true;
-              scrapingInfo.consecutiveErrors = 0;
-              break;
-            }
-
-            // Filter for standard admission seats only
-            const standardSeats = scrapedData.seatingInfo.seats.filter(seat => {
-              return seat.isStandardAdmission && seat.price && seat.isAvailable;
-            });
-
-            const processedSeats = seatService.processSeats(standardSeats);
-            const currentTicketCount = standardSeats.length;
-            const previousCount = this.previousTicketCounts.get(url);
-            const ticketCountDiff = currentTicketCount - previousCount;
-
-            const iterationEnd = Date.now();
-            const iterationDuration = (iterationEnd - iterationStart) / 1000;
+            const scrapedData =
+              typeof rawData === "string" ? JSON.parse(rawData) : rawData;
 
             const metadata = {
-              lastUpdate: new Date().toLocaleTimeString(),
+              lastUpdate: new Date().toISOString(),
               iterationNumber: scrapingInfo.iteration,
               scrapeStartTime: new Date(iterationStart),
-              scrapeEndTime: new Date(iterationEnd),
-              scrapeDurationSeconds: iterationDuration,
-              totalRunningTimeMinutes: ((Date.now() - scrapingInfo.startTime) / 1000 / 60).toFixed(2),
+              scrapeEndTime: new Date(),
+              scrapeDurationSeconds: (Date.now() - iterationStart) / 1000,
+              totalRunningTimeMinutes: (
+                (Date.now() - scrapingInfo.startTime) /
+                1000 /
+                60
+              ).toFixed(2),
               ticketStats: {
-                totalStandardTickets: currentTicketCount,
-                ticketCountChange: ticketCountDiff,
-                previousTicketCount: previousCount,
+                totalTickets: scrapedData.seatingInfo.availableSeats,
+                ticketCountChange: 0,
+                previousTicketCount: 0,
               },
-              priceRanges: {
-                min: _.minBy(standardSeats, 'price')?.price || 0,
-                max: _.maxBy(standardSeats, 'price')?.price || 0,
-                average: _.meanBy(standardSeats, 'price') || 0
-              }
             };
 
-            // Group consecutive standard admission seats
-            const consecutiveGroups = scrapedData.seatingInfo.consecutiveGroups.filter(group => 
-              group.seats.every(seat => seat.isStandardAdmission)
-            );
-
-            const eventData = {
-              ...scrapedData.eventInfo,
-              consecutiveStandardGroups: consecutiveGroups
-            };
-
-            await seatService.saveToDatabase(
-              eventData,
-              processedSeats,
+            const event = await this.saveOrUpdateEvent(
+              scrapedData.eventInfo,
+              scrapedData.seatingInfo.consecutiveGroups,
               metadata,
               url
             );
 
-            this.previousScrapedData.set(url, scrapedData);
-            this.previousTicketCounts.set(url, currentTicketCount);
-
-            console.log(`Total standard admission tickets: ${currentTicketCount}`);
-            console.log(`Ticket change: ${ticketCountDiff > 0 ? "+" + ticketCountDiff : ticketCountDiff}`);
-            console.log(`Price range: $${metadata.priceRanges.min} - $${metadata.priceRanges.max}`);
-            console.log(`Iteration ${scrapingInfo.iteration} completed in ${iterationDuration.toFixed(2)} seconds`);
-
             success = true;
             scrapingInfo.consecutiveErrors = 0;
+            scrapingInfo.lastUpdate = new Date();
+            console.log(
+              `Iteration ${
+                scrapingInfo.iteration
+              } completed in ${metadata.scrapeDurationSeconds.toFixed(
+                2
+              )} seconds`
+            );
             break;
           } catch (error) {
             retryCount++;
-            console.log(`Attempt ${retryCount} failed, retrying in 10 seconds...`);
+            console.error(`Attempt ${retryCount} failed:`, error);
 
             await this.logError(url, "SCRAPE_ERROR", error, {
               retryCount,
@@ -177,16 +210,12 @@ export class ScrapingManager {
             });
 
             if (retryCount === maxRetries) {
-              scrapingInfo.consecutiveErrors = (scrapingInfo.consecutiveErrors || 0) + 1;
-
+              scrapingInfo.consecutiveErrors =
+                (scrapingInfo.consecutiveErrors || 0) + 1;
               if (scrapingInfo.consecutiveErrors >= 5) {
-                await this.logError(url, "VALIDATION_ERROR", new Error("Too many consecutive errors"), {
-                  consecutiveErrors: scrapingInfo.consecutiveErrors,
-                });
                 await this.stopScraping(url);
                 return;
               }
-
               throw error;
             }
             await new Promise((resolve) => setTimeout(resolve, 10000));
@@ -203,7 +232,6 @@ export class ScrapingManager {
       await this.logError(url, "SCRAPE_ERROR", error);
     }
   }
-  
 
   async stopScraping(url) {
     try {
@@ -215,8 +243,7 @@ export class ScrapingManager {
       scrapingInfo.status = "stopped";
       await scrapingInfo.scraper.close();
       this.activeScrapers.delete(url);
-      this.previousTicketCounts.delete(url);
-      this.previousScrapedData.delete(url);
+      this.previousConsecutiveGroups.delete(url);
 
       return {
         status: "stopped",

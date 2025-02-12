@@ -493,9 +493,9 @@ class Scraper {
 
        return scrapeSeats();
      });
-        console.log("Data:", data);
+       
         const jsonString = JSON.stringify(data, null, 2);
-        fs.writeFileSync("result.json", jsonString);
+    
         // save to mongodb using mongoose 
         return jsonString;
         // Execute the scraping

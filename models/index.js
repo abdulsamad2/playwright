@@ -1,39 +1,62 @@
 import mongoose from "mongoose";
 
-const eventSchema = new mongoose.Schema({
-  title: {
-    type: String,
-    required: true,
-  },
-  dateTime: {
-    type: Date,
-    required: true,
-  },
-  url: {
-    type: String,
-    required: true,
-    unique: true,
-  },
-  lastUpdated: {
-    type: Date,
-    default: Date.now,
-  },
-  metadata: {
-    lastUpdate: String,
-    iterationNumber: Number,
-    scrapeStartTime: Date,
-    scrapeEndTime: Date,
-    scrapeDurationSeconds: Number,
-    totalRunningTimeMinutes: String,
-    ticketStats: {
-      totalTickets: Number,
-      ticketCountChange: Number,
-      previousTicketCount: Number,
+// Event Schema
+const eventSchema = new mongoose.Schema(
+  {
+    title: {
+      type: String,
+      required: true,
     },
+    dateTime: {
+      type: Date,
+      required: true,
+    },
+    availableSeats: {
+      type: Number,
+      required: true,
+    },
+    url: {
+      type: String,
+      required: true,
+      unique: true,
+    },
+    lastUpdated: {
+      type: Date,
+      default: Date.now,
+    },
+    metadata: {
+      lastUpdate: String,
+      iterationNumber: Number,
+      scrapeStartTime: Date,
+      scrapeEndTime: Date,
+      scrapeDurationSeconds: Number,
+      totalRunningTimeMinutes: String,
+      ticketStats: {
+        totalTickets: Number,
+        ticketCountChange: Number,
+        previousTicketCount: Number,
+      },
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
+
+// Individual Seat Schema (as a subdocument)
+const seatSchema = new mongoose.Schema({
+  number: {
+    type: String,
+    required: true,
+  },
+  price: {
+    type: Number,
+    required: true,
   },
 });
 
-const seatGroupSchema = new mongoose.Schema(
+// Consecutive Group Schema
+const consecutiveGroupSchema = new mongoose.Schema(
   {
     eventId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -48,35 +71,22 @@ const seatGroupSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    startSeat: {
-      type: Number,
-      default: 1,
-    },
-    endSeat: {
+    seatCount: {
       type: Number,
       required: true,
     },
-    quantity: {
-      type: Number,
-      required: true,
-    },
-    price: {
-      type: Number,
-      required: true,
-    },
-    ticketType: {
+    seatRange: {
       type: String,
       required: true,
     },
-    rowList: {
-      type: String,
-      required: true,
-    },
+    seats: [seatSchema],
   },
   {
     timestamps: true,
   }
 );
+
+// Error Log Schema
 const errorLogSchema = new mongoose.Schema(
   {
     eventUrl: {
@@ -113,11 +123,15 @@ const errorLogSchema = new mongoose.Schema(
   }
 );
 
-export const ErrorLog = mongoose.model("ErrorLog", errorLogSchema);
+// Indexes
+// In models/index.js
+export const SeatGroup = mongoose.model("ConsecutiveGroup", consecutiveGroupSchema);eventSchema.index({ url: 1 }, { unique: true });
+errorLogSchema.index({ eventUrl: 1, createdAt: -1 });
 
-// Indexes for better query performance
-seatGroupSchema.index({ eventId: 1, section: 1, row: 1 });
-eventSchema.index({ url: 1 }, { unique: true });
-
+// Models
 export const Event = mongoose.model("Event", eventSchema);
-export const SeatGroup = mongoose.model("SeatGroup", seatGroupSchema);
+export const ConsecutiveGroup = mongoose.model(
+  "ConsecutiveGroup",
+  consecutiveGroupSchema
+);
+export const ErrorLog = mongoose.model("ErrorLog", errorLogSchema);

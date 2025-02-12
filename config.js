@@ -4,7 +4,7 @@ export const BROWSERS = [
   { name: "firefox", engine: firefox },
   { name: "chromium", engine: chromium },
   // { name: "webkit", engine: webkit },
-  // { name: "edge", engine: chromium },
+  { name: "edge", engine: chromium },
   // { name: "safari", engine: webkit },
 ];
 
