@@ -35,7 +35,6 @@ export class ScrapingManager {
     const previousGroups = this.previousConsecutiveGroups.get(url);
     if (!previousGroups) return true;
 
-    // Sort and compare consecutive groups
     const sortGroups = (groups) =>
       _.sortBy(groups, ["section", "row", "seatRange"]);
     const normalizeGroups = (groups) =>
@@ -53,14 +52,11 @@ export class ScrapingManager {
     return !_.isEqual(previousSorted, newSorted);
   }
 
-  async saveOrUpdateEvent(eventData, consecutiveGroups, metadata, url) {
+  async saveOrUpdateEvent(eventData, scrapedData, metadata, url) {
     try {
-      // Find existing event or create new one
       let event = await Event.findOne({ url });
 
-      // Parse the date string correctly
       const parseDateString = (dateStr) => {
-        // Example format: "Fri • Jun 13, 2025 • 7:30 PM"
         const parts = dateStr.split("•").map((s) => s.trim());
         if (parts.length === 3) {
           const [dayOfWeek, date, time] = parts;
@@ -77,45 +73,50 @@ export class ScrapingManager {
           title: eventData.title,
           dateTime: parseDateString(eventData.dateTime),
           url: url,
-          availableSeats: consecutiveGroups.reduce(
-            (sum, group) => sum + group.seatCount,
-            0
-          ),
+          availableSeats: scrapedData.seatingInfo.availableSeats,
           metadata: metadata,
         });
       } else {
-        // Update only metadata if seating hasn't changed
         event.metadata = metadata;
         event.lastUpdated = new Date();
         event.dateTime = parseDateString(eventData.dateTime);
-        event.availableSeats = consecutiveGroups.reduce(
-          (sum, group) => sum + group.seatCount,
-          0
-        );
+        event.availableSeats = scrapedData.seatingInfo.availableSeats;
       }
 
       await event.save();
 
-      // Rest of your code remains the same...
-      if (this.hasSeatingChanged(url, consecutiveGroups)) {
-        await ConsecutiveGroup.deleteMany({ eventId: event._id });
+      // Only update consecutive groups if we have them (full scrape)
+      if (
+        !scrapedData.quickCheckOnly &&
+        scrapedData.seatingInfo.consecutiveGroups?.length > 0
+      ) {
+        if (
+          this.hasSeatingChanged(url, scrapedData.seatingInfo.consecutiveGroups)
+        ) {
+          await ConsecutiveGroup.deleteMany({ eventId: event._id });
 
-        const groupPromises = consecutiveGroups.map((group) => {
-          return new ConsecutiveGroup({
-            eventId: event._id,
-            section: group.section,
-            row: group.row,
-            seatCount: group.seatCount,
-            seatRange: group.seatRange,
-            seats: group.seats.map((seat) => ({
-              number: seat.number,
-              price: seat.price,
-            })),
-          }).save();
-        });
+          const groupPromises = scrapedData.seatingInfo.consecutiveGroups.map(
+            (group) => {
+              return new ConsecutiveGroup({
+                eventId: event._id,
+                section: group.section,
+                row: group.row,
+                seatCount: group.seatCount,
+                seatRange: group.seatRange,
+                seats: group.seats.map((seat) => ({
+                  number: seat.number,
+                  price: seat.price,
+                })),
+              }).save();
+            }
+          );
 
-        await Promise.all(groupPromises);
-        this.previousConsecutiveGroups.set(url, consecutiveGroups);
+          await Promise.all(groupPromises);
+          this.previousConsecutiveGroups.set(
+            url,
+            scrapedData.seatingInfo.consecutiveGroups
+          );
+        }
       }
 
       return event;
@@ -164,7 +165,7 @@ export class ScrapingManager {
       while (scrapingInfo.status === "active") {
         const iterationStart = Date.now();
         console.log(
-          `Starting scrape iteration ${scrapingInfo.iteration} for: ${url}`
+          `\n=== Starting iteration ${scrapingInfo.iteration} for: ${url} ===`
         );
 
         let retryCount = 0;
@@ -182,7 +183,8 @@ export class ScrapingManager {
               iterationNumber: scrapingInfo.iteration,
               scrapeStartTime: new Date(iterationStart),
               scrapeEndTime: new Date(),
-              scrapeDurationSeconds: (Date.now() - iterationStart) / 1000,
+              scrapeDuration: scrapedData.scrapeDuration,
+              scrapeType: scrapedData.quickCheckOnly ? "quick" : "full",
               totalRunningTimeMinutes: (
                 (Date.now() - scrapingInfo.startTime) /
                 1000 /
@@ -190,14 +192,19 @@ export class ScrapingManager {
               ).toFixed(2),
               ticketStats: {
                 totalTickets: scrapedData.seatingInfo.availableSeats,
-                ticketCountChange: 0,
-                previousTicketCount: 0,
+                previousTicketCount:
+                  scrapingInfo.lastTicketCount ||
+                  scrapedData.seatingInfo.availableSeats,
+                ticketCountChange:
+                  scrapedData.seatingInfo.availableSeats -
+                  (scrapingInfo.lastTicketCount ||
+                    scrapedData.seatingInfo.availableSeats),
               },
             };
 
             const event = await this.saveOrUpdateEvent(
               scrapedData.eventInfo,
-              scrapedData.seatingInfo.consecutiveGroups,
+              scrapedData,
               metadata,
               url
             );
@@ -205,13 +212,20 @@ export class ScrapingManager {
             success = true;
             scrapingInfo.consecutiveErrors = 0;
             scrapingInfo.lastUpdate = new Date();
+            scrapingInfo.lastTicketCount =
+              scrapedData.seatingInfo.availableSeats;
+
+            console.log(`Iteration ${scrapingInfo.iteration} completed:`);
+            console.log(`- Scrape type: ${metadata.scrapeType}`);
+            console.log(`- Duration: ${metadata.scrapeDuration}s`);
             console.log(
-              `Iteration ${
-                scrapingInfo.iteration
-              } completed in ${metadata.scrapeDurationSeconds.toFixed(
-                2
-              )} seconds`
+              `- Available seats: ${metadata.ticketStats.totalTickets}`
             );
+            console.log(
+              `- Seat change: ${metadata.ticketStats.ticketCountChange}`
+            );
+            console.log("===============================\n");
+
             break;
           } catch (error) {
             retryCount++;
@@ -226,6 +240,7 @@ export class ScrapingManager {
               scrapingInfo.consecutiveErrors =
                 (scrapingInfo.consecutiveErrors || 0) + 1;
               if (scrapingInfo.consecutiveErrors >= 5) {
+                console.error("Too many consecutive errors, stopping scraper");
                 await this.stopScraping(url);
                 return;
               }
@@ -337,3 +352,5 @@ export class ScrapingManager {
     }
   }
 }
+
+export default ScrapingManager;
