@@ -282,7 +282,7 @@ class Scraper {
       while (zoomAttempts < maxZoomAttempts) {
         try {
           // Click zoom button multiple times with verification
-          for (let i = 0; i < 5; i++) {
+          for (let i = 0; i < 3; i++) {
             await page.click(SELECTORS.SVG_MAP);
             await page.waitForTimeout(200);
           }
