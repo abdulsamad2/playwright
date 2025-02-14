@@ -16,6 +16,7 @@
     "@types/node": "^22.10.7"
   },
   "dependencies": {
+    "axios": "^1.7.9",
     "chrome-launcher": "^1.1.2",
     "chrome-remote-interface": "^0.33.2",
     "cors": "^2.8.5",
@@ -23,6 +24,7 @@
     "ejs": "^3.1.10",
     "express": "^4.21.2",
     "lodash": "^4.17.21",
+    "moment": "^2.30.1",
     "mongoose": "^8.10.0",
     "morgan": "^1.10.0",
     "pm2": "^5.4.3",
