@@ -1,100 +1,175 @@
-import { Scraper } from "./scraper.js";
-import fs from "fs";
+import SeatsAPIScraper from "./scraper.js";
+import fs from "fs/promises";
+import path from "path";
+import { AttachRowSection } from "./grouping.js";
 
-let previousTicketCount = 0;
+function GenerateNanoPlaces(facets) {
+  // Transform facets into the required format
+  return facets.map((facet) => {
+    const offerId = facet.offers?.[0];
 
-async function main() {
-  const scraper = new Scraper();
-  let startTime = Date.now();
-  let iteration = 1;
+    return {
+      places: [], // Will be populated from map data
+      offerId: offerId,
+      accessibility: [], // Empty array by default
+      descriptionId: "", // Empty string by default
+      attributes: [], // Empty array by default
+      selection: facet.inventoryTypes?.[0] || "primary",
+      count: facet.count,
+      listPriceRange: facet.listPriceRange?.[0] || null,
+    };
+  });
+}
 
-  try {
-    while (true) {
-      const iterationStart = Date.now();
-      console.log(`Starting scrape iteration ${iteration}...`);
+class TicketProcessor {
+  constructor() {
+    this.isRunning = false;
+  }
 
-      const result = await scraper.scrape(
-        "https://www.ticketmaster.com/wicked-touring-los-angeles-california-01-29-2025/event/0B0060CADA2A2E73"
-      );
+  processFacetsData(rawData) {
+    const { eventId, facets, _embedded } = rawData;
 
-      const currentTicketCount = result.tickets?.length || 0;
-      const ticketCountDiff = currentTicketCount - previousTicketCount;
-      previousTicketCount = currentTicketCount;
+    // Process offers
+    const offers =
+      _embedded?.offer?.map((offer) => ({
+        offerId: offer.offerId,
+        name: offer.name,
+        protected: offer.protected,
+        listPrice: offer.listPrice,
+        faceValue: offer.faceValue,
+        charges: offer.charges,
+        ticketTypeUnsoldQualifier: offer.ticketTypeUnsoldQualifier,
+        sellableQuantities: offer.sellableQuantities,
+      })) || [];
 
-      const iterationEnd = Date.now();
-      const iterationDuration = (iterationEnd - iterationStart) / 1000;
+    // Group offers by ticket type
+    const offersByType = offers.reduce((acc, offer) => {
+      if (!acc[offer.name]) {
+        acc[offer.name] = [];
+      }
+      acc[offer.name].push(offer);
+      return acc;
+    }, {});
 
-      const enrichedResult = {
-        ...result,
-        metadata: {
-          lastUpdate: new Date().toLocaleTimeString(),
-          iterationNumber: iteration,
-          scrapeStartTime: new Date(iterationStart).toISOString(),
-          scrapeEndTime: new Date(iterationEnd).toISOString(),
-          scrapeDurationSeconds: iterationDuration,
-          totalRunningTimeMinutes: (
-            (Date.now() - startTime) /
-            1000 /
-            60
-          ).toFixed(2),
-          ticketStats: {
-            totalTickets: currentTicketCount,
-            ticketCountChange: ticketCountDiff,
-            previousTicketCount: previousTicketCount,
-          },
+    // Process facets
+    const processedFacets = facets.map((facet) => {
+      const offerId = facet.offers?.[0];
+      const offer = offers.find((o) => o.offerId === offerId);
+
+      return {
+        inventoryType: facet.inventoryTypes?.[0],
+        offerId: offerId,
+        count: facet.count,
+        price: facet.listPriceRange?.[0]?.min,
+        ticketType: offer?.name,
+        protected: offer?.protected || false,
+      };
+    });
+
+    // Summary statistics
+    const summary = {
+      eventId,
+      totalInventory: facets.reduce((sum, f) => sum + f.count, 0),
+      priceRange: {
+        min: Math.min(
+          ...facets.map((f) => f.listPriceRange?.[0]?.min || Infinity)
+        ),
+        max: Math.max(
+          ...facets.map((f) => f.listPriceRange?.[0]?.max || -Infinity)
+        ),
+      },
+      ticketTypes: Object.keys(offersByType),
+      offerCount: offers.length,
+      totalOffers: offers.reduce((sum, o) => sum + (o.protected ? 0 : 1), 0),
+    };
+
+    return {
+      processedFacets,
+      offers,
+      summary,
+    };
+  }
+
+  async processAndSaveData(rawData, outputDir = "./processed_data") {
+    try {
+      // Create output directory if it doesn't exist
+      await fs.mkdir(outputDir, { recursive: true });
+
+      // Process the data
+      const processedData = this.processFacetsData(rawData);
+
+      // Generate nano places
+      const nanoPlaces = GenerateNanoPlaces(rawData.facets);
+
+      // Prepare data for AttachRowSection
+      const attachData = {
+        processedData,
+        nanoPlaces,
+        event: {
+          eventId: rawData.eventId,
+          eventMappingId: rawData.eventId,
+          listCostPercentage: 0,
+          inHandDate: new Date().toISOString(),
         },
       };
 
-      console.log("Scraping result:", enrichedResult);
-      console.log(`Total tickets found: ${currentTicketCount}`);
-      console.log(
-        `Ticket count change: ${
-          ticketCountDiff > 0 ? "+" + ticketCountDiff : ticketCountDiff
-        }`
+      // Save raw data
+      const timestamp = Date.now();
+      const rawFilename = `raw_${rawData.eventId}_${timestamp}.json`;
+      await fs.writeFile(
+        path.join(outputDir, rawFilename),
+        JSON.stringify(rawData, null, 2)
       );
 
-      fs.writeFileSync("result.json", JSON.stringify(enrichedResult, null, 2));
-
-      console.log(
-        `Iteration ${iteration} completed in ${iterationDuration.toFixed(
-          2
-        )} seconds`
-      );
-      console.log(
-        `Total running time: ${((Date.now() - startTime) / 1000 / 60).toFixed(
-          2
-        )} minutes`
+      // Save processed data
+      const processedFilename = `processed_${rawData.eventId}_${timestamp}.json`;
+      await fs.writeFile(
+        path.join(outputDir, processedFilename),
+        JSON.stringify(processedData, null, 2)
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      iteration++;
-    }
-  } catch (error) {
-    const errorTime = new Date().toISOString();
-    console.error(`Scraping failed at ${errorTime}:`, error);
-
-    fs.writeFileSync(
-      "error_log.json",
-      JSON.stringify(
-        {
-          error: error.message,
-          stack: error.stack,
-          timestamp: errorTime,
-          totalRunTime:
-            ((Date.now() - startTime) / 1000 / 60).toFixed(2) + " minutes",
-          lastIteration: iteration,
-          lastKnownTicketCount: previousTicketCount,
+      return {
+        attachData,
+        processedData,
+        filenames: {
+          raw: rawFilename,
+          processed: processedFilename,
         },
-        null,
-        2
-      )
-    );
-  } finally {
-    const endTime = Date.now();
-    const totalDuration = ((endTime - startTime) / 1000 / 60).toFixed(2);
-    console.log(`Scraper closed after ${totalDuration} minutes of running`);
-    await scraper.close();
+      };
+    } catch (error) {
+      console.error("Error processing data:", error);
+      throw error;
+    }
+  }
+
+  formatStatistics(processedData) {
+    const { summary } = processedData;
+
+    return {
+      eventId: summary.eventId,
+      inventory: {
+        total: summary.totalInventory,
+        byType: summary.ticketTypes.map((type) => ({
+          type,
+          count: processedData.processedFacets
+            .filter((f) => f.ticketType === type)
+            .reduce((sum, f) => sum + f.count, 0),
+        })),
+      },
+      pricing: {
+        range: summary.priceRange,
+        averagePrice:
+          processedData.processedFacets.reduce(
+            (sum, f) => sum + f.price * f.count,
+            0
+          ) / summary.totalInventory,
+      },
+      offers: {
+        total: summary.offerCount,
+        active: summary.totalOffers,
+      },
+    };
   }
 }
 
-main();
+export default TicketProcessor;

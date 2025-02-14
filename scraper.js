@@ -33,7 +33,7 @@ class SeatsAPIScraper {
     const proxy = this.getNextProxy();
 
     this.browser = await firefox.launch({
-      headless: false,
+      headless: true,
       proxy: {
         server: `${proxy.host}:${proxy.port}`,
         username: proxy.username,

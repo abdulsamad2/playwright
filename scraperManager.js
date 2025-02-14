@@ -1,31 +1,118 @@
 import SeatsAPIScraper from "./scraper.js";
 import fs from "fs/promises";
 import path from "path";
-import { processAndGroupSeats } from "./grouping.js";
-class SimpleScrapingManager {
+import {
+  AttachRowSection,
+  GetMapSeats,
+  CreateConsicutiveSeats,
+  breakArray,
+  CreateInventoryAndLine,
+} from "./seatBatch.js";
+
+class FormattedScrapingManager {
   constructor() {
     this.scraper = null;
     this.isRunning = false;
   }
 
-  async saveSeatsData(eventId, seatsData) {
+  async processAndFormatData(seatsData, event) {
+    try {
+      console.log("Processing data with map data and facets...");
+
+      // Extract the map data from seatsData.mapData
+      const mapData = seatsData.mapData;
+
+      // Get available seats from map
+      const allAvailableSeats = GetMapSeats(mapData);
+      console.log("Available seats from map:", allAvailableSeats?.length || 0);
+
+      // Process facets data
+      const facetsWithPlaces = seatsData.facets.map((facet) => {
+        return {
+          ...facet,
+          places: [], // This will be populated with actual seat IDs
+          offerId: facet.offers[0],
+          accessibility: [],
+          descriptionId: "",
+          attributes: [],
+          selection: facet.inventoryTypes[0],
+        };
+      });
+
+      // Get the offers
+      const offers = seatsData._embedded?.offer || [];
+      const descriptions = seatsData._embedded?.description || [];
+
+      // Process using AttachRowSection
+      const formattedResult = AttachRowSection(
+        facetsWithPlaces,
+        mapData,
+        offers,
+        {
+          eventId: event.eventId,
+          eventMappingId: event.eventId,
+          listCostPercentage: 0,
+          inHandDate: new Date().toISOString(),
+        },
+        descriptions
+      );
+
+      console.log("Formatted Result:", {
+        totalResults: formattedResult?.length || 0,
+        totalOffers: offers.length,
+        mapDataAvailable: !!mapData,
+      });
+
+      return {
+        formatted: formattedResult,
+        summary: {
+          eventId: event.eventId,
+          timestamp: new Date().toISOString(),
+          totalInventory: formattedResult?.length || 0,
+          offers: offers.length,
+          ticketTypes: [...new Set(offers.map((o) => o.name))],
+          priceRange: {
+            min: Math.min(...offers.map((o) => o.faceValue)),
+            max: Math.max(...offers.map((o) => o.faceValue)),
+          },
+        },
+      };
+    } catch (error) {
+      console.error("Error processing data:", error);
+      throw error;
+    }
+  }
+
+  async saveSeatsData(event, seatsData) {
     try {
       // Create directory if it doesn't exist
       const dataDir = "./seats_data";
       await fs.mkdir(dataDir, { recursive: true });
 
-      // Create filename with timestamp
-      const fileName = `seats_${eventId}_${Date.now()}.json`;
+      const timestamp = Date.now();
+      const rawFileName = `raw_seats_${event.eventId}_${timestamp}.json`;
+      const formattedFileName = `formatted_seats_${event.eventId}_${timestamp}.json`;
 
-      // Save to file
+      // Save raw data
       await fs.writeFile(
-        path.join(dataDir, fileName),
+        path.join(dataDir, rawFileName),
         JSON.stringify(seatsData, null, 2)
       );
 
-      console.log(`Data saved to ${fileName}`);
+      // Process and save formatted data
+      const formattedData = await this.processAndFormatData(seatsData, event);
+      await fs.writeFile(
+        path.join(dataDir, formattedFileName),
+        JSON.stringify(formattedData, null, 2)
+      );
+
+      console.log(`Raw data saved to ${rawFileName}`);
+      console.log(`Formatted data saved to ${formattedFileName}`);
+
+      return formattedData;
     } catch (error) {
       console.error("Error saving data:", error);
+      throw error;
     }
   }
 
@@ -33,9 +120,14 @@ class SimpleScrapingManager {
     try {
       this.isRunning = true;
       this.scraper = new SeatsAPIScraper();
-  
 
       let iteration = 1;
+      const event = {
+        eventId,
+        eventMappingId: eventId,
+        listCostPercentage: 0,
+        inHandDate: new Date().toISOString(),
+      };
 
       while (this.isRunning) {
         try {
@@ -43,27 +135,35 @@ class SimpleScrapingManager {
             `\n=== Starting iteration ${iteration} for event ${eventId} ===`
           );
 
-          // Scrape seats data
+          // Get both map and facets data
           const seatsData = await this.scraper.scrape(eventId);
+          console.log("Got seats data, processing...");
 
-          // // Save the data
-          // const result = processAndGroupSeats(seatsData);
+          // Save and process data
+          const processedData = await this.saveSeatsData(event, seatsData);
 
-          await this.saveSeatsData(eventId, seatsData);
-
-          console.log(`Iteration ${iteration} completed successfully`);
+          // Log summary
+          console.log("\nIteration Summary:");
+          console.log(`Event ID: ${processedData.summary.eventId}`);
+          console.log(
+            `Total Inventory: ${processedData.summary.totalInventory}`
+          );
+          console.log(`Available Offers: ${processedData.summary.offers}`);
+          console.log(
+            `Price Range: $${processedData.summary.priceRange.min} - $${processedData.summary.priceRange.max}`
+          );
+          console.log(
+            `Ticket Types: ${processedData.summary.ticketTypes.join(", ")}`
+          );
+          console.log(`Timestamp: ${processedData.summary.timestamp}`);
 
           // Refresh headers after every 6 iterations
           if (iteration % 6 === 0) {
-            console.log("Refreshing headers before continuing...");
-
-
+            console.log("Refreshing headers...");
             await this.scraper.refreshHeaders(eventId);
             console.log("Headers refreshed successfully.");
             iteration = 0;
-
-            // Ensure scraping waits after headers refresh before continuing
-            await new Promise((resolve) => setTimeout(resolve, 2000)); // Small delay
+            await new Promise((resolve) => setTimeout(resolve, 2000));
           }
 
           // Wait before next iteration
@@ -72,8 +172,6 @@ class SimpleScrapingManager {
           iteration++;
         } catch (error) {
           console.error(`Error in iteration ${iteration}:`, error);
-
-          // If an error occurs, wait 10 seconds before retrying
           await new Promise((resolve) => setTimeout(resolve, 10000));
         }
       }
@@ -92,14 +190,13 @@ class SimpleScrapingManager {
   }
 }
 
-// Usage example
-const manager = new SimpleScrapingManager();
+  const manager = new FormattedScrapingManager();
+    const eventId = "170061560CA4641D";  // Your event ID
+    
+    try {
+        await manager.startScraping(eventId);
+    } catch (error) {
+        console.error('Error:', error);
+    }
 
-// Start scraping for a specific event
-const eventId = "170061560CA4641D"; // Example event ID
-
-try {
-  await manager.startScraping(eventId);
-} catch (error) {
-  console.error("Error in main:", error);
-}
+export default FormattedScrapingManager;
