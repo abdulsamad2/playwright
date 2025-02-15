@@ -5,12 +5,12 @@ const axios = require("axios");
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
 import { firefox } from "playwright";
-import proxyArray from "./helpers/proxy.js";
-import { AttachRowSection } from "./helpers/seatBatch.js";
-import GenerateNanoPlaces from "./helpers/seats.js";
-// import { postEventLines } from "../API.js";
-// import { SendMail } from "../helpers/mailer.js";
-// import failedProxies from "../settings/failedProxy.js";
+import proxyArray from "../settings/proxy.js";
+import { AttachRowSection } from "./seatBatch.js";
+import GenerateNanoPlaces from "./seats.js";
+import { postEventLines } from "../API.js";
+import { SendMail } from "../helpers/mailer.js";
+import failedProxies from "../settings/failedProxy.js";
 import crypto from "crypto";
 
 // Browser Fingerprint Class
@@ -317,10 +317,26 @@ const ScrapeEvent = async (event) => {
       console.log("API requests completed successfully");
 
       let dataGet = GenerateNanoPlaces(DataFacets?.facets);
-      
-      // Apply the selection filter
-      // dataGet = dataGet.filter((x) => x?.selection && x?.selection != "resale");
-      //  console.log("dataGet after accessibility filter:", dataGet);
+        fs.writeFile(
+          fileCounter + "dataGet.json",
+          JSON.stringify(dataGet),
+          "utf8",
+          async function (err) {
+            if (err) {
+              console.log(
+                "An error occurred while writing JSON Object to File."
+              );
+            }
+            console.log(
+              fileCounter + "output.json",
+              "JSON file has been saved."
+            );
+            fileCounter += 1;
+          }
+        );
+     // Apply the selection filter
+    // dataGet = dataGet.filter((x) => x?.selection && x?.selection != "resale");
+    //  console.log("dataGet after accessibility filter:", dataGet);
       // dataGet = dataGet.filter(
       //   (x) =>
       //     !(
@@ -331,9 +347,39 @@ const ScrapeEvent = async (event) => {
       //       x.accessibility.includes("mobility")
       //     )
       // );
-     
+console.log("DataGet structure:", {
+  length: dataGet?.length,
+  firstItem: dataGet?.[0],
+  samplePlaces: dataGet?.[0]?.places,
+});
 
-     
+console.log("DataMap structure:", {
+  type: typeof DataMap,
+  pages: DataMap?.pages,
+  segments: DataMap?.pages?.[0]?.segments,
+});
+
+console.log("Offers:", {
+  exists: !!DataFacets?._embedded?.offer,
+  sample: DataFacets?._embedded?.offer?.[0],
+});
+
+console.log("Event:", event);
+console.log("Description:", DataFacets?._embedded?.description);
+
+
+  fs.writeFile(
+    fileCounter + "DataMap.json",
+    JSON.stringify(DataMap),
+    "utf8",
+    async function (err) {
+      if (err) {
+        console.log("An error occurred while writing JSON Object to File.");
+      }
+      console.log(fileCounter + "output.json", "JSON file has been saved.");
+      fileCounter += 1;
+    }
+  );
       let finalData = AttachRowSection(
         dataGet,
         DataMap,
@@ -341,6 +387,9 @@ const ScrapeEvent = async (event) => {
         event,
         DataFacets?._embedded?.description
       );
+console.log("finalData:", finalData);
+
+
 
       // Save the data
       fs.writeFile(
@@ -359,7 +408,7 @@ const ScrapeEvent = async (event) => {
       try {
         console.log("Sending data to backend");
         const { data, status } = await postEventLines(finalData);
-        console.log(data, status);
+        console.log(data,status)
         // if (status != 200) {
         //   SendMail(eventId, "Failed to send data to backend");
         //   console.log(status, "failed");

@@ -159,7 +159,7 @@ class Cluster {
             lowSeat: 0,
             highSeat: 0,
             count: 0,
-            accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
+            // accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
             descriptionId:x.description,
             attributes:x.attributes
   
