@@ -1,5 +1,4 @@
 import { createRequire } from "module";
-import { createHash } from "crypto";
 const require = createRequire(import.meta.url);
 const axios = require("axios");
 const { HttpsProxyAgent } = require("https-proxy-agent");
@@ -8,93 +7,109 @@ import { firefox } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
-// import { postEventLines } from "../API.js";
-// import { SendMail } from "../helpers/mailer.js";
-// import failedProxies from "../settings/failedProxy.js";
 import crypto from "crypto";
+import { BrowserFingerprint } from "./browserFingerprint.js";
 
-// Browser Fingerprint Class
-export class BrowserFingerprint {
-  static platforms = [
-    { name: "Windows", version: "10", arch: "x64" },
-    { name: "Macintosh", version: "10_15_7", arch: "Intel" },
-  ];
-
-  static browsers = [
-    { name: "Chrome", version: "120.0.0.0" },
-    { name: "Firefox", version: "121.0" },
-    { name: "Safari", version: "17.0" },
-  ];
-
-  static languages = ["en-US", "en-GB", "en-CA"];
-
-  static screens = [
-    { width: 1920, height: 1080 },
-    { width: 2560, height: 1440 },
-    { width: 1440, height: 900 },
-  ];
-
-  static generate() {
-    const platform =
-      this.platforms[Math.floor(Math.random() * this.platforms.length)];
-    const browser =
-      this.browsers[Math.floor(Math.random() * this.browsers.length)];
-    const language =
-      this.languages[Math.floor(Math.random() * this.languages.length)];
-    const screen =
-      this.screens[Math.floor(Math.random() * this.screens.length)];
-
-    return {
-      platform,
-      browser,
-      language,
-      screen,
-      colorDepth: 24,
-      deviceMemory: 8,
-      hardwareConcurrency: 8,
-      timezone: "America/New_York",
-      touchPoints: 0,
-      devicePixelRatio: 1,
-      sessionId: createHash("sha256")
-        .update(Math.random().toString())
-        .digest("hex"),
-    };
-  }
-
-  static generateUserAgent(fingerprint) {
-    const { platform, browser } = fingerprint;
-    if (browser.name === "Chrome") {
-      return `Mozilla/5.0 (${
-        platform.name === "Windows"
-          ? "Windows NT 10.0; Win64; x64"
-          : "Macintosh; Intel Mac OS X " + platform.version
-      }) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${
-        browser.version
-      } Safari/537.36`;
-    }
-    return "";
-  }
-}
-
-let fileCounter = 0;
-
-// Browser and header state
 let browser = null;
 let context = null;
-let capturedHeaders = null;
-let capturedCookies = null;
+let capturedState = {
+  headers: null,
+  cookies: null,
+  fingerprint: null,
+  lastRefresh: null,
+  proxy: null,
+};
 
 function generateCorrelationId() {
   return crypto.randomUUID();
 }
 
+async function handleTicketmasterChallenge(page) {
+  const CHALLENGE_TIMEOUT = 10000;
+  const startTime = Date.now();
+
+  try {
+    const challengePresent = await page.evaluate(() => {
+      return document.body.textContent.includes(
+        "Your Browsing Activity Has Been Paused"
+      );
+    });
+
+    if (challengePresent) {
+      console.log("Detected Ticketmaster challenge, attempting resolution...");
+      await page.waitForTimeout(1000 + Math.random() * 1000);
+
+      const viewportSize = page.viewportSize();
+      if (viewportSize) {
+        await page.mouse.move(
+          Math.floor(Math.random() * viewportSize.width),
+          Math.floor(Math.random() * viewportSize.height),
+          { steps: 5 }
+        );
+      }
+
+      const buttons = await page.$$("button");
+      let buttonClicked = false;
+
+      for (const button of buttons) {
+        if (Date.now() - startTime > CHALLENGE_TIMEOUT) {
+          throw new Error("Challenge timeout");
+        }
+
+        const text = await button.textContent();
+        if (
+          text.toLowerCase().includes("continue") ||
+          text.toLowerCase().includes("verify")
+        ) {
+          await button.click();
+          buttonClicked = true;
+          break;
+        }
+      }
+
+      if (!buttonClicked) {
+        throw new Error("Could not find challenge button");
+      }
+
+      await page.waitForTimeout(2000);
+      const stillChallenged = await page.evaluate(() => {
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
+      });
+
+      if (stillChallenged) {
+        throw new Error("Challenge not resolved");
+      }
+    }
+    return true;
+  } catch (error) {
+    console.error("Challenge handling failed:", error.message);
+    capturedState = {
+      headers: null,
+      cookies: null,
+      fingerprint: null,
+      lastRefresh: null,
+      proxy: null,
+    };
+    throw error;
+  }
+}
+
 async function initBrowser(proxy) {
-  // Generate fingerprint
+  if (!proxy || !proxy.proxy) {
+    const { proxy: newProxy } = GetProxy();
+    proxy = newProxy;
+  }
+
   const fingerprint = BrowserFingerprint.generate();
   const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
 
   try {
-    // Format proxy URL correctly
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
     browser = await firefox.launch({
@@ -107,11 +122,8 @@ async function initBrowser(proxy) {
     });
 
     context = await browser.newContext({
-      viewport: {
-        width: fingerprint.screen.width,
-        height: fingerprint.screen.height,
-      },
-      userAgent: userAgent,
+      viewport: fingerprint.screen,
+      userAgent,
       locale: fingerprint.language,
       deviceScaleFactor: fingerprint.devicePixelRatio,
       colorScheme: "light",
@@ -129,58 +141,105 @@ async function captureApiHeaders(page, eventId, fingerprint) {
   return new Promise((resolve, reject) => {
     const apiPattern = new RegExp(`/api/ismds/event/${eventId}/facets.*`);
     let captured = false;
+    let timeoutId;
 
-    page.on("request", async (request) => {
+    const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      page.removeListener("request", requestHandler);
+    };
+
+    const requestHandler = async (request) => {
       const url = request.url();
       if (apiPattern.test(url) && !captured) {
         captured = true;
-        const headers = request.headers();
-        const cookies = await context.cookies();
-        resolve({ headers, cookies, fingerprint });
+        cleanup();
+        try {
+          const headers = request.headers();
+          const cookies = await context.cookies();
+          resolve({ headers, cookies, fingerprint });
+        } catch (error) {
+          reject(error);
+        }
       }
-    });
+    };
 
-    setTimeout(() => {
-      if (!captured) {
-        reject(new Error("Timeout waiting for API request"));
-      }
-    }, 600000);
+    page.on("request", requestHandler);
+
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timeout waiting for API request"));
+    }, 30000);
   });
 }
 
-async function getCapturedData(eventId, proxy) {
-  console.log("Getting fresh headers and cookies...");
-  try {
-    // Always create a new browser instance
-    if (browser) {
-      await browser.close().catch(() => {});
-      browser = null;
-      context = null;
-    }
+async function refreshHeaders(eventId, proxy) {
+  if (!proxy || !proxy.proxy) {
+    const { proxy: newProxy } = GetProxy();
+    proxy = newProxy;
+  }
 
+  try {
     const { context: newContext, fingerprint } = await initBrowser(proxy);
     context = newContext;
-
-    // Verify browser is properly initialized
-    if (!context) {
-      throw new Error("Failed to initialize browser context");
-    }
 
     const page = await context.newPage();
     const url = `https://www.ticketmaster.com/event/${eventId}`;
 
-    await page.goto(url, { waitUntil: "networkidle" });
+    await page.goto(url, {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
+
+    await handleTicketmasterChallenge(page);
+
     const data = await captureApiHeaders(page, eventId, fingerprint);
-    await page.close();
+    await page.close().catch(() => {});
 
-    capturedHeaders = data.headers;
-    capturedCookies = data.cookies;
+    capturedState = {
+      headers: data.headers,
+      cookies: data.cookies,
+      fingerprint: fingerprint,
+      lastRefresh: Date.now(),
+      proxy: proxy,
+    };
 
-    return data;
+    return capturedState;
   } catch (error) {
-    console.error("Error capturing headers:", error);
+    capturedState = {
+      headers: null,
+      cookies: null,
+      fingerprint: null,
+      lastRefresh: null,
+      proxy: null,
+    };
+    console.error("Error in refreshHeaders:", error);
     throw error;
   }
+}
+
+async function getCapturedData(eventId, proxy, forceRefresh = false) {
+  const currentTime = Date.now();
+  const refreshInterval = 15 * 60 * 1000; // 15 minutes
+
+  if (
+    !capturedState.headers ||
+    !capturedState.cookies ||
+    !capturedState.fingerprint ||
+    !capturedState.lastRefresh ||
+    !capturedState.proxy ||
+    currentTime - capturedState.lastRefresh > refreshInterval ||
+    forceRefresh
+  ) {
+    console.log("Getting fresh headers and cookies...");
+    try {
+      return await refreshHeaders(eventId, proxy);
+    } catch (error) {
+      console.error("Error getting captured data:", error);
+      throw error;
+    }
+  }
+
+  return capturedState;
 }
 
 const GetData = async (headers, proxyAgent, url, eventId) => {
@@ -189,42 +248,29 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
       let abortController = new AbortController();
       const timeout = setTimeout(() => {
         abortController.abort();
-        failedProxies.failedProxies.push(proxyAgent?.proxy);
-        if (failedProxies.failedProxies.length >= 50) {
-          failedProxies.failedProxies = [];
-          SendMail(eventId, failedProxies.failedProxies);
-        }
-        console.log("Aborted");
+        console.log("Request aborted due to timeout");
         console.log(eventId, "eventId");
         return resolve(false);
-      }, 5000);
+      }, 10000);
 
-      const { data, status } = await axios
-        .get(
-          url,
-          {
-            method: "GET",
-            httpsAgent: proxyAgent,
-            headers: headers,
-            timeout: 5000,
+      try {
+        const response = await axios.get(url, {
+          httpsAgent: proxyAgent,
+          headers: {
+            ...headers,
+            "Accept-Encoding": "gzip, deflate, br",
+            Connection: "keep-alive",
           },
-          { signal: abortController.signal }
-        )
-        .then((x) => {
-          clearTimeout(timeout);
-          return x;
-        })
-        .catch((e) => {
-          return e;
+          timeout: 10000,
+          signal: abortController.signal,
+          validateStatus: (status) => status === 200,
         });
 
-      if (status) {
-        if (status == 200) {
-          return resolve(data);
-        } else {
-          return resolve(false);
-        }
-      } else {
+        clearTimeout(timeout);
+        return resolve(response.data);
+      } catch (error) {
+        clearTimeout(timeout);
+        console.log(`Request failed: ${error.message}`);
         return resolve(false);
       }
     } catch (e) {
@@ -239,13 +285,11 @@ const GetProxy = () => {
   const randomProxy = Math.floor(Math.random() * _proxy.length);
   _proxy = _proxy[randomProxy];
 
-  // Validate proxy format
   if (!_proxy || !_proxy.proxy || !_proxy.username || !_proxy.password) {
     throw new Error("Invalid proxy configuration");
   }
 
   try {
-    // Validate proxy URL format
     const proxyUrl = new URL(`http://${_proxy.proxy}`);
     let proxyURl = `http://${_proxy.username}:${_proxy.password}@${
       proxyUrl.hostname
@@ -263,7 +307,6 @@ const ScrapeEvent = async (event) => {
   const correlationId = generateCorrelationId();
 
   try {
-    // First get the headers and cookies with fingerprint
     const capturedData = await getCapturedData(event?.eventId, proxy);
     const cookieString = capturedData.cookies
       .map((cookie) => `${cookie.name}=${cookie.value}`)
@@ -273,7 +316,6 @@ const ScrapeEvent = async (event) => {
       capturedData.fingerprint
     );
 
-    // Construct headers using captured data and fingerprint
     const MapHeader = {
       "User-Agent": userAgent,
       Accept: `*/*`,
@@ -315,25 +357,7 @@ const ScrapeEvent = async (event) => {
 
     if (DataFacets && DataMap) {
       console.log("API requests completed successfully");
-
       let dataGet = GenerateNanoPlaces(DataFacets?.facets);
-      
-      // Apply the selection filter
-      // dataGet = dataGet.filter((x) => x?.selection && x?.selection != "resale");
-      //  console.log("dataGet after accessibility filter:", dataGet);
-      // dataGet = dataGet.filter(
-      //   (x) =>
-      //     !(
-      //       x.accessibility.includes("companion") ||
-      //       x.accessibility.includes("sight") ||
-      //       x.accessibility.includes("hearing") ||
-      //       x.accessibility.includes("wheelchair") ||
-      //       x.accessibility.includes("mobility")
-      //     )
-      // );
-     
-
-     
       let finalData = AttachRowSection(
         dataGet,
         DataMap,
@@ -341,37 +365,7 @@ const ScrapeEvent = async (event) => {
         event,
         DataFacets?._embedded?.description
       );
-
-      // Save the data
-      fs.writeFile(
-        fileCounter + "output.json",
-        JSON.stringify(finalData),
-        "utf8",
-        async function (err) {
-          if (err) {
-            console.log("An error occurred while writing JSON Object to File.");
-          }
-          console.log(fileCounter + "output.json", "JSON file has been saved.");
-          fileCounter += 1;
-        }
-      );
-
-      try {
-        console.log("Sending data to backend");
-        const { data, status } = await postEventLines(finalData);
-        console.log(data, status);
-        // if (status != 200) {
-        //   SendMail(eventId, "Failed to send data to backend");
-        //   console.log(status, "failed");
-        // }
-        console.log("Cycle completed");
-
-        // Cleanup
-        return true;
-      } catch (e) {
-        console.error("Error posting event lines:", e);
-        return false;
-      }
+      return finalData;
     } else {
       console.log("Failed to get data from APIs");
       return false;
@@ -388,16 +382,4 @@ const ScrapeEvent = async (event) => {
   }
 };
 
-// Main execution
-async function main() {
-  try {
-    const result = await ScrapeEvent({
-      eventId: "0A00614FC8B22987",
-    });
-    console.log("Scraping result:", result);
-  } catch (error) {
-    console.error("Scraping error:", error);
-  }
-}
-
-main();
+export { ScrapeEvent, refreshHeaders };
