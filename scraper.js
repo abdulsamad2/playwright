@@ -9,6 +9,7 @@ import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
+import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 
 let browser = null;
 let context = null;
@@ -111,7 +112,7 @@ async function initBrowser(proxy) {
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
     browser = await firefox.launch({
-      headless: true,
+      headless: false,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
@@ -148,6 +149,7 @@ async function captureCookies(page, fingerprint) {
         );
       });
 
+<<<<<<< HEAD
       if (challengePresent) {
         console.log(
           `Attempt ${attempt}: Challenge detected during cookie capture`
@@ -162,6 +164,19 @@ async function captureCookies(page, fingerprint) {
           }
           await page.waitForTimeout(RETRY_DELAY);
           continue;
+=======
+    const requestHandler = async (request) => {
+      const url = request.url();
+      if (apiPattern.test(url) && !captured) {
+        captured = true;
+        cleanup();
+        try {
+          const headers = request.headers();
+          const cookies = await context.cookies();
+          resolve({ headers, cookies, fingerprint });
+        } catch (error) {
+          reject(error);
+>>>>>>> parent of 8dc9b46 (update)
         }
       }
 
@@ -232,7 +247,7 @@ async function refreshHeaders(eventId, proxy) {
       waitUntil: "networkidle",
       timeout: 30000,
     });
-
+  await simulateHumanBehavior(page)
     const data = await captureCookies(page, fingerprint);
     await page.close().catch(() => {});
 

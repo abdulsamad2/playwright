@@ -3,9 +3,10 @@ import { firefox } from "playwright";
 
 export class BrowserFingerprint {
   static platforms = [
-    { name: "Windows", version: "10", arch: "x64" },
-    { name: "Macintosh", version: "10_15_7", arch: "Intel" },
-    { name: "Macintosh", version: "14_1", arch: "arm64" }, // For M1/M2 Macs
+    { name: "Android", version: "13.0", arch: "aarch64" },
+    { name: "Android", version: "14.0", arch: "aarch64" },
+    { name: "iPhone", version: "17_1", arch: "arm64" },
+    { name: "iPad", version: "17_1", arch: "arm64" },
   ];
 
   static browsers = [
@@ -17,43 +18,68 @@ export class BrowserFingerprint {
   static languages = ["en-US", "en-GB", "en-CA"];
 
   static devices = [
-    // Modern Laptops
+    // Android Phones
     {
-      name: 'MacBook Pro 16"',
-      viewport: { width: 1728, height: 1117 },
+      name: "Pixel 8 Pro",
+      viewport: { width: 412, height: 915 },
+      deviceScaleFactor: 3.5,
+      isMobile: true,
+    },
+    {
+      name: "Samsung Galaxy S24 Ultra",
+      viewport: { width: 412, height: 915 },
+      deviceScaleFactor: 3.5,
+      isMobile: true,
+    },
+    {
+      name: "Samsung Galaxy S23",
+      viewport: { width: 393, height: 851 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+    },
+    {
+      name: "Samsung Galaxy A54",
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2.75,
+      isMobile: true,
+    },
+    // iOS Phones
+    {
+      name: "iPhone 15 Pro Max",
+      viewport: { width: 430, height: 932 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+    },
+    {
+      name: "iPhone 14",
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+    },
+    {
+      name: "iPhone 13 Mini",
+      viewport: { width: 375, height: 812 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+    },
+    // Tablets
+    {
+      name: "Samsung Galaxy Tab S9",
+      viewport: { width: 800, height: 1280 },
       deviceScaleFactor: 2,
-      isMobile: false,
+      isMobile: true,
     },
     {
-      name: 'MacBook Pro 14"',
-      viewport: { width: 1512, height: 982 },
+      name: 'iPad Pro 12.9" (6th Gen)',
+      viewport: { width: 1024, height: 1366 },
       deviceScaleFactor: 2,
-      isMobile: false,
+      isMobile: true,
     },
     {
-      name: "MacBook Air M2",
-      viewport: { width: 1512, height: 982 },
+      name: "iPad Air (5th Gen)",
+      viewport: { width: 820, height: 1180 },
       deviceScaleFactor: 2,
-      isMobile: false,
-    },
-    {
-      name: "MacBook Air M1",
-      viewport: { width: 1440, height: 900 },
-      deviceScaleFactor: 2,
-      isMobile: false,
-    },
-    // Standard Resolutions
-    {
-      name: "Standard HD",
-      viewport: { width: 1920, height: 1080 },
-      deviceScaleFactor: 1,
-      isMobile: false,
-    },
-    {
-      name: "Standard QHD",
-      viewport: { width: 2560, height: 1440 },
-      deviceScaleFactor: 1,
-      isMobile: false,
+      isMobile: true,
     },
   ];
 
@@ -67,9 +93,9 @@ export class BrowserFingerprint {
     const device =
       this.devices[Math.floor(Math.random() * this.devices.length)];
 
-    // Add some randomization to memory and CPU cores
-    const memoryOptions = [4, 8, 16, 32];
-    const cpuOptions = [4, 6, 8, 10, 12];
+    // Mobile-specific memory and CPU configurations
+    const memoryOptions = [2, 4, 6, 8];
+    const cpuOptions = [4, 6, 8];
 
     return {
       platform,
@@ -77,13 +103,13 @@ export class BrowserFingerprint {
       language,
       device,
       screen: device.viewport,
-      colorDepth: 24,
+      colorDepth: 32,
       deviceMemory:
         memoryOptions[Math.floor(Math.random() * memoryOptions.length)],
       hardwareConcurrency:
         cpuOptions[Math.floor(Math.random() * cpuOptions.length)],
       timezone: "America/New_York",
-      touchPoints: 0,
+      touchPoints: 5,
       devicePixelRatio: device.deviceScaleFactor,
       sessionId: createHash("sha256")
         .update(Math.random().toString())
@@ -92,42 +118,26 @@ export class BrowserFingerprint {
   }
 
   static generateUserAgent(fingerprint) {
-    const { platform, browser } = fingerprint;
+    const { platform, browser, device } = fingerprint;
 
+    // Mobile-specific user agent strings
     switch (browser.name.toLowerCase()) {
       case "chrome":
-        return `Mozilla/5.0 (${
-          platform.name === "Windows"
-            ? "Windows NT 10.0; Win64; x64"
-            : "Macintosh; " +
-              (platform.arch === "arm64" ? "ARM " : "") +
-              "Intel Mac OS X " +
-              platform.version
-        }) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${
-          browser.version
-        } Safari/537.36`;
+        if (platform.name === "Android") {
+          return `Mozilla/5.0 (Linux; Android ${platform.version}; ${device.name}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version} Mobile Safari/537.36`;
+        } else {
+          return `Mozilla/5.0 (${platform.name}; CPU ${platform.name} OS ${platform.version} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/${browser.version} Mobile/15E148 Safari/604.1`;
+        }
 
       case "firefox":
-        return `Mozilla/5.0 (${
-          platform.name === "Windows"
-            ? "Windows NT 10.0; Win64; x64"
-            : "Macintosh; " +
-              (platform.arch === "arm64" ? "ARM " : "") +
-              "Intel Mac OS X " +
-              platform.version
-        }; rv:109.0) Gecko/20100101 Firefox/${browser.version}`;
+        if (platform.name === "Android") {
+          return `Mozilla/5.0 (Android ${platform.version}; Mobile; rv:${browser.version}) Gecko/${browser.version} Firefox/${browser.version}`;
+        } else {
+          return `Mozilla/5.0 (${platform.name}; CPU ${platform.name} OS ${platform.version} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/${browser.version} Mobile/15E148 Safari/605.1.15`;
+        }
 
       case "safari":
-        return `Mozilla/5.0 (${
-          platform.name === "Windows"
-            ? "Windows NT 10.0; Win64; x64"
-            : "Macintosh; " +
-              (platform.arch === "arm64" ? "ARM " : "") +
-              "Intel Mac OS X " +
-              platform.version
-        }) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${
-          browser.version
-        } Safari/605.1.15`;
+        return `Mozilla/5.0 (${platform.name}; CPU ${platform.name} OS ${platform.version} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${browser.version} Mobile/15E148 Safari/604.1`;
 
       default:
         return "";
@@ -144,6 +154,8 @@ export class BrowserFingerprint {
       deviceScaleFactor: fingerprint.device.deviceScaleFactor,
       locale: fingerprint.language,
       timezone: fingerprint.timezone,
+      isMobile: true,
+      hasTouch: true,
     };
   }
 }
@@ -165,6 +177,7 @@ export function getBrowserLaunchOptions(config, proxy) {
       "--disable-gpu",
       "--disable-software-rasterizer",
       `--window-size=${config.viewport.width},${config.viewport.height}`,
+      "--enable-touch-events",
     ],
   };
 }
@@ -181,8 +194,8 @@ export function getContextOptions(config) {
     acceptDownloads: false,
     ignoreHTTPSErrors: true,
     javaScriptEnabled: true,
-    hasTouch: false,
-    isMobile: false,
+    hasTouch: true,
+    isMobile: true,
     extraHTTPHeaders: {
       "Accept-Language": `${config.locale},en;q=0.9`,
       DNT: "1",
