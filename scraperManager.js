@@ -7,7 +7,14 @@ import pLimit from "p-limit";
 const CONCURRENT_LIMIT = 500;
 const RETRY_DELAY = 1000;
 const MAX_RETRIES = 3;
-const REFRESH_INTERVAL = 6;
+
+// Controller Configuration
+const CONTROLLER = {
+  FORCE_HEADER_REFRESH_ERROR_COUNT: 10, // Force header refresh after this many consecutive errors
+  REGULAR_HEADER_REFRESH_CYCLES: 50, // Regular header refresh after these many cycles
+  CONTINUOUS_MODE: true, // Enable continuous operation
+  CYCLE_DELAY_MS: 5000, // Delay between cycles (5 seconds)
+};
 
 class ScraperManager {
   constructor(events) {
@@ -21,6 +28,11 @@ class ScraperManager {
     this.results = new Map();
     this.failedEvents = new Set();
     this.retryQueue = [];
+
+    // New tracking variables
+    this.currentCycle = 0;
+    this.consecutiveErrors = 0;
+    this.lastHeaderRefresh = moment();
   }
 
   logWithTime(message, type = "info") {
@@ -51,7 +63,7 @@ class ScraperManager {
       )}h ${runningTime.minutes()}m ${runningTime.seconds()}s`
     );
     console.log(
-      `   Active Jobs: ${this.activeJobs.size}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}`
+      `   Cycle: ${this.currentCycle}, Active Jobs: ${this.activeJobs.size}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}`
     );
   }
 
@@ -82,6 +94,7 @@ class ScraperManager {
         this.results.set(eventId, result);
         this.successCount++;
         this.lastSuccessTime = moment();
+        this.consecutiveErrors = 0; // Reset error counter on success
         this.activeJobs.delete(eventId);
         return true;
       }
@@ -92,6 +105,20 @@ class ScraperManager {
         `Failed to scrape event ${eventId}: ${error.message}`,
         "error"
       );
+
+      this.consecutiveErrors++;
+
+      // Check if we need to force header refresh due to errors
+      if (
+        this.consecutiveErrors >= CONTROLLER.FORCE_HEADER_REFRESH_ERROR_COUNT
+      ) {
+        this.logWithTime(
+          "Forcing header refresh due to consecutive errors",
+          "warning"
+        );
+        await this.refreshAllHeaders();
+        this.consecutiveErrors = 0;
+      }
 
       if (retryCount < MAX_RETRIES - 1) {
         this.logWithTime(`Queuing retry for event ${eventId}`, "warning");
@@ -128,6 +155,7 @@ class ScraperManager {
           })
       );
       await Promise.all(refreshPromises);
+      this.lastHeaderRefresh = moment();
       this.logWithTime("Headers refresh completed", "success");
     } catch (error) {
       this.logWithTime(
@@ -137,70 +165,61 @@ class ScraperManager {
     }
   }
 
+  async runCycle() {
+    this.currentCycle++;
+    this.logWithTime(`Starting cycle ${this.currentCycle}`);
+
+    // Check if regular header refresh is needed
+    if (this.currentCycle % CONTROLLER.REGULAR_HEADER_REFRESH_CYCLES === 0) {
+      this.logWithTime("Performing regular header refresh");
+      await this.refreshAllHeaders();
+    }
+
+    // Start scraping
+    const scrapePromises = this.events.map((eventId) =>
+      this.limit(() => this.scrapeEvent(eventId))
+    );
+
+    await Promise.all(scrapePromises);
+
+    // Process any retries
+    while (this.retryQueue.length > 0) {
+      await this.processRetryQueue();
+    }
+
+    // Cycle summary
+    this.logWithTime(`Cycle ${this.currentCycle} completed`);
+    this.logWithTime(`Successful in this cycle: ${this.successCount}`);
+    this.logWithTime(`Failed in this cycle: ${this.failedEvents.size}`);
+  }
+
   async start() {
     console.log("\n" + "=".repeat(50));
-    this.logWithTime("Concurrent Scraper Manager Starting");
+    this.logWithTime("Continuous Scraper Manager Starting");
     this.logWithTime(`Total Events: ${this.events.length}`);
     this.logWithTime(`Concurrent Limit: ${CONCURRENT_LIMIT}`);
     this.logWithTime(`Retry Attempts: ${MAX_RETRIES}`);
+    this.logWithTime("Controller Settings:");
+    this.logWithTime(
+      `- Force Header Refresh After: ${CONTROLLER.FORCE_HEADER_REFRESH_ERROR_COUNT} errors`
+    );
+    this.logWithTime(
+      `- Regular Header Refresh Every: ${CONTROLLER.REGULAR_HEADER_REFRESH_CYCLES} cycles`
+    );
+    this.logWithTime(`- Continuous Mode: ${CONTROLLER.CONTINUOUS_MODE}`);
     console.log("=".repeat(50) + "\n");
 
-    // Setup periodic header refresh
-    const refreshInterval = setInterval(() => {
-      if (this.activeJobs.size > 0) {
-        this.refreshAllHeaders();
-      }
-    }, REFRESH_INTERVAL * 60 * 1000);
-
-    // Setup retry queue processor
-    const retryProcessor = setInterval(() => {
-      if (this.retryQueue.length > 0) {
-        this.processRetryQueue();
-      }
-    }, RETRY_DELAY);
-
     try {
-      // Start initial scraping
-      const scrapePromises = this.events.map((eventId) =>
-        this.limit(() => this.scrapeEvent(eventId))
-      );
+      while (CONTROLLER.CONTINUOUS_MODE) {
+        await this.runCycle();
 
-      await Promise.all(scrapePromises);
+        // Reset cycle statistics
+        this.successCount = 0;
+        this.failedEvents.clear();
 
-      // Process any remaining retries
-      while (this.retryQueue.length > 0) {
-        await this.processRetryQueue();
-      }
-
-      clearInterval(refreshInterval);
-      clearInterval(retryProcessor);
-
-      // Final summary
-      console.log("\n" + "=".repeat(50));
-      this.logWithTime("Scraping Completed");
-      this.logWithTime(`Total Events: ${this.events.length}`);
-      this.logWithTime(`Successful: ${this.successCount}`);
-      this.logWithTime(`Failed: ${this.failedEvents.size}`);
-      this.logWithTime(
-        `Success Rate: ${(
-          (this.successCount / this.events.length) *
-          100
-        ).toFixed(2)}%`
-      );
-      console.log("=".repeat(50) + "\n");
-
-      // Save failed events list if any
-      if (this.failedEvents.size > 0) {
-        const failedEventsFile = `failed_events_${moment().format(
-          "YYYY-MM-DD_HH-mm-ss"
-        )}.json`;
-        await writeFile(
-          failedEventsFile,
-          JSON.stringify(Array.from(this.failedEvents), null, 2)
-        );
-        this.logWithTime(
-          `Failed events list saved to ${failedEventsFile}`,
-          "warning"
+        // Delay between cycles
+        await new Promise((resolve) =>
+          setTimeout(resolve, CONTROLLER.CYCLE_DELAY_MS)
         );
       }
     } catch (error) {
@@ -218,8 +237,8 @@ const events = [
   "0A00614FC8B22987",
   "0B00618E56F70A56",
   "0B00618E4B940977",
-  "D006228B3121C00",
+  "0D006228B3121C00",
+  "0600622EBCB824E8",
 ];
-
 const manager = new ScraperManager(events);
 manager.start();

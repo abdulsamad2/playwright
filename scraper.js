@@ -155,7 +155,29 @@ async function captureApiHeaders(page, eventId, fingerprint) {
         cleanup();
         try {
           const headers = request.headers();
-          const cookies = await context.cookies();
+          let cookies = await context.cookies();
+
+          // Extend the expiry time of each cookie to 1 hour from now
+          const oneHourFromNow = Date.now() + 60 * 60 * 1000; // 1 hour in milliseconds
+          cookies = cookies.map((cookie) => ({
+            ...cookie,
+            expires: oneHourFromNow / 1000, // Convert to seconds for cookie expiry
+            expiry: oneHourFromNow / 1000, // Some implementations use 'expiry' instead of 'expires'
+          }));
+
+          // Update the cookies in the context with new expiry times
+          await Promise.all(
+            cookies.map((cookie) =>
+              context.addCookies([
+                {
+                  ...cookie,
+                  expires: oneHourFromNow / 1000,
+                  expiry: oneHourFromNow / 1000,
+                },
+              ])
+            )
+          );
+
           resolve({ headers, cookies, fingerprint });
         } catch (error) {
           reject(error);
@@ -171,7 +193,6 @@ async function captureApiHeaders(page, eventId, fingerprint) {
     }, 30000);
   });
 }
-
 async function refreshHeaders(eventId, proxy) {
   if (!proxy || !proxy.proxy) {
     const { proxy: newProxy } = GetProxy();
