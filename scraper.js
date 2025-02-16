@@ -9,6 +9,7 @@ import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
+import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 
 let browser = null;
 let context = null;
@@ -111,7 +112,7 @@ async function initBrowser(proxy) {
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
     browser = await firefox.launch({
-      headless: true,
+      headless: false,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
@@ -232,7 +233,7 @@ async function refreshHeaders(eventId, proxy) {
       waitUntil: "networkidle",
       timeout: 30000,
     });
-
+  await simulateHumanBehavior(page)
     const data = await captureCookies(page, fingerprint);
     await page.close().catch(() => {});
 
