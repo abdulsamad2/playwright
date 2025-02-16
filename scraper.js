@@ -13,7 +13,6 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 let browser = null;
 let context = null;
 let capturedState = {
-  headers: null,
   cookies: null,
   fingerprint: null,
   lastRefresh: null,
@@ -86,7 +85,6 @@ async function handleTicketmasterChallenge(page) {
   } catch (error) {
     console.error("Challenge handling failed:", error.message);
     capturedState = {
-      headers: null,
       cookies: null,
       fingerprint: null,
       lastRefresh: null,
@@ -137,62 +135,86 @@ async function initBrowser(proxy) {
   }
 }
 
-async function captureApiHeaders(page, eventId, fingerprint) {
-  return new Promise((resolve, reject) => {
-    const apiPattern = new RegExp(`/api/ismds/event/${eventId}/facets.*`);
-    let captured = false;
-    let timeoutId;
+async function captureCookies(page, fingerprint) {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY = 2000;
 
-    const cleanup = () => {
-      if (timeoutId) clearTimeout(timeoutId);
-      page.removeListener("request", requestHandler);
-    };
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      // Check for challenge before attempting to capture cookies
+      const challengePresent = await page.evaluate(() => {
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
+      });
 
-    const requestHandler = async (request) => {
-      const url = request.url();
-      if (apiPattern.test(url) && !captured) {
-        captured = true;
-        cleanup();
-        try {
-          const headers = request.headers();
-          let cookies = await context.cookies();
+      if (challengePresent) {
+        console.log(
+          `Attempt ${attempt}: Challenge detected during cookie capture`
+        );
 
-          // Extend the expiry time of each cookie to 1 hour from now
-          const oneHourFromNow = Date.now() + 60 * 60 * 1000; // 1 hour in milliseconds
-          cookies = cookies.map((cookie) => ({
-            ...cookie,
-            expires: oneHourFromNow / 1000, // Convert to seconds for cookie expiry
-            expiry: oneHourFromNow / 1000, // Some implementations use 'expiry' instead of 'expires'
-          }));
-
-          // Update the cookies in the context with new expiry times
-          await Promise.all(
-            cookies.map((cookie) =>
-              context.addCookies([
-                {
-                  ...cookie,
-                  expires: oneHourFromNow / 1000,
-                  expiry: oneHourFromNow / 1000,
-                },
-              ])
-            )
-          );
-
-          resolve({ headers, cookies, fingerprint });
-        } catch (error) {
-          reject(error);
+        // Try to handle the challenge
+        const challengeResolved = await handleTicketmasterChallenge(page);
+        if (!challengeResolved) {
+          if (attempt === MAX_RETRIES) {
+            console.log("Max retries reached during challenge resolution");
+            return { cookies: null, fingerprint };
+          }
+          await page.waitForTimeout(RETRY_DELAY);
+          continue;
         }
       }
-    };
 
-    page.on("request", requestHandler);
+      let cookies = await context.cookies();
 
-    timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new Error("Timeout waiting for API request"));
-    }, 30000);
-  });
+      // Verify cookies are valid
+      if (!cookies || cookies.length === 0) {
+        console.log(`Attempt ${attempt}: No cookies captured`);
+        if (attempt === MAX_RETRIES) {
+          return { cookies: null, fingerprint };
+        }
+        await page.waitForTimeout(RETRY_DELAY);
+        continue;
+      }
+
+      // Extend the expiry time of each cookie to 1 hour from now
+      const oneHourFromNow = Date.now() + 60 * 60 * 1000;
+      cookies = cookies.map((cookie) => ({
+        ...cookie,
+        expires: oneHourFromNow / 1000,
+        expiry: oneHourFromNow / 1000,
+      }));
+
+      // Update the cookies in the context with new expiry times
+      await Promise.all(
+        cookies.map((cookie) =>
+          context.addCookies([
+            {
+              ...cookie,
+              expires: oneHourFromNow / 1000,
+              expiry: oneHourFromNow / 1000,
+            },
+          ])
+        )
+      );
+
+      console.log(`Successfully captured cookies on attempt ${attempt}`);
+      return { cookies, fingerprint };
+    } catch (error) {
+      console.error(`Error capturing cookies (attempt ${attempt}):`, error);
+
+      if (attempt === MAX_RETRIES) {
+        console.log("Max retries reached during cookie capture");
+        return { cookies: null, fingerprint };
+      }
+
+      await page.waitForTimeout(RETRY_DELAY);
+    }
+  }
+
+  return { cookies: null, fingerprint };
 }
+
 async function refreshHeaders(eventId, proxy) {
   if (!proxy || !proxy.proxy) {
     const { proxy: newProxy } = GetProxy();
@@ -211,23 +233,29 @@ async function refreshHeaders(eventId, proxy) {
       timeout: 30000,
     });
 
-    await handleTicketmasterChallenge(page);
-
-    const data = await captureApiHeaders(page, eventId, fingerprint);
+    const data = await captureCookies(page, fingerprint);
     await page.close().catch(() => {});
 
-    capturedState = {
-      headers: data.headers,
-      cookies: data.cookies,
-      fingerprint: fingerprint,
-      lastRefresh: Date.now(),
-      proxy: proxy,
-    };
+    // Only update capturedState if we successfully got cookies
+    if (data.cookies) {
+      capturedState = {
+        cookies: data.cookies,
+        fingerprint: fingerprint,
+        lastRefresh: Date.now(),
+        proxy: proxy,
+      };
+    } else {
+      capturedState = {
+        cookies: null,
+        fingerprint: null,
+        lastRefresh: null,
+        proxy: null,
+      };
+    }
 
     return capturedState;
   } catch (error) {
     capturedState = {
-      headers: null,
       cookies: null,
       fingerprint: null,
       lastRefresh: null,
@@ -235,15 +263,21 @@ async function refreshHeaders(eventId, proxy) {
     };
     console.error("Error in refreshHeaders:", error);
     throw error;
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+      browser = null;
+      context = null;
+    }
   }
 }
 
 async function getCapturedData(eventId, proxy, forceRefresh = false) {
   const currentTime = Date.now();
   const refreshInterval = 15 * 60 * 1000; // 15 minutes
+  const MAX_REFRESH_ATTEMPTS = 3;
 
   if (
-    !capturedState.headers ||
     !capturedState.cookies ||
     !capturedState.fingerprint ||
     !capturedState.lastRefresh ||
@@ -251,18 +285,35 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
     currentTime - capturedState.lastRefresh > refreshInterval ||
     forceRefresh
   ) {
-    console.log("Getting fresh headers and cookies...");
-    try {
-      return await refreshHeaders(eventId, proxy);
-    } catch (error) {
-      console.error("Error getting captured data:", error);
-      throw error;
+    console.log("Getting fresh cookies...");
+
+    for (let attempt = 1; attempt <= MAX_REFRESH_ATTEMPTS; attempt++) {
+      try {
+        const result = await refreshHeaders(eventId, proxy);
+        if (result.cookies) {
+          return result;
+        }
+
+        console.log(`Retry ${attempt}: Failed to get valid cookies`);
+        if (attempt === MAX_REFRESH_ATTEMPTS) {
+          throw new Error("Failed to capture valid cookies after max attempts");
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      } catch (error) {
+        console.error(
+          `Error getting captured data (attempt ${attempt}):`,
+          error
+        );
+        if (attempt === MAX_REFRESH_ATTEMPTS) {
+          throw error;
+        }
+      }
     }
   }
 
   return capturedState;
 }
-
 const GetData = async (headers, proxyAgent, url, eventId) => {
   return new Promise(async (resolve, reject) => {
     try {
@@ -358,7 +409,7 @@ const ScrapeEvent = async (event) => {
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
     };
 
-    console.log("Starting event scraping with captured headers...");
+    console.log("Starting event scraping with captured cookies...");
 
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${event?.eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
     const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${event?.eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
