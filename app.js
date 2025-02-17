@@ -2,7 +2,6 @@
 import express from "express";
 import mongoose from "mongoose";
 import { ScrapingManager } from "./scraperManager.js";
-import seatService from "./services/seatService.js";
 import morgan from "morgan";
 import dotenv from "dotenv";
 import cors from "cors";

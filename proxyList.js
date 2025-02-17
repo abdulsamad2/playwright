@@ -1,116 +1,57 @@
-export const proxyArray = [
-  {
-    host: "139.190.246.72",
-    port: 61234,
-    username: "events72",
-    password: "nvDV75RO",
-  },
-  {
-    host: "207.170.184.110",
-    port: 61234,
-    username: "events1134",
-    password: "75z78SGv",
-  },
-  {
-    host: "207.170.185.132",
-    port: 61234,
-    username: "events1412",
-    password: "NQWoDWxv",
-  },
-  {
-    host: "207.170.186.123",
-    port: 61234,
-    username: "events1659",
-    password: "ASjkydMD",
-  },
-  {
-    host: "207.170.187.37",
-    port: 61234,
-    username: "events1829",
-    password: "LWk9gTgt",
-  },
-  {
-    host: "207.170.187.249",
-    port: 61234,
-    username: "events2041",
-    password: "3sdADqaZ",
-  },
-  {
-    host: "185.10.123.166",
-    port: 61234,
-    username: "events4006",
-    password: "5RHTtgWN",
-  },
-  {
-    host: "115.167.110.36",
-    port: 61234,
-    username: "events1572",
-    password: "xy0FCstj",
-  },
-  {
-    host: "115.167.110.197",
-    port: 61234,
-    username: "events1733",
-    password: "VSr5k9AP",
-  },
-  {
-    host: "207.170.148.62",
-    port: 61234,
-    username: "events62",
-    password: "vybh0pFU",
-  },
-  {
-    host: "168.75.229.48",
-    port: 61234,
-    username: "events1328",
-    password: "C4ili9hy",
-  },
-  {
-    host: "168.75.229.255",
-    port: 61234,
-    username: "events1535",
-    password: "scFVhlfV",
-  },
-  {
-    host: "168.75.235.90",
-    port: 61234,
-    username: "events858",
-    password: "3fKIVP0O",
-  },
-  {
-    host: "168.75.236.187",
-    port: 61234,
-    username: "events1211",
-    password: "svB65xp9",
-  },
-  {
-    host: "168.75.236.253",
-    port: 61234,
-    username: "events1277",
-    password: "aZyGvKPo",
-  },
-  {
-    host: "168.75.237.127",
-    port: 61234,
-    username: "events1407",
-    password: "oykDHxqU",
-  },
-  {
-    host: "66.9.97.128",
-    port: 61234,
-    username: "events384",
-    password: "awtyvFYy",
-  },
-  {
-    host: "66.9.100.93",
-    port: 61234,
-    username: "events1117",
-    password: "mnfA48VV",
-  },
-  {
-    host: "66.9.100.249",
-    port: 61234,
-    username: "events1273",
-    password: "bssaCBL8",
-  },
-];
+import { HttpsProxyAgent } from "https-proxy-agent";
+import axios from "axios";
+
+const getProxy = () => {
+  const proxyConfig = {
+    host: "pr.oxylabs.io",
+    port: "7777",
+    username: "customer-event60822_DuSNg-sessid-0835629560-sesstime-1",
+    password: "Aa1+Ba2~Cb3=Dc4",
+  };
+
+  try {
+    const proxyUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${proxyConfig.host}:${proxyConfig.port}`;
+    const proxyAgent = new HttpsProxyAgent(proxyUrl);
+
+    console.log(
+      "Proxy URL created:",
+      proxyUrl.replace(proxyConfig.password, "****")
+    );
+
+    return { proxyAgent, proxy: proxyConfig };
+  } catch (error) {
+    console.error("Failed to create proxy:", error.message);
+    throw error;
+  }
+};
+
+const testProxy = async () => {
+  try {
+    const { proxyAgent } = getProxy();
+
+    console.log("Testing proxy connection...");
+
+    const response = await axios.get("https://api.ipify.org?format=json", {
+      httpsAgent: proxyAgent,
+      timeout: 10000,
+    });
+
+    console.log("Proxy IP:", response.data.ip);
+    console.log("Proxy Status:", response.status);
+    console.log("Test successful!");
+
+    return true;
+  } catch (error) {
+    console.error("Proxy test failed:", error.message);
+    return false;
+  }
+};
+
+// Run the test
+testProxy()
+  .then((result) => {
+    console.log("Final result:", result);
+  })
+  .catch((error) => {
+    console.error("Test failed:", error.message);
+  });

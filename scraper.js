@@ -110,14 +110,16 @@ async function initBrowser(proxy) {
       await browser.close().catch(() => {});
     }
 
-    const proxyUrl = new URL(`http://${proxy.proxy}`);
+    // Split proxy into host and port
+    const [host, port] = proxy.proxy.split(":");
 
     browser = await firefox.launch({
       headless: true,
       proxy: {
-        server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
+        server: `http://${host}:${port}`,
         username: proxy.username,
         password: proxy.password,
+        bypass: "", // Empty bypass list
       },
     });
 

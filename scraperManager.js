@@ -235,10 +235,7 @@ class ScraperManager {
 // Example usage:
 const events = [
   "0A00614FC8B22987",
-  "0B00618E56F70A56",
-  "0B00618E4B940977",
-  "0D006228B3121C00",
-  "0600622EBCB824E8",
+
 ];
 const manager = new ScraperManager(events);
 manager.start();
