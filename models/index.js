@@ -1,40 +1,109 @@
 import mongoose from "mongoose";
 
+// Seat Schema (as a subdocument)
+const seatSchema = new mongoose.Schema({
+  Seat_Number: {
+    type: String,
+    required: true,
+  },
+  Price: {
+    type: Number,
+    required: true,
+  },
+  Face_Value: {
+    type: Number,
+    required: true,
+  },
+  Unit_Taxed_Cost: {
+    type: Number,
+    required: true,
+  },
+  Sell_Price: {
+    type: Number,
+    required: true,
+  },
+  Stock_Type: {
+    type: String,
+    enum: ["MOBILE_TRANSFER", "HARD", "E-TICKET"],
+    required: true,
+  },
+  Barcode: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  Status: {
+    type: String,
+    enum: ["AVAILABLE", "SOLD", "PENDING"],
+    required: true,
+  },
+});
+
 // Event Schema
 const eventSchema = new mongoose.Schema(
   {
-    title: {
+    Event_ID: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+    Event_Name: {
       type: String,
       required: true,
     },
-    dateTime: {
+    Venue: {
+      type: String,
+      required: true,
+    },
+    Event_DateTime: {
       type: Date,
       required: true,
     },
-    availableSeats: {
+    Available_Seats: {
       type: Number,
       required: true,
     },
-    url: {
+    URL: {
       type: String,
       required: true,
       unique: true,
     },
-    lastUpdated: {
+    Instant_Download: {
+      type: Boolean,
+      default: false,
+    },
+    Instant_Transfer: {
+      type: Boolean,
+      default: false,
+    },
+    E_Ticket: {
+      type: Boolean,
+      default: false,
+    },
+    Zone: {
+      type: String,
+      required: true,
+    },
+    Last_Updated: {
       type: Date,
       default: Date.now,
     },
-    metadata: {
-      lastUpdate: String,
-      iterationNumber: Number,
-      scrapeStartTime: Date,
-      scrapeEndTime: Date,
-      scrapeDurationSeconds: Number,
-      totalRunningTimeMinutes: String,
-      ticketStats: {
-        totalTickets: Number,
-        ticketCountChange: Number,
-        previousTicketCount: Number,
+    Skip_Scraping: {
+      type: Boolean,
+      default: false, // By default, scraping is not skipped
+    },
+    Metadata: {
+      Last_Update: String,
+      Iteration_Number: Number,
+      Scrape_Start_Time: Date,
+      Scrape_End_Time: Date,
+      Scrape_Duration_Seconds: Number,
+      Total_Running_Time_Minutes: String,
+      Ticket_Stats: {
+        Total_Tickets: Number,
+        Ticket_Count_Change: Number,
+        Previous_Ticket_Count: Number,
       },
     },
   },
@@ -43,43 +112,36 @@ const eventSchema = new mongoose.Schema(
   }
 );
 
-// Individual Seat Schema (as a subdocument)
-const seatSchema = new mongoose.Schema({
-  number: {
-    type: String,
-    required: true,
-  },
-  price: {
-    type: Number,
-    required: true,
-  },
-});
-
 // Consecutive Group Schema
 const consecutiveGroupSchema = new mongoose.Schema(
   {
-    eventId: {
-      type: mongoose.Schema.Types.ObjectId,
+    Event_ID: {
+      type: String,
+      required: true,
+      index: true,
       ref: "Event",
-      required: true,
     },
-    section: {
+    Section: {
       type: String,
       required: true,
     },
-    row: {
+    Row: {
       type: String,
       required: true,
     },
-    seatCount: {
+    Seat_Count: {
       type: Number,
       required: true,
     },
-    seatRange: {
+    Seat_Range: {
       type: String,
       required: true,
     },
-    seats: [seatSchema],
+    Seats: [seatSchema],
+    Unit_Taxed_Cost: {
+      type: Number,
+      required: true,
+    },
   },
   {
     timestamps: true,
@@ -89,12 +151,12 @@ const consecutiveGroupSchema = new mongoose.Schema(
 // Error Log Schema
 const errorLogSchema = new mongoose.Schema(
   {
-    eventUrl: {
+    Event_URL: {
       type: String,
       required: true,
       index: true,
     },
-    errorType: {
+    Error_Type: {
       type: String,
       required: true,
       enum: [
@@ -104,18 +166,18 @@ const errorLogSchema = new mongoose.Schema(
         "VALIDATION_ERROR",
       ],
     },
-    message: {
+    Message: {
       type: String,
       required: true,
     },
-    stack: String,
-    metadata: {
-      iteration: Number,
-      timestamp: {
+    Stack: String,
+    Metadata: {
+      Iteration: Number,
+      Timestamp: {
         type: Date,
         default: Date.now,
       },
-      additionalInfo: mongoose.Schema.Types.Mixed,
+      Additional_Info: mongoose.Schema.Types.Mixed,
     },
   },
   {
@@ -123,10 +185,15 @@ const errorLogSchema = new mongoose.Schema(
   }
 );
 
-// Indexes
-// In models/index.js
-export const SeatGroup = mongoose.model("ConsecutiveGroup", consecutiveGroupSchema);eventSchema.index({ url: 1 }, { unique: true });
-errorLogSchema.index({ eventUrl: 1, createdAt: -1 });
+// Indexes for Optimization
+eventSchema.index({ URL: 1 }, { unique: true });
+eventSchema.index({ Event_ID: 1 }, { unique: true });
+errorLogSchema.index({ Event_URL: 1, createdAt: -1 });
+
+consecutiveGroupSchema.index(
+  { Event_ID: 1, Section: 1, Row: 1, Seat_Range: 1 },
+  { unique: true }
+);
 
 // Models
 export const Event = mongoose.model("Event", eventSchema);

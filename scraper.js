@@ -11,6 +11,15 @@ import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 
+const COOKIES_FILE = "cookies.json";
+const CONFIG = {
+  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
+  PAGE_TIMEOUT: 30000,
+  MAX_RETRIES: 3,
+  RETRY_DELAY: 2000,
+  CHALLENGE_TIMEOUT: 10000
+};
+
 let browser = null;
 let context = null;
 let capturedState = {
@@ -25,7 +34,6 @@ function generateCorrelationId() {
 }
 
 async function handleTicketmasterChallenge(page) {
-  const CHALLENGE_TIMEOUT = 10000;
   const startTime = Date.now();
 
   try {
@@ -52,14 +60,14 @@ async function handleTicketmasterChallenge(page) {
       let buttonClicked = false;
 
       for (const button of buttons) {
-        if (Date.now() - startTime > CHALLENGE_TIMEOUT) {
+        if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
           throw new Error("Challenge timeout");
         }
 
         const text = await button.textContent();
         if (
-          text.toLowerCase().includes("continue") ||
-          text.toLowerCase().includes("verify")
+          text?.toLowerCase().includes("continue") ||
+          text?.toLowerCase().includes("verify")
         ) {
           await button.click();
           buttonClicked = true;
@@ -85,32 +93,27 @@ async function handleTicketmasterChallenge(page) {
     return true;
   } catch (error) {
     console.error("Challenge handling failed:", error.message);
-    capturedState = {
-      cookies: null,
-      fingerprint: null,
-      lastRefresh: null,
-      proxy: null,
-    };
+    resetCapturedState();
     throw error;
   }
 }
 
 async function initBrowser(proxy) {
-  if (!proxy || !proxy.proxy) {
-    const { proxy: newProxy } = GetProxy();
-    proxy = newProxy;
-  }
-
-  const fingerprint = BrowserFingerprint.generate();
-  const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
-
   try {
+    if (!proxy?.proxy) {
+      const { proxy: newProxy } = GetProxy();
+      proxy = newProxy;
+    }
+
+    const fingerprint = BrowserFingerprint.generate();
+    const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
+
     if (browser) {
-      await browser.close().catch(() => {});
+      await cleanup(browser, context);
     }
 
     const proxyUrl = new URL(`http://${proxy.proxy}`);
-
+    
     browser = await firefox.launch({
       headless: false,
       proxy: {
@@ -131,18 +134,15 @@ async function initBrowser(proxy) {
 
     return { context, fingerprint };
   } catch (error) {
+    await cleanup(browser, context);
     console.error("Error initializing browser:", error);
     throw error;
   }
 }
 
 async function captureCookies(page, fingerprint) {
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY = 2000;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
     try {
-      // Check for challenge before attempting to capture cookies
       const challengePresent = await page.evaluate(() => {
         return document.body.textContent.includes(
           "Your Browsing Activity Has Been Paused"
@@ -154,39 +154,35 @@ async function captureCookies(page, fingerprint) {
           `Attempt ${attempt}: Challenge detected during cookie capture`
         );
 
-        // Try to handle the challenge
         const challengeResolved = await handleTicketmasterChallenge(page);
         if (!challengeResolved) {
-          if (attempt === MAX_RETRIES) {
+          if (attempt === CONFIG.MAX_RETRIES) {
             console.log("Max retries reached during challenge resolution");
             return { cookies: null, fingerprint };
           }
-          await page.waitForTimeout(RETRY_DELAY);
+          await page.waitForTimeout(CONFIG.RETRY_DELAY);
           continue;
         }
       }
 
       let cookies = await context.cookies();
 
-      // Verify cookies are valid
-      if (!cookies || cookies.length === 0) {
+      if (!cookies?.length) {
         console.log(`Attempt ${attempt}: No cookies captured`);
-        if (attempt === MAX_RETRIES) {
+        if (attempt === CONFIG.MAX_RETRIES) {
           return { cookies: null, fingerprint };
         }
-        await page.waitForTimeout(RETRY_DELAY);
+        await page.waitForTimeout(CONFIG.RETRY_DELAY);
         continue;
       }
 
-      // Extend the expiry time of each cookie to 1 hour from now
-      const oneHourFromNow = Date.now() + 60 * 60 * 1000;
+      const oneHourFromNow = Date.now() + CONFIG.COOKIE_REFRESH_INTERVAL;
       cookies = cookies.map((cookie) => ({
         ...cookie,
         expires: oneHourFromNow / 1000,
         expiry: oneHourFromNow / 1000,
       }));
 
-      // Update the cookies in the context with new expiry times
       await Promise.all(
         cookies.map((cookie) =>
           context.addCookies([
@@ -199,114 +195,77 @@ async function captureCookies(page, fingerprint) {
         )
       );
 
+      fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
       console.log(`Successfully captured cookies on attempt ${attempt}`);
       return { cookies, fingerprint };
+
     } catch (error) {
       console.error(`Error capturing cookies (attempt ${attempt}):`, error);
-
-      if (attempt === MAX_RETRIES) {
-        console.log("Max retries reached during cookie capture");
+      if (attempt === CONFIG.MAX_RETRIES) {
         return { cookies: null, fingerprint };
       }
-
-      await page.waitForTimeout(RETRY_DELAY);
+      await page.waitForTimeout(CONFIG.RETRY_DELAY);
     }
   }
 
   return { cookies: null, fingerprint };
 }
 
-async function refreshHeaders(eventId, proxy) {
-  if (!proxy || !proxy.proxy) {
-    const { proxy: newProxy } = GetProxy();
-    proxy = newProxy;
-  }
-
+async function loadCookiesFromFile() {
   try {
-    const { context: newContext, fingerprint } = await initBrowser(proxy);
-    context = newContext;
-
-    const page = await context.newPage();
-    const url = `https://www.ticketmaster.com/event/${eventId}`;
-
-    await page.goto(url, {
-      waitUntil: "networkidle",
-      timeout: 30000,
-    });
-  await simulateHumanBehavior(page)
-    const data = await captureCookies(page, fingerprint);
-    await page.close().catch(() => {});
-
-    // Only update capturedState if we successfully got cookies
-    if (data.cookies) {
-      capturedState = {
-        cookies: data.cookies,
-        fingerprint: fingerprint,
-        lastRefresh: Date.now(),
-        proxy: proxy,
-      };
-    } else {
-      capturedState = {
-        cookies: null,
-        fingerprint: null,
-        lastRefresh: null,
-        proxy: null,
-      };
+    if (fs.existsSync(COOKIES_FILE)) {
+      const cookiesData = fs.readFileSync(COOKIES_FILE, "utf8");
+      return JSON.parse(cookiesData);
     }
-
-    return capturedState;
   } catch (error) {
-    capturedState = {
-      cookies: null,
-      fingerprint: null,
-      lastRefresh: null,
-      proxy: null,
-    };
-    console.error("Error in refreshHeaders:", error);
-    throw error;
-  } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-      browser = null;
-      context = null;
-    }
+    console.error("Error loading cookies from file:", error);
   }
+  return null;
 }
 
 async function getCapturedData(eventId, proxy, forceRefresh = false) {
   const currentTime = Date.now();
-  const refreshInterval = 15 * 60 * 1000; // 15 minutes
-  const MAX_REFRESH_ATTEMPTS = 3;
+
+  if (!capturedState.cookies) {
+    const cookiesFromFile = await loadCookiesFromFile();
+    if (cookiesFromFile) {
+      const lastRefresh = cookiesFromFile[0]?.expires * 1000 || 0;
+      if (currentTime - lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL) {
+        capturedState.cookies = cookiesFromFile;
+        capturedState.lastRefresh = lastRefresh;
+      }
+    }
+  }
 
   if (
     !capturedState.cookies ||
     !capturedState.fingerprint ||
     !capturedState.lastRefresh ||
     !capturedState.proxy ||
-    currentTime - capturedState.lastRefresh > refreshInterval ||
+    currentTime - capturedState.lastRefresh > CONFIG.COOKIE_REFRESH_INTERVAL ||
     forceRefresh
   ) {
     console.log("Getting fresh cookies...");
 
-    for (let attempt = 1; attempt <= MAX_REFRESH_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
       try {
         const result = await refreshHeaders(eventId, proxy);
-        if (result.cookies) {
+        if (result?.cookies) {
           return result;
         }
 
         console.log(`Retry ${attempt}: Failed to get valid cookies`);
-        if (attempt === MAX_REFRESH_ATTEMPTS) {
+        if (attempt === CONFIG.MAX_RETRIES) {
           throw new Error("Failed to capture valid cookies after max attempts");
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, CONFIG.RETRY_DELAY));
       } catch (error) {
         console.error(
           `Error getting captured data (attempt ${attempt}):`,
           error
         );
-        if (attempt === MAX_REFRESH_ATTEMPTS) {
+        if (attempt === CONFIG.MAX_RETRIES) {
           throw error;
         }
       }
@@ -315,42 +274,115 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
 
   return capturedState;
 }
-const GetData = async (headers, proxyAgent, url, eventId) => {
-  return new Promise(async (resolve, reject) => {
-    try {
-      let abortController = new AbortController();
-      const timeout = setTimeout(() => {
-        abortController.abort();
-        console.log("Request aborted due to timeout");
-        console.log(eventId, "eventId");
-        return resolve(false);
-      }, 10000);
 
-      try {
-        const response = await axios.get(url, {
-          httpsAgent: proxyAgent,
-          headers: {
-            ...headers,
-            "Accept-Encoding": "gzip, deflate, br",
-            Connection: "keep-alive",
-          },
-          timeout: 10000,
-          signal: abortController.signal,
-          validateStatus: (status) => status === 200,
-        });
+async function refreshHeaders(eventId, proxy) {
+  let contextInstance = null;
+  let browserInstance = null;
 
-        clearTimeout(timeout);
-        return resolve(response.data);
-      } catch (error) {
-        clearTimeout(timeout);
-        console.log(`Request failed: ${error.message}`);
-        return resolve(false);
+  try {
+    const existingCookies = await loadCookiesFromFile();
+    if (existingCookies !== null) {
+      // Generate new fingerprint if none exists in capturedState
+      if (!capturedState.fingerprint) {
+        capturedState.fingerprint = BrowserFingerprint.generate();
       }
-    } catch (e) {
-      console.log(e, "error");
-      return resolve(false);
+
+      return {
+        cookies: existingCookies,
+        lastRefresh: existingCookies[0]?.expires * 1000 || Date.now(),
+        fingerprint: capturedState.fingerprint,
+        proxy: capturedState.proxy,
+      };
     }
-  });
+
+    if (!proxy?.proxy) {
+      const { proxy: newProxy } = GetProxy();
+      proxy = newProxy;
+    }
+
+    // Ensure fingerprint is generated
+    const { context: newContext, fingerprint } = await initBrowser(proxy);
+    if (!fingerprint) {
+      throw new Error(
+        "Failed to generate fingerprint during browser initialization"
+      );
+    }
+
+    contextInstance = newContext;
+
+    const page = await contextInstance.newPage();
+    const url = `https://www.ticketmaster.com/event/${eventId}`;
+
+    try {
+      await page.goto(url, {
+        waitUntil: "networkidle",
+        timeout: CONFIG.PAGE_TIMEOUT,
+      });
+
+      await simulateHumanBehavior(page);
+      const data = await captureCookies(page, fingerprint);
+
+      if (data?.cookies) {
+        capturedState = {
+          cookies: data.cookies,
+          fingerprint: fingerprint, // Ensure fingerprint is saved
+          lastRefresh: Date.now(),
+          proxy: proxy,
+        };
+      } else {
+        resetCapturedState();
+      }
+
+      return capturedState;
+    } finally {
+      if (page) {
+        await page.close().catch((err) => {
+          console.warn("Error closing page:", err);
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error in refreshHeaders:", error);
+    resetCapturedState();
+    throw error;
+  } finally {
+    await cleanup(browserInstance, contextInstance);
+  }
+}
+const GetData = async (headers, proxyAgent, url, eventId) => {
+  let abortController = new AbortController();
+  
+  try {
+    const timeout = setTimeout(() => {
+      abortController.abort();
+      console.log("Request aborted due to timeout");
+      console.log(eventId, "eventId");
+    }, CONFIG.PAGE_TIMEOUT);
+
+    try {
+      const response = await axios.get(url, {
+        httpsAgent: proxyAgent,
+        headers: {
+          ...headers,
+          "Accept-Encoding": "gzip, deflate, br",
+          Connection: "keep-alive",
+        },
+        timeout: CONFIG.PAGE_TIMEOUT,
+        signal: abortController.signal,
+        validateStatus: (status) => status === 200,
+      });
+
+      clearTimeout(timeout);
+      return response.data;
+    } catch (error) {
+      clearTimeout(timeout);
+      console.log(`Request failed: ${error.message}`);
+      return false;
+    }
+  } catch (error) {
+    console.log(error, "error");
+    return false;
+  }
 };
 
 const GetProxy = () => {
@@ -358,13 +390,13 @@ const GetProxy = () => {
   const randomProxy = Math.floor(Math.random() * _proxy.length);
   _proxy = _proxy[randomProxy];
 
-  if (!_proxy || !_proxy.proxy || !_proxy.username || !_proxy.password) {
+  if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
     throw new Error("Invalid proxy configuration");
   }
 
   try {
     const proxyUrl = new URL(`http://${_proxy.proxy}`);
-    let proxyURl = `http://${_proxy.username}:${_proxy.password}@${
+    const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
       proxyUrl.hostname
     }:${proxyUrl.port || 80}`;
     const proxyAgent = new HttpsProxyAgent(proxyURl);
@@ -376,11 +408,15 @@ const GetProxy = () => {
 };
 
 const ScrapeEvent = async (event) => {
-  const { proxyAgent, proxy } = GetProxy();
-  const correlationId = generateCorrelationId();
-
   try {
+    const { proxyAgent, proxy } = GetProxy();
+    const correlationId = generateCorrelationId();
     const capturedData = await getCapturedData(event?.eventId, proxy);
+
+    if (!capturedData?.cookies?.length) {
+      throw new Error("Failed to capture cookies");
+    }
+
     const cookieString = capturedData.cookies
       .map((cookie) => `${cookie.name}=${cookie.value}`)
       .join("; ");
@@ -391,9 +427,9 @@ const ScrapeEvent = async (event) => {
 
     const MapHeader = {
       "User-Agent": userAgent,
-      Accept: `*/*`,
-      Origin: `https://www.ticketmaster.com`,
-      Referer: `https://www.ticketmaster.com/`,
+      Accept: "*/*",
+      Origin: "https://www.ticketmaster.com",
+      Referer: "https://www.ticketmaster.com/",
       "Content-Encoding": "gzip",
       Cookie: cookieString,
     };
@@ -415,44 +451,51 @@ const ScrapeEvent = async (event) => {
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${event?.eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
     const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${event?.eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
 
-    const DataMap = await GetData(
-      MapHeader,
-      proxyAgent,
-      mapUrl,
-      event?.eventId
-    );
-    const DataFacets = await GetData(
-      FacetHeader,
-      proxyAgent,
-      facetUrl,
-      event?.eventId
-    );
+    const [DataMap, DataFacets] = await Promise.all([
+      GetData(MapHeader, proxyAgent, mapUrl, event?.eventId),
+      GetData(FacetHeader, proxyAgent, facetUrl, event?.eventId),
+    ]);
 
-    if (DataFacets && DataMap) {
-      console.log("API requests completed successfully");
-      let dataGet = GenerateNanoPlaces(DataFacets?.facets);
-      let finalData = AttachRowSection(
-        dataGet,
-        DataMap,
-        DataFacets?._embedded?.offer,
-        event,
-        DataFacets?._embedded?.description
-      );
-      return finalData;
-    } else {
+    if (!DataFacets || !DataMap) {
       console.log("Failed to get data from APIs");
       return false;
     }
-  } catch (e) {
-    console.error("Scraping error:", e);
+
+    console.log("API requests completed successfully");
+    const dataGet = GenerateNanoPlaces(DataFacets?.facets);
+    const finalData = AttachRowSection(
+      dataGet,
+      DataMap,
+      DataFacets?._embedded?.offer,
+      event,
+      DataFacets?._embedded?.description
+    );
+
+    return finalData;
+  } catch (error) {
+    console.error("Scraping error:", error);
     return false;
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-      browser = null;
-      context = null;
-    }
+    await cleanup(browser, context);
   }
 };
+
+async function cleanup(browser, context) {
+  try {
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+  } catch (error) {
+    console.warn("Cleanup error:", error);
+  }
+}
+
+function resetCapturedState() {
+  capturedState = {
+    cookies: null,
+    fingerprint: null,
+    lastRefresh: null,
+    proxy: null,
+  };
+}
 
 export { ScrapeEvent, refreshHeaders };
