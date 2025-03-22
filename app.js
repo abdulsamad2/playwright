@@ -107,12 +107,14 @@ app.post("/api/events", async (req, res) => {
       Event_DateTime,
       Venue,
       URL,
-      Available_Seats,
+      inHandDate,
+      Available_Seats=0,
       Skip_Scraping = true,
       Zone,
+      
     } = req.body;
 
-    if (!Event_Name || !Event_DateTime || !URL) {
+    if (!Event_Name,!inHandDate || !Event_DateTime || !URL) {
       return res.status(400).json({
         status: "error",
         message: "Missing required fields",
@@ -133,6 +135,7 @@ app.post("/api/events", async (req, res) => {
       Event_DateTime,
       Venue,
       URL,
+      inHandDate,
       Zone: Zone || "none",
       Available_Seats: Available_Seats || 0,
       Skip_Scraping,
@@ -148,6 +151,7 @@ app.post("/api/events", async (req, res) => {
       data: event,
     });
   } catch (error) {
+    console.log(error)
     res.status(500).json({
       status: "error",
       message: error.message,

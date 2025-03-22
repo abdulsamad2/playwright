@@ -1,0 +1,576 @@
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const axios = require("axios");
+const { HttpsProxyAgent } = require("https-proxy-agent");
+const fs = require("fs");
+import { firefox } from "playwright";
+import proxyArray from "./helpers/proxy.js";
+import { AttachRowSection } from "./helpers/seatBatch.js";
+import GenerateNanoPlaces from "./helpers/seats.js";
+import crypto from "crypto";
+import { BrowserFingerprint } from "./browserFingerprint.js";
+import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
+
+const COOKIES_FILE = "cookies.json";
+const CONFIG = {
+  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
+  PAGE_TIMEOUT: 30000,
+  MAX_RETRIES: 3,
+  RETRY_DELAY: 2000,
+  CHALLENGE_TIMEOUT: 10000
+};
+
+let browser = null;
+let context = null;
+let capturedState = {
+  cookies: null,
+  fingerprint: null,
+  lastRefresh: null,
+  proxy: null,
+};
+
+function generateCorrelationId() {
+  return crypto.randomUUID();
+}
+
+async function handleTicketmasterChallenge(page) {
+  const startTime = Date.now();
+
+  try {
+    const challengePresent = await page.evaluate(() => {
+      return document.body.textContent.includes(
+        "Your Browsing Activity Has Been Paused"
+      );
+    });
+
+    if (challengePresent) {
+      console.log("Detected Ticketmaster challenge, attempting resolution...");
+      await page.waitForTimeout(1000 + Math.random() * 1000);
+
+      const viewportSize = page.viewportSize();
+      if (viewportSize) {
+        await page.mouse.move(
+          Math.floor(Math.random() * viewportSize.width),
+          Math.floor(Math.random() * viewportSize.height),
+          { steps: 5 }
+        );
+      }
+
+      const buttons = await page.$$("button");
+      let buttonClicked = false;
+
+      for (const button of buttons) {
+        if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
+          throw new Error("Challenge timeout");
+        }
+
+        const text = await button.textContent();
+        if (
+          text?.toLowerCase().includes("continue") ||
+          text?.toLowerCase().includes("verify")
+        ) {
+          await button.click();
+          buttonClicked = true;
+          break;
+        }
+      }
+
+      if (!buttonClicked) {
+        throw new Error("Could not find challenge button");
+      }
+
+      await page.waitForTimeout(2000);
+      const stillChallenged = await page.evaluate(() => {
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
+      });
+
+      if (stillChallenged) {
+        throw new Error("Challenge not resolved");
+      }
+    }
+    return true;
+  } catch (error) {
+    console.error("Challenge handling failed:", error.message);
+    resetCapturedState();
+    throw error;
+  }
+}
+
+async function initBrowser(proxy) {
+  try {
+    if (!proxy?.proxy) {
+      const { proxy: newProxy } = GetProxy();
+      proxy = newProxy;
+    }
+
+    const fingerprint = BrowserFingerprint.generate();
+    const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
+
+    if (browser) {
+      await cleanup(browser, context);
+    }
+
+    const proxyUrl = new URL(`http://${proxy.proxy}`);
+    
+    browser = await firefox.launch({
+      headless: false,
+      proxy: {
+        server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
+        username: proxy.username,
+        password: proxy.password,
+      },
+    });
+
+    context = await browser.newContext({
+      viewport: fingerprint.screen,
+      userAgent,
+      locale: fingerprint.language,
+      deviceScaleFactor: fingerprint.devicePixelRatio,
+      colorScheme: "light",
+      timezoneId: fingerprint.timezone,
+    });
+
+    return { context, fingerprint };
+  } catch (error) {
+    await cleanup(browser, context);
+    console.error("Error initializing browser:", error);
+    throw error;
+  }
+}
+
+async function captureCookies(page, fingerprint) {
+  for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
+    try {
+      const challengePresent = await page.evaluate(() => {
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
+      });
+
+      if (challengePresent) {
+        console.log(
+          `Attempt ${attempt}: Challenge detected during cookie capture`
+        );
+
+        const challengeResolved = await handleTicketmasterChallenge(page);
+        if (!challengeResolved) {
+          if (attempt === CONFIG.MAX_RETRIES) {
+            console.log("Max retries reached during challenge resolution");
+            return { cookies: null, fingerprint };
+          }
+          await page.waitForTimeout(CONFIG.RETRY_DELAY);
+          continue;
+        }
+      }
+
+      let cookies = await context.cookies();
+
+      if (!cookies?.length) {
+        console.log(`Attempt ${attempt}: No cookies captured`);
+        if (attempt === CONFIG.MAX_RETRIES) {
+          return { cookies: null, fingerprint };
+        }
+        await page.waitForTimeout(CONFIG.RETRY_DELAY);
+        continue;
+      }
+
+      const oneHourFromNow = Date.now() + CONFIG.COOKIE_REFRESH_INTERVAL;
+      cookies = cookies.map((cookie) => ({
+        ...cookie,
+        expires: oneHourFromNow / 1000,
+        expiry: oneHourFromNow / 1000,
+      }));
+
+      await Promise.all(
+        cookies.map((cookie) =>
+          context.addCookies([
+            {
+              ...cookie,
+              expires: oneHourFromNow / 1000,
+              expiry: oneHourFromNow / 1000,
+            },
+          ])
+        )
+      );
+
+      fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
+      console.log(`Successfully captured cookies on attempt ${attempt}`);
+      return { cookies, fingerprint };
+
+    } catch (error) {
+      console.error(`Error capturing cookies (attempt ${attempt}):`, error);
+      if (attempt === CONFIG.MAX_RETRIES) {
+        return { cookies: null, fingerprint };
+      }
+      await page.waitForTimeout(CONFIG.RETRY_DELAY);
+    }
+  }
+
+  return { cookies: null, fingerprint };
+}
+
+async function loadCookiesFromFile() {
+  try {
+    if (fs.existsSync(COOKIES_FILE)) {
+      const cookiesData = fs.readFileSync(COOKIES_FILE, "utf8");
+      return JSON.parse(cookiesData);
+    }
+  } catch (error) {
+    console.error("Error loading cookies from file:", error);
+  }
+  return null;
+}
+
+async function getCapturedData(eventId, proxy, forceRefresh = false) {
+  const currentTime = Date.now();
+
+  if (!capturedState.cookies) {
+    const cookiesFromFile = await loadCookiesFromFile();
+    if (cookiesFromFile) {
+      const lastRefresh = cookiesFromFile[0]?.expires * 1000 || 0;
+      if (currentTime - lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL) {
+        capturedState.cookies = cookiesFromFile;
+        capturedState.lastRefresh = lastRefresh;
+      }
+    }
+  }
+
+  if (
+    !capturedState.cookies ||
+    !capturedState.fingerprint ||
+    !capturedState.lastRefresh ||
+    !capturedState.proxy ||
+    currentTime - capturedState.lastRefresh > CONFIG.COOKIE_REFRESH_INTERVAL ||
+    forceRefresh
+  ) {
+    console.log("Getting fresh cookies...");
+
+    for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
+      try {
+        const result = await refreshHeaders(eventId, proxy);
+        if (result?.cookies) {
+          return result;
+        }
+
+        console.log(`Retry ${attempt}: Failed to get valid cookies`);
+        if (attempt === CONFIG.MAX_RETRIES) {
+          throw new Error("Failed to capture valid cookies after max attempts");
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, CONFIG.RETRY_DELAY));
+      } catch (error) {
+        console.error(
+          `Error getting captured data (attempt ${attempt}):`,
+          error
+        );
+        if (attempt === CONFIG.MAX_RETRIES) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  return capturedState;
+}
+
+async function refreshHeaders(eventId, proxy, existingCookies = null) {
+  let localContext = null;
+  let localBrowser = null;
+
+  try {
+    // If valid existing cookies are provided, use them
+    if (existingCookies !== null) {
+      console.log(`Using provided cookies for event ${eventId}`);
+
+      // If we don't have fingerprint in capturedState, generate a new one
+      if (!capturedState.fingerprint) {
+        capturedState.fingerprint = BrowserFingerprint.generate();
+      }
+
+      // Update capturedState with existing cookies
+      capturedState = {
+        cookies: existingCookies,
+        fingerprint: capturedState.fingerprint,
+        lastRefresh: Date.now(),
+        proxy: capturedState.proxy || proxy,
+      };
+
+      return capturedState;
+    }
+
+    // Otherwise, load cookies from file
+    const cookiesFromFile = await loadCookiesFromFile();
+    if (cookiesFromFile !== null) {
+      // Generate new fingerprint if none exists in capturedState
+      if (!capturedState.fingerprint) {
+        capturedState.fingerprint = BrowserFingerprint.generate();
+      }
+
+      return {
+        cookies: cookiesFromFile,
+        lastRefresh: cookiesFromFile[0]?.expires * 1000 || Date.now(),
+        fingerprint: capturedState.fingerprint,
+        proxy: capturedState.proxy,
+      };
+    }
+
+    // Use local variables to prevent interference with global browser/context
+    const { context: newContext, fingerprint } = await initBrowser(proxy);
+    if (!newContext || !fingerprint) {
+      throw new Error("Failed to initialize browser or generate fingerprint");
+    }
+
+    localContext = newContext;
+
+    // Create page in try-catch block
+    let page;
+    try {
+      page = await localContext.newPage();
+    } catch (pageError) {
+      console.error("Failed to create new page:", pageError);
+      throw new Error("Failed to create new page: " + pageError.message);
+    }
+
+    if (!page) {
+      throw new Error("Failed to create page");
+    }
+
+    const url = `https://www.ticketmaster.com/event/${eventId}`;
+
+    try {
+      console.log(`Navigating to ${url} for event ${eventId}`);
+
+      // Use domcontentloaded instead of networkidle for faster, more reliable loading
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000, // 60 second timeout
+      });
+
+      console.log(`Successfully loaded page for event ${eventId}`);
+
+      try {
+        // Add a small delay to ensure page is loaded
+        await page.waitForTimeout(2000);
+        await simulateHumanBehavior(page);
+      } catch (behaviorError) {
+        console.warn(
+          "Human behavior simulation failed:",
+          behaviorError.message
+        );
+        // Continue anyway - not critical
+      }
+
+      const data = await captureCookies(page, fingerprint);
+
+      if (data?.cookies && data.cookies.length > 0) {
+        capturedState = {
+          cookies: data.cookies,
+          fingerprint: fingerprint,
+          lastRefresh: Date.now(),
+          proxy: proxy,
+        };
+        console.log(
+          `Successfully captured ${data.cookies.length} cookies for event ${eventId}`
+        );
+      } else {
+        console.error(`No cookies captured for event ${eventId}`);
+        resetCapturedState();
+      }
+
+      // Wait for proper page closure
+      try {
+        await page.close();
+      } catch (closeError) {
+        console.warn("Error closing page:", closeError.message);
+      }
+
+      return capturedState;
+    } catch (navigationError) {
+      console.error(
+        `Navigation error for ${eventId}:`,
+        navigationError.message
+      );
+
+      // Try direct API approach as fallback
+      try {
+        console.log("Attempting direct API approach for cookies");
+        const directData = await getDirectAPICookies(eventId);
+        if (directData) {
+          return directData;
+        }
+      } catch (apiError) {
+        console.error("Direct API approach failed:", apiError.message);
+      }
+
+      throw navigationError;
+    } finally {
+      // Ensure page is closed
+      if (page) {
+        try {
+          await page.close().catch(() => {});
+        } catch (e) {
+          console.warn("Error closing page in finally block");
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error in refreshHeaders:", error);
+    resetCapturedState();
+    throw error;
+  } finally {
+    // Clean up local instances, not affecting global ones
+    await cleanup(localBrowser, localContext);
+  }
+}
+const GetData = async (headers, proxyAgent, url, eventId) => {
+  let abortController = new AbortController();
+  
+  try {
+    const timeout = setTimeout(() => {
+      abortController.abort();
+      console.log("Request aborted due to timeout");
+      console.log(eventId, "eventId");
+    }, CONFIG.PAGE_TIMEOUT);
+
+    try {
+      const response = await axios.get(url, {
+        httpsAgent: proxyAgent,
+        headers: {
+          ...headers,
+          "Accept-Encoding": "gzip, deflate, br",
+          Connection: "keep-alive",
+        },
+        timeout: CONFIG.PAGE_TIMEOUT,
+        signal: abortController.signal,
+        validateStatus: (status) => status === 200,
+      });
+
+      clearTimeout(timeout);
+      return response.data;
+    } catch (error) {
+      clearTimeout(timeout);
+      console.log(`Request failed: ${error.message}`);
+      return false;
+    }
+  } catch (error) {
+    console.log(error, "error");
+    return false;
+  }
+};
+
+const GetProxy = () => {
+  let _proxy = [...proxyArray?.proxies];
+  const randomProxy = Math.floor(Math.random() * _proxy.length);
+  _proxy = _proxy[randomProxy];
+
+  if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
+    throw new Error("Invalid proxy configuration");
+  }
+
+  try {
+    const proxyUrl = new URL(`http://${_proxy.proxy}`);
+    const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
+      proxyUrl.hostname
+    }:${proxyUrl.port || 80}`;
+    const proxyAgent = new HttpsProxyAgent(proxyURl);
+    return { proxyAgent, proxy: _proxy };
+  } catch (error) {
+    console.error("Invalid proxy URL format:", error);
+    throw new Error("Invalid proxy URL format");
+  }
+};
+
+const ScrapeEvent = async (event) => {
+  try {
+    const { proxyAgent, proxy } = GetProxy();
+    const correlationId = generateCorrelationId();
+    const capturedData = await getCapturedData(event?.eventId, proxy);
+
+    if (!capturedData?.cookies?.length) {
+      throw new Error("Failed to capture cookies");
+    }
+
+    const cookieString = capturedData.cookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+
+    const userAgent = BrowserFingerprint.generateUserAgent(
+      capturedData.fingerprint
+    );
+
+    const MapHeader = {
+      "User-Agent": userAgent,
+      Accept: "*/*",
+      Origin: "https://www.ticketmaster.com",
+      Referer: "https://www.ticketmaster.com/",
+      "Content-Encoding": "gzip",
+      Cookie: cookieString,
+    };
+
+    const FacetHeader = {
+      Accept: "*/*",
+      "Accept-Language": capturedData.fingerprint.language,
+      "Accept-Encoding": "gzip, deflate, br, zstd",
+      "User-Agent": userAgent,
+      Referer: "https://www.ticketmaster.com/",
+      Origin: "https://www.ticketmaster.com",
+      Cookie: cookieString,
+      "tmps-correlation-id": correlationId,
+      "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
+    };
+
+    console.log("Starting event scraping with captured cookies...");
+
+    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${event?.eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${event?.eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+
+    const [DataMap, DataFacets] = await Promise.all([
+      GetData(MapHeader, proxyAgent, mapUrl, event?.eventId),
+      GetData(FacetHeader, proxyAgent, facetUrl, event?.eventId),
+    ]);
+
+    if (!DataFacets || !DataMap) {
+      console.log("Failed to get data from APIs");
+      return false;
+    }
+
+    console.log("API requests completed successfully");
+    const dataGet = GenerateNanoPlaces(DataFacets?.facets);
+    const finalData = AttachRowSection(
+      dataGet,
+      DataMap,
+      DataFacets?._embedded?.offer,
+      event,
+      DataFacets?._embedded?.description
+    );
+
+    return finalData;
+  } catch (error) {
+    console.error("Scraping error:", error);
+    return false;
+  } finally {
+    await cleanup(browser, context);
+  }
+};
+
+async function cleanup(browser, context) {
+  try {
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+  } catch (error) {
+    console.warn("Cleanup error:", error);
+  }
+}
+
+function resetCapturedState() {
+  capturedState = {
+    cookies: null,
+    fingerprint: null,
+    lastRefresh: null,
+    proxy: null,
+  };
+}
+
+export { ScrapeEvent, refreshHeaders };

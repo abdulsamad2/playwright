@@ -2,9 +2,10 @@ import moment from "moment";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders } from "./scraper.js";
 
-const CONCURRENT_LIMIT = 1;
+const CONCURRENT_LIMIT = 500; // Adjust based on system capacity
 const EVENT_REFRESH_INTERVAL = 60000; // 1 minute
 const MAX_RETRIES = 3;
+const SCRAPE_TIMEOUT = 60000; // 1 minute timeout per event
 
 class ScraperManager {
   constructor() {
@@ -16,6 +17,7 @@ class ScraperManager {
     this.retryQueue = [];
     this.isRunning = false;
     this.headers = null;
+    this.eventUpdateTimestamps = new Map(); // Track last update time for each event
   }
 
   logWithTime(message, type = "info") {
@@ -52,7 +54,7 @@ class ScraperManager {
 
       await ErrorLog.create({
         eventUrl: event.url,
-        eventId: event._id, // Store both _id and eventId
+        eventId: event._id,
         externalEventId: event.eventId,
         errorType,
         message: error.message,
@@ -71,15 +73,14 @@ class ScraperManager {
 
   async updateEventMetadata(eventId, scrapeResult) {
     try {
-      const event = await Event.findOne({ eventId: eventId });
+      const event = await Event.findOne({ Event_ID: eventId });
       if (!event) {
         throw new Error(`Event ${eventId} not found in database`);
       }
 
-      const previousTicketCount = event.availableSeats || 0;
+      const previousTicketCount = event.Available_Seats || 0;
       const currentTicketCount = scrapeResult.length;
 
-      // Update metadata regardless of seat changes
       const metadata = {
         lastUpdate: moment().format("YYYY-MM-DD HH:mm:ss"),
         iterationNumber: (event.metadata?.iterationNumber || 0) + 1,
@@ -94,27 +95,23 @@ class ScraperManager {
         },
       };
 
-      // Always update event metadata
       await Event.findOneAndUpdate(
-        { eventId: eventId },
+        { Event_ID: eventId },
         {
           $set: {
-            availableSeats: currentTicketCount,
-            lastUpdated: new Date(),
+            Available_Seats: currentTicketCount,
+            Last_Updated: new Date(),
             metadata,
           },
         },
         { new: true }
       );
 
-      // Only update consecutive groups if there are changes in seats
       if (scrapeResult && scrapeResult.length > 0) {
-        // Get current consecutive groups
         const currentGroups = await ConsecutiveGroup.find({
-          eventId: event.eventId,
+          eventId: event.Event_ID,
         });
 
-        // Create a hash of current seats for comparison
         const currentSeatsHash = new Set(
           currentGroups.flatMap((group) =>
             group.seats.map(
@@ -124,7 +121,6 @@ class ScraperManager {
           )
         );
 
-        // Create hash of new seats
         const newSeatsHash = new Set(
           scrapeResult.flatMap((group) =>
             group.seats.map(
@@ -134,24 +130,24 @@ class ScraperManager {
           )
         );
 
-        // Check if there are any differences in seats
         const hasChanges =
           [...currentSeatsHash].some((seat) => !newSeatsHash.has(seat)) ||
           [...newSeatsHash].some((seat) => !currentSeatsHash.has(seat));
 
         if (hasChanges) {
-          // Delete existing groups only if there are changes
-          await ConsecutiveGroup.deleteMany({ eventId: event.eventId });
+          await ConsecutiveGroup.deleteMany({ eventId: event.Event_ID });
 
-          // Create new consecutive groups
           const consecutiveGroups = scrapeResult.map((group) => {
             const seats = group.seats.map((seatNumber) => ({
               number: seatNumber.toString(),
+              inHandDate: event.inHandDate,
               price: group.inventory.listPrice,
             }));
 
+            const increasedCost = group.inventory.cost;
+
             return {
-              eventId: event.eventId,
+              eventId: event.Event_ID,
               section: group.section,
               row: group.row,
               seatCount: group.inventory.quantity,
@@ -159,6 +155,39 @@ class ScraperManager {
                 ...group.seats
               )}`,
               seats: seats,
+              inventory: {
+                quantity: group.inventory.quantity,
+                section: group.section,
+                hideSeatNumbers: group.inventory.hideSeatNumbers,
+                row: group.row,
+                cost: increasedCost,
+                stockType: group.inventory.stockType,
+                lineType: group.inventory.lineType,
+                seatType: group.inventory.seatType,
+                inHandDate: event.inHandDate,
+                notes: group.inventory.notes,
+                tags: group.inventory.tags,
+                inventoryId: group.inventory.inventoryId,
+                offerId: group.inventory.offerId,
+                splitType: group.inventory.splitType,
+                publicNotes: group.inventory.publicNotes,
+                listPrice: group.inventory.listPrice,
+                customSplit: group.inventory.customSplit,
+                tickets: group.inventory.tickets.map((ticket) => ({
+                  id: ticket.id,
+                  seatNumber: ticket.seatNumber,
+                  notes: ticket.notes,
+                  cost: ticket.cost,
+                  faceValue: ticket.faceValue,
+                  taxedCost: ticket.taxedCost,
+                  sellPrice: ticket.sellPrice ** 1.25,
+                  stockType: ticket.stockType,
+                  eventId: ticket.eventId,
+                  accountId: ticket.accountId,
+                  status: ticket.status,
+                  auditNote: ticket.auditNote,
+                })),
+              },
             };
           });
 
@@ -179,13 +208,12 @@ class ScraperManager {
     } catch (error) {
       console.error("Error updating event metadata:", error);
       await this.logError(eventId, "DATABASE_ERROR", error);
-      throw error; // Propagate error to trigger retry
+      throw error;
     }
   }
 
   async scrapeEvent(eventId, retryCount = 0) {
     this.activeJobs.set(eventId, moment());
-
     try {
       this.logWithTime(
         `Starting scrape for event ${eventId} (Attempt ${
@@ -193,14 +221,14 @@ class ScraperManager {
         }/${MAX_RETRIES})`
       );
 
-      const event = await Event.findOne({ eventId: eventId });
+      const event = await Event.findOne({ Event_ID: eventId });
       if (!event) {
         throw new Error(`Event ${eventId} not found in database`);
       }
 
-      if (event.skip_scraping) {
+      if (event.Skip_Scraping) {
         this.logWithTime(
-          `Skipping event ${eventId} due to skip_scraping flag`,
+          `Skipping event ${eventId} due to Skip_Scraping flag`,
           "info"
         );
         return true;
@@ -211,10 +239,18 @@ class ScraperManager {
         throw new Error("Failed to refresh headers");
       }
 
-      const result = await ScrapeEvent({
-        eventId: event.eventId,
-        headers: this.headers,
-      });
+      const result = await Promise.race([
+        ScrapeEvent({
+          eventId: event.Event_ID,
+          headers: this.headers,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Scrape timed out")),
+            SCRAPE_TIMEOUT
+          )
+        ),
+      ]);
 
       if (!result) {
         throw new Error("No data returned from scraper");
@@ -223,6 +259,7 @@ class ScraperManager {
       await this.updateEventMetadata(eventId, result);
       this.successCount++;
       this.lastSuccessTime = moment();
+      this.eventUpdateTimestamps.set(eventId, moment()); // Update last update time
       this.logWithTime(`Successfully scraped event ${eventId}`, "success");
       return true;
     } catch (error) {
@@ -273,19 +310,24 @@ class ScraperManager {
       try {
         const events = await Event.find({})
           .sort({ lastUpdated: 1 })
-          .select("eventId");
-
+          .select("Event_ID");
         this.logWithTime(`Total Events to Process: ${events.length}`);
 
+        const scrapePromises = [];
         for (const event of events) {
           if (!this.isRunning) break;
 
-          await this.scrapeEvent(event.eventId);
-          await new Promise((resolve) =>
-            setTimeout(resolve, EVENT_REFRESH_INTERVAL)
-          );
+          const lastUpdateTime = this.eventUpdateTimestamps.get(event.Event_ID);
+          const timeSinceLastUpdate = lastUpdateTime
+            ? moment().diff(lastUpdateTime, "milliseconds")
+            : EVENT_REFRESH_INTERVAL;
+
+          if (timeSinceLastUpdate >= EVENT_REFRESH_INTERVAL) {
+            scrapePromises.push(this.scrapeEvent(event.Event_ID));
+          }
         }
 
+        await Promise.all(scrapePromises);
         await this.processRetryQueue();
 
         if (this.failedEvents.size > 0) {

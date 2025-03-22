@@ -177,16 +177,26 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
   let totalCostWithPercentage=totalCost+(totalCost*(event?.listCostPercentage/100));
   */
  //Get Fee which won't multiply
- const orderProcessingCharges = offer?.charges?.filter(x => x?.reason === "order_processing") || [];
-  const singleExtraCharges = parseFloat(orderProcessingCharges.reduce((total, item) => total + (item?.amount || 0), 0) / (data?.seats?.length || 1));
+ const orderProcessingCharges =
+   offer?.charges?.filter((x) => x?.reason === "order_processing") || [];
+ const singleExtraCharges = parseFloat(
+   orderProcessingCharges.reduce(
+     (total, item) => total + (item?.amount || 0),
+     0
+   ) / (data?.seats?.length || 1)
+ );
 
-  const otherCharges = offer?.charges?.filter(x => x?.reason !== "order_processing") || [];
-  const repeatExtraCharges = parseFloat(otherCharges.reduce((total, item) => total + (item?.amount || 0), 0));
+ const otherCharges =
+   offer?.charges?.filter((x) => x?.reason !== "order_processing") || [];
+ const repeatExtraCharges = parseFloat(
+   otherCharges.reduce((total, item) => total + (item?.amount || 0), 0)
+ );
 
-  const faceValue = offer?.faceValue || 0;
-  const totalCost = singleExtraCharges + repeatExtraCharges + faceValue;
-  const listCostPercentage = event?.listCostPercentage || 0;
-  const totalCostWithPercentage = totalCost + (totalCost * (listCostPercentage / 100));
+ const faceValue = offer?.faceValue || 0;
+ const totalCost = singleExtraCharges + repeatExtraCharges + faceValue;
+ const listCostPercentage = event?.listCostPercentage || 0;
+ const totalCostWithPercentage =
+   totalCost + totalCost * (listCostPercentage / 100);
   return {
       "inventory": {
       "quantity": data?.seats?.length || 0,

@@ -16,8 +16,8 @@ const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
   PAGE_TIMEOUT: 30000,
   MAX_RETRIES: 3,
-  RETRY_DELAY: 2000,
-  CHALLENGE_TIMEOUT: 10000
+  RETRY_DELAY: 30000,
+  CHALLENGE_TIMEOUT: 10000,
 };
 
 let browser = null;
@@ -28,6 +28,10 @@ let capturedState = {
   lastRefresh: null,
   proxy: null,
 };
+// Flag to track if we're currently refreshing cookies
+let isRefreshingCookies = false;
+// Queue for pending cookie refresh requests
+let cookieRefreshQueue = [];
 
 function generateCorrelationId() {
   return crypto.randomUUID();
@@ -113,7 +117,7 @@ async function initBrowser(proxy) {
     }
 
     const proxyUrl = new URL(`http://${proxy.proxy}`);
-    
+
     browser = await firefox.launch({
       headless: false,
       proxy: {
@@ -198,7 +202,6 @@ async function captureCookies(page, fingerprint) {
       fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
       console.log(`Successfully captured cookies on attempt ${attempt}`);
       return { cookies, fingerprint };
-
     } catch (error) {
       console.error(`Error capturing cookies (attempt ${attempt}):`, error);
       if (attempt === CONFIG.MAX_RETRIES) {
@@ -226,6 +229,7 @@ async function loadCookiesFromFile() {
 async function getCapturedData(eventId, proxy, forceRefresh = false) {
   const currentTime = Date.now();
 
+  // If we don't have cookies, try to load them from file first
   if (!capturedState.cookies) {
     const cookiesFromFile = await loadCookiesFromFile();
     if (cookiesFromFile) {
@@ -233,112 +237,205 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
       if (currentTime - lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL) {
         capturedState.cookies = cookiesFromFile;
         capturedState.lastRefresh = lastRefresh;
+        if (!capturedState.fingerprint) {
+          capturedState.fingerprint = BrowserFingerprint.generate();
+        }
+        if (!capturedState.proxy) {
+          capturedState.proxy = proxy;
+        }
       }
     }
   }
 
-  if (
+  // Check if we need to refresh cookies
+  const needsRefresh =
     !capturedState.cookies ||
     !capturedState.fingerprint ||
     !capturedState.lastRefresh ||
     !capturedState.proxy ||
     currentTime - capturedState.lastRefresh > CONFIG.COOKIE_REFRESH_INTERVAL ||
-    forceRefresh
-  ) {
-    console.log("Getting fresh cookies...");
+    forceRefresh;
 
-    for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
-      try {
-        const result = await refreshHeaders(eventId, proxy);
-        if (result?.cookies) {
-          return result;
-        }
-
-        console.log(`Retry ${attempt}: Failed to get valid cookies`);
-        if (attempt === CONFIG.MAX_RETRIES) {
-          throw new Error("Failed to capture valid cookies after max attempts");
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, CONFIG.RETRY_DELAY));
-      } catch (error) {
-        console.error(
-          `Error getting captured data (attempt ${attempt}):`,
-          error
-        );
-        if (attempt === CONFIG.MAX_RETRIES) {
-          throw error;
-        }
-      }
-    }
+  if (needsRefresh) {
+    // Use the refreshHeaders function with locking mechanism
+    return await refreshHeaders(eventId, proxy);
   }
 
   return capturedState;
 }
 
-async function refreshHeaders(eventId, proxy) {
-  let contextInstance = null;
-  let browserInstance = null;
+async function refreshHeaders(eventId, proxy, existingCookies = null) {
+  // If cookies are already being refreshed, add this request to the queue
+  if (isRefreshingCookies) {
+    console.log(
+      `Cookies are already being refreshed, queueing request for event ${eventId}`
+    );
+    return new Promise((resolve, reject) => {
+      cookieRefreshQueue.push({ resolve, reject });
+    });
+  }
+
+  let localContext = null;
+  let localBrowser = null;
 
   try {
-    const existingCookies = await loadCookiesFromFile();
+    isRefreshingCookies = true;
+
+    if (
+      capturedState.cookies?.length &&
+      capturedState.lastRefresh &&
+      Date.now() - capturedState.lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL
+    ) {
+      console.log("Using existing cookies from memory");
+      return capturedState;
+    }
+
     if (existingCookies !== null) {
-      // Generate new fingerprint if none exists in capturedState
+      console.log(`Using provided cookies for event ${eventId}`);
+
       if (!capturedState.fingerprint) {
         capturedState.fingerprint = BrowserFingerprint.generate();
       }
 
-      return {
+      capturedState = {
         cookies: existingCookies,
-        lastRefresh: existingCookies[0]?.expires * 1000 || Date.now(),
         fingerprint: capturedState.fingerprint,
-        proxy: capturedState.proxy,
+        lastRefresh: Date.now(),
+        proxy: capturedState.proxy || proxy,
       };
+
+      return capturedState;
     }
 
-    if (!proxy?.proxy) {
-      const { proxy: newProxy } = GetProxy();
-      proxy = newProxy;
+    const cookiesFromFile = await loadCookiesFromFile();
+    if (cookiesFromFile) {
+      console.log("Using cookies from file");
+      if (!capturedState.fingerprint) {
+        capturedState.fingerprint = BrowserFingerprint.generate();
+      }
+
+      capturedState = {
+        cookies: cookiesFromFile,
+        fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
+        lastRefresh: Date.now(),
+        proxy: capturedState.proxy || proxy,
+      };
+
+      return capturedState;
     }
 
-    // Ensure fingerprint is generated
+    console.log(
+      `No valid cookies found, getting new cookies using event ${eventId}`
+    );
+
     const { context: newContext, fingerprint } = await initBrowser(proxy);
-    if (!fingerprint) {
-      throw new Error(
-        "Failed to generate fingerprint during browser initialization"
-      );
+    if (!newContext || !fingerprint) {
+      throw new Error("Failed to initialize browser or generate fingerprint");
     }
 
-    contextInstance = newContext;
+    localContext = newContext;
 
-    const page = await contextInstance.newPage();
+    // Create page in try-catch block
+    let page;
+    try {
+      page = await localContext.newPage();
+    } catch (pageError) {
+      console.error("Failed to create new page:", pageError);
+      throw new Error("Failed to create new page: " + pageError.message);
+    }
+
+    if (!page) {
+      throw new Error("Failed to create page");
+    }
+
     const url = `https://www.ticketmaster.com/event/${eventId}`;
 
     try {
+      console.log(`Navigating to ${url} for event ${eventId}`);
+
+      // Use domcontentloaded instead of networkidle for faster, more reliable loading
       await page.goto(url, {
-        waitUntil: "networkidle",
-        timeout: CONFIG.PAGE_TIMEOUT,
+        waitUntil: "domcontentloaded",
+        timeout: 60000, // 60 second timeout
       });
 
-      await simulateHumanBehavior(page);
+      console.log(`Successfully loaded page for event ${eventId}`);
+
+      // Check for Ticketmaster challenge (e.g., CAPTCHA)
+      const isChallengePresent = await checkForTicketmasterChallenge(page);
+      if (isChallengePresent) {
+        console.warn(
+          "Ticketmaster challenge detected, skipping cookie capture"
+        );
+        throw new Error("Ticketmaster challenge detected");
+      }
+
+      try {
+        await page.waitForTimeout(2000);
+        await simulateHumanBehavior(page);
+      } catch (behaviorError) {
+        console.warn(
+          "Human behavior simulation failed:",
+          behaviorError.message
+        );
+        // Continue anyway - not critical
+      }
+
       const data = await captureCookies(page, fingerprint);
 
-      if (data?.cookies) {
+      if (data?.cookies && data.cookies.length > 0) {
         capturedState = {
           cookies: data.cookies,
-          fingerprint: fingerprint, // Ensure fingerprint is saved
+          fingerprint: fingerprint,
           lastRefresh: Date.now(),
           proxy: proxy,
         };
+        console.log(
+          `Successfully captured ${data.cookies.length} cookies for event ${eventId}`
+        );
+
+        // Save cookies to JSON file
+        await saveCookiesToFile(data.cookies);
+        console.log("Cookies saved to file");
       } else {
+        console.error(`No cookies captured for event ${eventId}`);
         resetCapturedState();
       }
 
+      // Wait for proper page closure
+      try {
+        await page.close();
+      } catch (closeError) {
+        console.warn("Error closing page:", closeError.message);
+      }
+
       return capturedState;
+    } catch (navigationError) {
+      console.error(
+        `Navigation error for ${eventId}:`,
+        navigationError.message
+      );
+
+      // Try direct API approach as fallback
+      try {
+        console.log("Attempting direct API approach for cookies");
+        const directData = await getDirectAPICookies(eventId);
+        if (directData) {
+          return directData;
+        }
+      } catch (apiError) {
+        console.error("Direct API approach failed:", apiError.message);
+      }
+
+      throw navigationError;
     } finally {
+      // Ensure page is closed
       if (page) {
-        await page.close().catch((err) => {
-          console.warn("Error closing page:", err);
-        });
+        try {
+          await page.close().catch(() => {});
+        } catch (e) {
+          console.warn("Error closing page in finally block");
+        }
       }
     }
   } catch (error) {
@@ -346,12 +443,57 @@ async function refreshHeaders(eventId, proxy) {
     resetCapturedState();
     throw error;
   } finally {
-    await cleanup(browserInstance, contextInstance);
+    // Clean up local instances, not affecting global ones
+    await cleanup(localBrowser, localContext);
+
+    // Set the refreshing flag back to false
+    isRefreshingCookies = false;
+
+    // Process any queued refresh requests
+    while (cookieRefreshQueue.length > 0) {
+      const { resolve, reject } = cookieRefreshQueue.shift();
+      if (capturedState.cookies) {
+        resolve(capturedState);
+      } else {
+        reject(new Error("Failed to refresh cookies"));
+      }
+    }
   }
 }
+
+// Function to check for Ticketmaster challenge (e.g., CAPTCHA)
+async function checkForTicketmasterChallenge(page) {
+  try {
+    // Check for CAPTCHA or other blocking mechanisms
+    const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
+    const isChallengePresent = (await page.$(challengeSelector)) !== null;
+
+    if (isChallengePresent) {
+      console.warn("Ticketmaster challenge detected");
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Error checking for Ticketmaster challenge:", error);
+    return false;
+  }
+}
+
+// Function to save cookies to a JSON file
+async function saveCookiesToFile(cookies) {
+  try {
+    const filePath = "./cookies.json";
+    await fs.promises.writeFile(filePath, JSON.stringify(cookies, null, 2));
+    console.log("Cookies saved to file:", filePath);
+  } catch (error) {
+    console.error("Error saving cookies to file:", error);
+  }
+}
+
 const GetData = async (headers, proxyAgent, url, eventId) => {
   let abortController = new AbortController();
-  
+
   try {
     const timeout = setTimeout(() => {
       abortController.abort();
