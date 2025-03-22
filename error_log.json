@@ -1,7 +1,0 @@
-{
-  "error": "this._wrapApiCall is not a function",
-  "stack": "TypeError: this._wrapApiCall is not a function\n    at Object.launch (D:\\nodejs\\playwright\\node_modules\\playwright-core\\lib\\client\\browserType.js:70:23)\n    at Scraper.initBrowser (file:///D:/nodejs/playwright/scraper.js:59:42)\n    at Scraper.scrape (file:///D:/nodejs/playwright/scraper.js:191:18)\n    at main (file:///D:/nodejs/playwright/index.js:14:36)\n    at file:///D:/nodejs/playwright/index.js:87:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:271:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:547:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:116:5)",
-  "timestamp": "2025-01-23T10:01:05.622Z",
-  "totalRunTime": "0.00 minutes",
-  "lastIteration": 1
-}

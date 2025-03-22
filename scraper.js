@@ -1,105 +1,151 @@
-import { firefox, chromium, webkit } from "playwright";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const axios = require("axios");
+const { HttpsProxyAgent } = require("https-proxy-agent");
+const fs = require("fs");
+import { firefox } from "playwright";
+import proxyArray from "./helpers/proxy.js";
+import { AttachRowSection } from "./helpers/seatBatch.js";
+import GenerateNanoPlaces from "./helpers/seats.js";
+import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
-import { proxyArray } from "./proxyList.js";
-import { BROWSERS, DEVICES } from "./config.js";
+import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 
-class Scraper {
-  constructor() {
-    this.sessions = new Map();
-    this.fingerprints = new Map();
-    this.proxyArray = proxyArray;
-    this.currentProxyIndex = 0;
-    this.currentBrowserIndex = 0;
-    this.currentDeviceIndex = 0;
-    this.lastKnownSeatCount = null;
-    this.lastFullScrapeTime = null;
-    this.FULL_SCRAPE_INTERVAL = 120 * 60 * 1000; // 15 minutes
+const COOKIES_FILE = "cookies.json";
+const CONFIG = {
+  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
+  PAGE_TIMEOUT: 30000,
+  MAX_RETRIES: 3,
+  RETRY_DELAY: 30000,
+  CHALLENGE_TIMEOUT: 10000,
+};
+
+let browser = null;
+let context = null;
+let capturedState = {
+  cookies: null,
+  fingerprint: null,
+  lastRefresh: null,
+  proxy: null,
+};
+// Flag to track if we're currently refreshing cookies
+let isRefreshingCookies = false;
+// Queue for pending cookie refresh requests
+let cookieRefreshQueue = [];
+
+function generateCorrelationId() {
+  return crypto.randomUUID();
+}
+
+async function handleTicketmasterChallenge(page) {
+  const startTime = Date.now();
+
+  try {
+    const challengePresent = await page.evaluate(() => {
+      return document.body.textContent.includes(
+        "Your Browsing Activity Has Been Paused"
+      );
+    });
+
+    if (challengePresent) {
+      console.log("Detected Ticketmaster challenge, attempting resolution...");
+      await page.waitForTimeout(1000 + Math.random() * 1000);
+
+      const viewportSize = page.viewportSize();
+      if (viewportSize) {
+        await page.mouse.move(
+          Math.floor(Math.random() * viewportSize.width),
+          Math.floor(Math.random() * viewportSize.height),
+          { steps: 5 }
+        );
+      }
+
+      const buttons = await page.$$("button");
+      let buttonClicked = false;
+
+      for (const button of buttons) {
+        if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
+          throw new Error("Challenge timeout");
+        }
+
+        const text = await button.textContent();
+        if (
+          text?.toLowerCase().includes("continue") ||
+          text?.toLowerCase().includes("verify")
+        ) {
+          await button.click();
+          buttonClicked = true;
+          break;
+        }
+      }
+
+      if (!buttonClicked) {
+        throw new Error("Could not find challenge button");
+      }
+
+      await page.waitForTimeout(2000);
+      const stillChallenged = await page.evaluate(() => {
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
+      });
+
+      if (stillChallenged) {
+        throw new Error("Challenge not resolved");
+      }
+    }
+    return true;
+  } catch (error) {
+    console.error("Challenge handling failed:", error.message);
+    resetCapturedState();
+    throw error;
   }
+}
 
-  getRandomProxy() {
-    return this.proxyArray[Math.floor(Math.random() * this.proxyArray.length)];
-  }
+async function initBrowser(proxy) {
+  try {
+    if (!proxy?.proxy) {
+      const { proxy: newProxy } = GetProxy();
+      proxy = newProxy;
+    }
 
-  getNextProxy() {
-    const proxy = this.proxyArray[this.currentProxyIndex];
-    this.currentProxyIndex =
-      (this.currentProxyIndex + 1) % this.proxyArray.length;
-    return proxy;
-  }
+    const fingerprint = BrowserFingerprint.generate();
+    const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
 
-  getProxiesByType(type) {
-    return this.proxyArray.filter((proxy) => proxy.host.includes(type));
-  }
+    if (browser) {
+      await cleanup(browser, context);
+    }
 
-  getNextBrowser() {
-    const browser = BROWSERS[this.currentBrowserIndex];
-    this.currentBrowserIndex = (this.currentBrowserIndex + 1) % BROWSERS.length;
-    return browser;
-  }
+    const proxyUrl = new URL(`http://${proxy.proxy}`);
 
-  getNextDevice() {
-    const device = DEVICES[this.currentDeviceIndex];
-    this.currentDeviceIndex = (this.currentDeviceIndex + 1) % DEVICES.length;
-    return device;
-  }
-
-  async initBrowser() {
-    this.fingerprint = BrowserFingerprint.generate();
-    const selectedBrowser = this.getNextBrowser();
-    const selectedDevice = this.getNextDevice();
-    const selectedProxy = this.getNextProxy();
-
-    console.log(
-      `Using browser: ${selectedBrowser.name}, device: ${selectedDevice.name}, proxy: ${selectedProxy.host}:${selectedProxy.port}`
-    );
-
-    const launchOptions = {
+    browser = await firefox.launch({
+      headless: false,
       proxy: {
-        server: `${selectedProxy.host}:${selectedProxy.port}`,
-        username: selectedProxy.username,
-        password: selectedProxy.password,
+        server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
+        username: proxy.username,
+        password: proxy.password,
       },
-      headless: true,
-    };
+    });
 
-    this.browser = await selectedBrowser.engine.launch(launchOptions);
+    context = await browser.newContext({
+      viewport: fingerprint.screen,
+      userAgent,
+      locale: fingerprint.language,
+      deviceScaleFactor: fingerprint.devicePixelRatio,
+      colorScheme: "light",
+      timezoneId: fingerprint.timezone,
+    });
 
-    const contextOptions = {
-      viewport: selectedDevice.viewport,
-      userAgent: BrowserFingerprint.generateUserAgent(this.fingerprint),
-      deviceScaleFactor: this.fingerprint.devicePixelRatio,
-      locale: this.fingerprint.language,
-      timezoneId: "America/New_York",
-      permissions: ["geolocation"],
-      bypassCSP: true,
-      ignoreHTTPSErrors: true,
-      extraHTTPHeaders: {
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "max-age=0",
-        Connection: "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Ch-Ua": `"${this.fingerprint.browser.name}";v="${this.fingerprint.browser.version}"`,
-        "Sec-Ch-Ua-Mobile": selectedDevice.isMobile ? "?1" : "?0",
-        "Sec-Ch-Ua-Platform": `"${this.fingerprint.platform.name}"`,
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-      },
-    };
-
-    this.context = await this.browser.newContext(contextOptions);
-    await this.context.setDefaultTimeout(30000);
-    await this.context.setDefaultNavigationTimeout(60000);
+    return { context, fingerprint };
+  } catch (error) {
+    await cleanup(browser, context);
+    console.error("Error initializing browser:", error);
+    throw error;
   }
+}
 
-  async handleTicketmasterChallenge(page) {
-    const CHALLENGE_TIMEOUT = 10000; // 10 seconds timeout for challenge
-    const startTime = Date.now();
-
+async function captureCookies(page, fingerprint) {
+  for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
     try {
       const challengePresent = await page.evaluate(() => {
         return document.body.textContent.includes(
@@ -109,725 +155,489 @@ class Scraper {
 
       if (challengePresent) {
         console.log(
-          "Detected Ticketmaster challenge, attempting quick resolution..."
+          `Attempt ${attempt}: Challenge detected during cookie capture`
         );
 
-        // Quick human behavior simulation
-        await page.waitForTimeout(1000 + Math.random() * 1000);
-        const viewportSize = page.viewportSize();
-        if (viewportSize) {
-          await page.mouse.move(
-            Math.floor(Math.random() * viewportSize.width),
-            Math.floor(Math.random() * viewportSize.height),
-            { steps: 5 }
-          );
-        }
-
-        // Try to find and click the button
-        const buttons = await page.$$("button");
-        let buttonClicked = false;
-
-        for (const button of buttons) {
-          if (Date.now() - startTime > CHALLENGE_TIMEOUT) {
-            console.log("Challenge handling timeout - will switch browser");
-            throw new Error("Challenge timeout");
+        const challengeResolved = await handleTicketmasterChallenge(page);
+        if (!challengeResolved) {
+          if (attempt === CONFIG.MAX_RETRIES) {
+            console.log("Max retries reached during challenge resolution");
+            return { cookies: null, fingerprint };
           }
-
-          const text = await button.textContent();
-          if (
-            text.toLowerCase().includes("continue") ||
-            text.toLowerCase().includes("verify")
-          ) {
-            await button.click();
-            buttonClicked = true;
-            break;
-          }
-        }
-
-        if (!buttonClicked) {
-          throw new Error("Could not find challenge button");
-        }
-
-        // Quick check if challenge is resolved
-        await page.waitForTimeout(2000);
-
-        const stillChallenged = await page.evaluate(() => {
-          return document.body.textContent.includes(
-            "Your Browsing Activity Has Been Paused"
-          );
-        });
-
-        if (stillChallenged) {
-          console.log("Challenge not resolved quickly - switching browser");
-          throw new Error("Challenge not resolved");
+          await page.waitForTimeout(CONFIG.RETRY_DELAY);
+          continue;
         }
       }
-    } catch (error) {
-      console.error("Challenge handling failed:", error.message);
-      // Close current browser and create new one with different fingerprint
-      await this.close();
-      await this.initBrowser();
-      throw new Error("Switching browser due to challenge");
-    }
-  }
 
-  async simulateHumanBehavior(page) {
-    const viewportSize = page.viewportSize();
-    if (!viewportSize) return;
+      let cookies = await context.cookies();
 
-    try {
-      await page.waitForTimeout(2000 + Math.random() * 3000);
-
-      for (let i = 0; i < 3 + Math.random() * 5; i++) {
-        const x = Math.floor(Math.random() * viewportSize.width);
-        const y = Math.floor(Math.random() * viewportSize.height);
-
-        await page.mouse.move(x, y, {
-          steps: 10 + Math.floor(Math.random() * 20),
-        });
-
-        await page.waitForTimeout(500 + Math.random() * 1000);
+      if (!cookies?.length) {
+        console.log(`Attempt ${attempt}: No cookies captured`);
+        if (attempt === CONFIG.MAX_RETRIES) {
+          return { cookies: null, fingerprint };
+        }
+        await page.waitForTimeout(CONFIG.RETRY_DELAY);
+        continue;
       }
 
-      await page.evaluate(() => {
-        return new Promise((resolve) => {
-          let steps = 0;
-          const maxSteps = 5 + Math.floor(Math.random() * 5);
+      const oneHourFromNow = Date.now() + CONFIG.COOKIE_REFRESH_INTERVAL;
+      cookies = cookies.map((cookie) => ({
+        ...cookie,
+        expires: oneHourFromNow / 1000,
+        expiry: oneHourFromNow / 1000,
+      }));
 
-          const scroll = () => {
-            if (steps >= maxSteps) {
-              resolve();
-              return;
-            }
-
-            const amount = Math.random() * 100 - 50;
-            window.scrollBy({
-              top: amount,
-              behavior: "smooth",
-            });
-
-            steps++;
-            setTimeout(scroll, 1000 + Math.random() * 2000);
-          };
-
-          scroll();
-        });
-      });
-
-      await page.waitForTimeout(1000 + Math.random() * 2000);
-    } catch (error) {
-      console.error("Error in human behavior simulation:", error.message);
-    }
-  }
-
-  async getAvailableSeatCount(page) {
-    return await page.evaluate(() => {
-      const seats = document.querySelectorAll(
-        'circle[data-component="svg__seat"].is-available'
+      await Promise.all(
+        cookies.map((cookie) =>
+          context.addCookies([
+            {
+              ...cookie,
+              expires: oneHourFromNow / 1000,
+              expiry: oneHourFromNow / 1000,
+            },
+          ])
+        )
       );
-      return seats.length;
+
+      fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
+      console.log(`Successfully captured cookies on attempt ${attempt}`);
+      return { cookies, fingerprint };
+    } catch (error) {
+      console.error(`Error capturing cookies (attempt ${attempt}):`, error);
+      if (attempt === CONFIG.MAX_RETRIES) {
+        return { cookies: null, fingerprint };
+      }
+      await page.waitForTimeout(CONFIG.RETRY_DELAY);
+    }
+  }
+
+  return { cookies: null, fingerprint };
+}
+
+async function loadCookiesFromFile() {
+  try {
+    if (fs.existsSync(COOKIES_FILE)) {
+      const cookiesData = fs.readFileSync(COOKIES_FILE, "utf8");
+      return JSON.parse(cookiesData);
+    }
+  } catch (error) {
+    console.error("Error loading cookies from file:", error);
+  }
+  return null;
+}
+
+async function getCapturedData(eventId, proxy, forceRefresh = false) {
+  const currentTime = Date.now();
+
+  // If we don't have cookies, try to load them from file first
+  if (!capturedState.cookies) {
+    const cookiesFromFile = await loadCookiesFromFile();
+    if (cookiesFromFile) {
+      const lastRefresh = cookiesFromFile[0]?.expires * 1000 || 0;
+      if (currentTime - lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL) {
+        capturedState.cookies = cookiesFromFile;
+        capturedState.lastRefresh = lastRefresh;
+        if (!capturedState.fingerprint) {
+          capturedState.fingerprint = BrowserFingerprint.generate();
+        }
+        if (!capturedState.proxy) {
+          capturedState.proxy = proxy;
+        }
+      }
+    }
+  }
+
+  // Check if we need to refresh cookies
+  const needsRefresh =
+    !capturedState.cookies ||
+    !capturedState.fingerprint ||
+    !capturedState.lastRefresh ||
+    !capturedState.proxy ||
+    currentTime - capturedState.lastRefresh > CONFIG.COOKIE_REFRESH_INTERVAL ||
+    forceRefresh;
+
+  if (needsRefresh) {
+    // Use the refreshHeaders function with locking mechanism
+    return await refreshHeaders(eventId, proxy);
+  }
+
+  return capturedState;
+}
+
+async function refreshHeaders(eventId, proxy, existingCookies = null) {
+  // If cookies are already being refreshed, add this request to the queue
+  if (isRefreshingCookies) {
+    console.log(
+      `Cookies are already being refreshed, queueing request for event ${eventId}`
+    );
+    return new Promise((resolve, reject) => {
+      cookieRefreshQueue.push({ resolve, reject });
     });
   }
-  async performQuickCheck(page) {
-    console.log("Performing quick availability check...");
-    const startTime = Date.now();
 
-    try {
-      await this.handleTicketmasterChallenge(page);
+  let localContext = null;
+  let localBrowser = null;
 
-      // Define selectors
-      const SELECTORS = {
-        SVG_MAP:
-          "#map-container > div.zoomer > div.zoomer__controls > button.zoomer__control--zoomin",
-        SEATS: 'circle[data-component="svg__seat"]',
-        ACCEPT_BUTTON: '[data-bdd="accept-modal-accept-button"]',
+  try {
+    isRefreshingCookies = true;
+
+    if (
+      capturedState.cookies?.length &&
+      capturedState.lastRefresh &&
+      Date.now() - capturedState.lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL
+    ) {
+      console.log("Using existing cookies from memory");
+      return capturedState;
+    }
+
+    if (existingCookies !== null) {
+      console.log(`Using provided cookies for event ${eventId}`);
+
+      if (!capturedState.fingerprint) {
+        capturedState.fingerprint = BrowserFingerprint.generate();
+      }
+
+      capturedState = {
+        cookies: existingCookies,
+        fingerprint: capturedState.fingerprint,
+        lastRefresh: Date.now(),
+        proxy: capturedState.proxy || proxy,
       };
 
-      // Handle accept button if present
-      try {
-        const acceptButton = await page.waitForSelector(
-          SELECTORS.ACCEPT_BUTTON,
-          { timeout: 2000 }
-        );
-        if (acceptButton) {
-          await acceptButton.click();
-          await page.waitForTimeout(200);
-        }
-      } catch (e) {
-        // Accept button not found, continue
+      return capturedState;
+    }
+
+    const cookiesFromFile = await loadCookiesFromFile();
+    if (cookiesFromFile) {
+      console.log("Using cookies from file");
+      if (!capturedState.fingerprint) {
+        capturedState.fingerprint = BrowserFingerprint.generate();
       }
 
-      // Wait for zoom button with shorter timeout first
-      console.log("Waiting for zoom button...");
-      const zoomButton = await page
-        .waitForSelector(SELECTORS.SVG_MAP, {
-          timeout: 10000,
-          state: "visible",
-        })
-        .catch(() => null);
+      capturedState = {
+        cookies: cookiesFromFile,
+        fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
+        lastRefresh: Date.now(),
+        proxy: capturedState.proxy || proxy,
+      };
 
-      if (!zoomButton) {
-        console.log("Zoom button not immediately visible, waiting longer...");
-        await page.waitForSelector(SELECTORS.SVG_MAP, {
-          timeout: 30000,
-          state: "visible",
-        });
-      }
+      return capturedState;
+    }
 
-      // Perform zooming with verification
-      console.log("Starting zoom process...");
-      let zoomAttempts = 0;
-      const maxZoomAttempts = 3;
+    console.log(
+      `No valid cookies found, getting new cookies using event ${eventId}`
+    );
 
-      while (zoomAttempts < maxZoomAttempts) {
-        try {
-          // Click zoom button multiple times with verification
-          for (let i = 0; i < 3; i++) {
-            await page.click(SELECTORS.SVG_MAP);
-            await page.waitForTimeout(200);
-          }
-          break; // Break if zooming successful
-        } catch (error) {
-          zoomAttempts++;
-          console.log(`Zoom attempt ${zoomAttempts} failed, retrying...`);
-          await page.waitForTimeout(1000);
+    const { context: newContext, fingerprint } = await initBrowser(proxy);
+    if (!newContext || !fingerprint) {
+      throw new Error("Failed to initialize browser or generate fingerprint");
+    }
 
-          if (zoomAttempts === maxZoomAttempts) {
-            console.error("Failed to zoom after multiple attempts");
-            throw new Error("Zoom operation failed");
-          }
-        }
-      }
+    localContext = newContext;
 
-      // Wait for seats to be visible after zooming
-      console.log("Waiting for seats to be visible after zoom...");
-      await page.waitForSelector(SELECTORS.SEATS, {
-        timeout: 10000,
-        state: "visible",
+    // Create page in try-catch block
+    let page;
+    try {
+      page = await localContext.newPage();
+    } catch (pageError) {
+      console.error("Failed to create new page:", pageError);
+      throw new Error("Failed to create new page: " + pageError.message);
+    }
+
+    if (!page) {
+      throw new Error("Failed to create page");
+    }
+
+    const url = `https://www.ticketmaster.com/event/${eventId}`;
+
+    try {
+      console.log(`Navigating to ${url} for event ${eventId}`);
+
+      // Use domcontentloaded instead of networkidle for faster, more reliable loading
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000, // 60 second timeout
       });
 
-      // Get seat count
-      const seatCount = await this.getAvailableSeatCount(page);
+      console.log(`Successfully loaded page for event ${eventId}`);
 
-      const checkDuration = ((Date.now() - startTime) / 1000).toFixed(2);
-      console.log(
-        `Quick check completed in ${checkDuration}s. Available seats: ${seatCount}`
+      // Check for Ticketmaster challenge (e.g., CAPTCHA)
+      const isChallengePresent = await checkForTicketmasterChallenge(page);
+      if (isChallengePresent) {
+        console.warn(
+          "Ticketmaster challenge detected, skipping cookie capture"
+        );
+        throw new Error("Ticketmaster challenge detected");
+      }
+
+      try {
+        await page.waitForTimeout(2000);
+        await simulateHumanBehavior(page);
+      } catch (behaviorError) {
+        console.warn(
+          "Human behavior simulation failed:",
+          behaviorError.message
+        );
+        // Continue anyway - not critical
+      }
+
+      const data = await captureCookies(page, fingerprint);
+
+      if (data?.cookies && data.cookies.length > 0) {
+        capturedState = {
+          cookies: data.cookies,
+          fingerprint: fingerprint,
+          lastRefresh: Date.now(),
+          proxy: proxy,
+        };
+        console.log(
+          `Successfully captured ${data.cookies.length} cookies for event ${eventId}`
+        );
+
+        // Save cookies to JSON file
+        await saveCookiesToFile(data.cookies);
+        console.log("Cookies saved to file");
+      } else {
+        console.error(`No cookies captured for event ${eventId}`);
+        resetCapturedState();
+      }
+
+      // Wait for proper page closure
+      try {
+        await page.close();
+      } catch (closeError) {
+        console.warn("Error closing page:", closeError.message);
+      }
+
+      return capturedState;
+    } catch (navigationError) {
+      console.error(
+        `Navigation error for ${eventId}:`,
+        navigationError.message
       );
 
-      return {
-        availableSeats: seatCount,
-        quickCheckDuration: checkDuration,
-      };
-    } catch (error) {
-      console.error("Error during quick check:", error.message);
-      throw error;
-    }
-  }
-
-  async performFullScrape(page) {
-    console.log("Performing full seat scrape with pricing and grouping...");
-    const startTime = Date.now();
-
-    try {
-      const data = await page.evaluate(async () => {
-        const SELECTORS = {
-          ACCEPT_BUTTON: '[data-bdd="accept-modal-accept-button"]',
-          SVG_MAP:
-            "#map-container > div.zoomer > div.zoomer__controls > button.zoomer__control--zoomin",
-          SEAT: 'circle[data-component="svg__seat"]',
-          EVENT_TITLE: "h1",
-          EVENT_DATE: "#edp-event-header div.sc-1eku3jf-12.BANxv span > span",
-          ROW: 'g[data-component="svg__row"]',
-          SECTION: 'g[data-component="svg__block"]',
-          PRICE_POPUP: ".standard-admission",
-          TOOLTIP: '[role="tooltip"]',
-        };
-
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-        const simulateHover = async (element) => {
-          const events = [
-            new MouseEvent("pointerover", { bubbles: true }),
-            new MouseEvent("mouseenter", { bubbles: true }),
-            new MouseEvent("mouseover", { bubbles: true }),
-            new MouseEvent("pointermove", { bubbles: true }),
-            new MouseEvent("mousemove", { bubbles: true }),
-          ];
-
-          for (const event of events) {
-            element.dispatchEvent(event);
-          }
-
-          await sleep(150);
-        };
-
-        const getPriceFromTooltip = () => {
-          const selectors = [
-            ".standard-admission",
-            '[role="tooltip"] .standard-admission',
-            '[role="tooltip"] [class*="price"]',
-            '[class*="tooltip"] [class*="price"]',
-            '[class*="popup"] [class*="price"]',
-          ];
-
-          for (const selector of selectors) {
-            const element = document.querySelector(selector);
-            if (element) {
-              const text = element.textContent;
-              const priceMatch = text.match(/\$(\d+(\.\d{2})?)/);
-              if (priceMatch) return parseFloat(priceMatch[1]);
-            }
-          }
-
-          return null;
-        };
-
-        const waitForElement = (selector, timeout = 5000) => {
-          return new Promise((resolve, reject) => {
-            const element = document.querySelector(selector);
-            if (element) {
-              resolve(element);
-              return;
-            }
-
-            const observer = new MutationObserver(() => {
-              const element = document.querySelector(selector);
-              if (element) {
-                observer.disconnect();
-                resolve(element);
-              }
-            });
-
-            observer.observe(document.body, {
-              childList: true,
-              subtree: true,
-            });
-
-            setTimeout(() => {
-              observer.disconnect();
-              resolve(null);
-            }, timeout);
-          });
-        };
-
-        const scrapeSeats = async () => {
-          try {
-            try {
-              const acceptButton = await waitForElement(
-                SELECTORS.ACCEPT_BUTTON,
-                1000
-              );
-              if (acceptButton) {
-                acceptButton.click();
-                await sleep(200);
-              }
-            } catch (e) {}
-
-            const svg = await waitForElement(SELECTORS.SVG_MAP);
-            if (!svg) throw new Error("SVG map not found");
-
-            for (let i = 0; i < 5; i++) {
-              svg.click();
-              await sleep(200);
-            }
-
-            await waitForElement(SELECTORS.SEAT, 1000);
-
-            const seatElements = document.querySelectorAll(SELECTORS.SEAT);
-            const sections = new Map();
-            const rows = new Map();
-
-            seatElements.forEach((seat) => {
-              const sectionElement = seat.closest(SELECTORS.SECTION);
-              const rowElement = seat.closest(SELECTORS.ROW);
-
-              if (sectionElement && !sections.has(sectionElement)) {
-                sections.set(
-                  sectionElement,
-                  sectionElement.getAttribute("data-section-name")
-                );
-              }
-              if (rowElement && !rows.has(rowElement)) {
-                rows.set(rowElement, rowElement.getAttribute("data-row-name"));
-              }
-            });
-
-            const seats = [];
-            const availableSeats = Array.from(seatElements).filter((seat) =>
-              seat.classList.contains("is-available")
-            );
-
-            const BATCH_SIZE = 5;
-            for (let i = 0; i < availableSeats.length; i += BATCH_SIZE) {
-              const batch = availableSeats.slice(i, i + BATCH_SIZE);
-
-              for (const seat of batch) {
-                const sectionElement = seat.closest(SELECTORS.SECTION);
-                const rowElement = seat.closest(SELECTORS.ROW);
-
-                document
-                  .querySelectorAll('[role="tooltip"]')
-                  .forEach((el) => el.remove());
-
-                let price = null;
-                let attempts = 0;
-                while (!price && attempts < 3) {
-                  await simulateHover(seat);
-                  price = getPriceFromTooltip();
-                  attempts++;
-                  if (!price) await sleep(100);
-                }
-
-                if (price) {
-                  seats.push({
-                    id: seat.getAttribute("id"),
-                    seatNumber: seat.getAttribute("data-seat-name"),
-                    row: rows.get(rowElement),
-                    section: sections.get(sectionElement),
-                    isAvailable: true,
-                    price,
-                  });
-                }
-              }
-
-              await sleep(100);
-            }
-
-            const validSeats = seats.filter(
-              (seat) => seat.id && seat.seatNumber
-            );
-
-            const groupedSeats = {};
-            validSeats.forEach((seat) => {
-              if (!groupedSeats[seat.section]) {
-                groupedSeats[seat.section] = {};
-              }
-              if (!groupedSeats[seat.section][seat.row]) {
-                groupedSeats[seat.section][seat.row] = [];
-              }
-              groupedSeats[seat.section][seat.row].push(seat);
-            });
-
-            const consecutiveGroups = [];
-
-            Object.entries(groupedSeats).forEach(([section, rows]) => {
-              Object.entries(rows).forEach(([row, seats]) => {
-                const sortedSeats = seats.sort(
-                  (a, b) => parseInt(a.seatNumber) - parseInt(b.seatNumber)
-                );
-                let currentGroup = [sortedSeats[0]];
-
-                for (let i = 1; i < sortedSeats.length; i++) {
-                  const currentSeat = sortedSeats[i];
-                  const previousSeat = sortedSeats[i - 1];
-
-                  if (
-                    parseInt(currentSeat.seatNumber) ===
-                    parseInt(previousSeat.seatNumber) + 1
-                  ) {
-                    currentGroup.push(currentSeat);
-                  } else {
-                    if (currentGroup.length >= 2) {
-                      consecutiveGroups.push({
-                        section,
-                        row,
-                        seatCount: currentGroup.length,
-                        seatRange: `${currentGroup[0].seatNumber} to ${
-                          currentGroup[currentGroup.length - 1].seatNumber
-                        }`,
-                        seats: currentGroup.map((s) => ({
-                          number: s.seatNumber,
-                          price: s.price,
-                        })),
-                      });
-                    }
-                    currentGroup = [currentSeat];
-                  }
-                }
-
-                if (currentGroup.length >= 2) {
-                  consecutiveGroups.push({
-                    section,
-                    row,
-                    seatCount: currentGroup.length,
-                    seatRange: `${currentGroup[0].seatNumber} to ${
-                      currentGroup[currentGroup.length - 1].seatNumber
-                    }`,
-                    seats: currentGroup.map((s) => ({
-                      number: s.seatNumber,
-                      price: s.price,
-                    })),
-                  });
-                }
-              });
-            });
-
-            const [eventTitle, eventDate] = await Promise.all([
-              document
-                .querySelector(SELECTORS.EVENT_TITLE)
-                ?.textContent?.trim() || "",
-              document
-                .querySelector(SELECTORS.EVENT_DATE)
-                ?.textContent?.trim() || "",
-            ]);
-
-            return {
-              eventInfo: {
-                title: eventTitle,
-                dateTime: eventDate,
-              },
-              seatingInfo: {
-                availableSeats: validSeats.length,
-                consecutiveGroups,
-                seats: validSeats,
-              },
-            };
-          } catch (error) {
-            console.error("Error during scraping:", error);
-            throw error;
-          }
-        };
-
-        return scrapeSeats();
-      });
-
-      const scrapeDuration = ((Date.now() - startTime) / 1000).toFixed(2);
-      console.log(`Full scrape completed in ${scrapeDuration}s`);
-      this.lastFullScrapeTime = Date.now();
-
-      return {
-        ...data,
-        scrapeDuration,
-      };
-    } catch (error) {
-      console.error("Error during full scrape:", error.message);
-      throw error;
-    }
-  }
-
-  shouldPerformFullScrape(currentSeatCount) {
-    if (this.lastKnownSeatCount === null) return true;
-    if (currentSeatCount !== this.lastKnownSeatCount) return true;
-    if (!this.lastFullScrapeTime) return true;
-
-    const timeSinceLastFullScrape = Date.now() - this.lastFullScrapeTime;
-    return timeSinceLastFullScrape >= this.FULL_SCRAPE_INTERVAL;
-  }
-  async scrape(url, options = {}) {
-    if (!this.browser) {
-      await this.initBrowser();
-    }
-
-    const maxRetries = options.maxRetries || 10;
-    let retries = 0;
-    const scrapeStart = Date.now();
-
-    while (retries <= maxRetries) {
-      let page = null;
-
+      // Try direct API approach as fallback
       try {
-        console.log(
-          `\n=== Scrape attempt ${retries + 1} of ${maxRetries + 1} ===`
-        );
-        console.log(`URL: ${url}`);
-        console.log(`Time: ${new Date().toISOString()}`);
-
-        page = await this.context.newPage();
-
-        console.log("Navigating to page...");
-        await page.goto(url, {
-          waitUntil: "networkidle",
-          timeout: 60000,
-        });
-
-        // Immediately check for challenge after page load
-        console.log("Checking for Ticketmaster challenge...");
-        const challengePresent = await page.evaluate(() => {
-          return document.body.textContent.includes(
-            "Your Browsing Activity Has Been Paused"
-          );
-        });
-
-        if (challengePresent) {
-          console.log("Challenge detected immediately after page load");
-          await this.handleTicketmasterChallenge(page);
-
-          // Double-check if challenge is still present after handling
-          const stillChallenged = await page.evaluate(() => {
-            return document.body.textContent.includes(
-              "Your Browsing Activity Has Been Paused"
-            );
-          });
-
-          if (stillChallenged) {
-            throw new Error("Challenge persists after handling attempt");
-          }
+        console.log("Attempting direct API approach for cookies");
+        const directData = await getDirectAPICookies(eventId);
+        if (directData) {
+          return directData;
         }
+      } catch (apiError) {
+        console.error("Direct API approach failed:", apiError.message);
+      }
 
-        // First do a quick check
-        const quickCheck = await this.performQuickCheck(page);
-        console.log(
-          `Quick check results: ${quickCheck.availableSeats} seats available`
-        );
-
-        let result;
-        if (this.shouldPerformFullScrape(quickCheck.availableSeats)) {
-          console.log(
-            "Changes detected or full scrape due - performing detailed scrape..."
-          );
-          result = await this.performFullScrape(page);
-          this.lastKnownSeatCount = quickCheck.availableSeats;
-        } else {
-          console.log("No changes detected - using quick check results");
-          result = {
-            eventInfo: {
-              title: await page.title(),
-              dateTime: await page.$eval(
-                "#edp-event-header div.sc-1eku3jf-12.BANxv span > span",
-                (el) => el.textContent
-              ),
-            },
-            seatingInfo: {
-              availableSeats: quickCheck.availableSeats,
-              consecutiveGroups: [], // Empty as we're not doing full scrape
-              seats: [], // Empty as we're not doing full scrape
-            },
-            quickCheckOnly: true,
-            scrapeDuration: quickCheck.quickCheckDuration,
-          };
-        }
-
-        const totalDuration = ((Date.now() - scrapeStart) / 1000).toFixed(2);
-        console.log(`\nScrape completed successfully in ${totalDuration}s`);
-        console.log(`Available seats: ${result.seatingInfo.availableSeats}`);
-        console.log(`Full scrape performed: ${!result.quickCheckOnly}`);
-        console.log("===============================\n");
-
-        return result;
-      } catch (error) {
-        retries++;
-        console.error(
-          `\nError during scrape attempt ${retries}:`,
-          error.message
-        );
-
-        if (retries <= maxRetries) {
-          const delay = Math.pow(2, retries) * 1000 + Math.random() * 1000;
-          console.log(`Waiting ${Math.round(delay / 1000)}s before retry...`);
-          await new Promise((r) => setTimeout(r, delay));
-
-          await this.context?.close().catch(() => {});
-          await this.browser?.close().catch(() => {});
-          await this.initBrowser();
-        } else {
-          throw error;
-        }
-      } finally {
-        if (page) {
+      throw navigationError;
+    } finally {
+      // Ensure page is closed
+      if (page) {
+        try {
           await page.close().catch(() => {});
+        } catch (e) {
+          console.warn("Error closing page in finally block");
         }
       }
     }
-  }
+  } catch (error) {
+    console.error("Error in refreshHeaders:", error);
+    resetCapturedState();
+    throw error;
+  } finally {
+    // Clean up local instances, not affecting global ones
+    await cleanup(localBrowser, localContext);
 
-  async performQuickCheck(page) {
-    console.log("Performing quick availability check...");
-    const startTime = Date.now();
+    // Set the refreshing flag back to false
+    isRefreshingCookies = false;
 
-    try {
-      // Define selectors
-      const SELECTORS = {
-        SVG_MAP:
-          "#map-container > div.zoomer > div.zoomer__controls > button.zoomer__control--zoomin",
-        SEATS: 'circle[data-component="svg__seat"]',
-        ACCEPT_BUTTON: '[data-bdd="accept-modal-accept-button"]',
-      };
-
-      // Handle accept button if present
-      try {
-        const acceptButton = await page.waitForSelector(
-          SELECTORS.ACCEPT_BUTTON,
-          { timeout: 2000 }
-        );
-        if (acceptButton) {
-          await acceptButton.click();
-          await page.waitForTimeout(200);
-        }
-      } catch (e) {
-        // Accept button not found, continue
+    // Process any queued refresh requests
+    while (cookieRefreshQueue.length > 0) {
+      const { resolve, reject } = cookieRefreshQueue.shift();
+      if (capturedState.cookies) {
+        resolve(capturedState);
+      } else {
+        reject(new Error("Failed to refresh cookies"));
       }
-
-      // Wait for zoom button with shorter timeout first
-      console.log("Waiting for zoom button...");
-      const zoomButton = await page
-        .waitForSelector(SELECTORS.SVG_MAP, {
-          timeout: 10000,
-          state: "visible",
-        })
-        .catch(() => null);
-
-      if (!zoomButton) {
-        console.log("Zoom button not immediately visible, waiting longer...");
-        await page.waitForSelector(SELECTORS.SVG_MAP, {
-          timeout: 30000,
-          state: "visible",
-        });
-      }
-
-      // Perform zooming with verification
-      console.log("Starting zoom process...");
-      let zoomAttempts = 0;
-      const maxZoomAttempts = 3;
-
-      while (zoomAttempts < maxZoomAttempts) {
-        try {
-          // Click zoom button multiple times with verification
-          for (let i = 0; i <3; i++) {
-            await page.click(SELECTORS.SVG_MAP);
-            await page.waitForTimeout(200);
-          }
-          break; // Break if zooming successful
-        } catch (error) {
-          zoomAttempts++;
-          console.log(`Zoom attempt ${zoomAttempts} failed, retrying...`);
-          await page.waitForTimeout(1000);
-
-          if (zoomAttempts === maxZoomAttempts) {
-            console.error("Failed to zoom after multiple attempts");
-            throw new Error("Zoom operation failed");
-          }
-        }
-      }
-
-      // Wait for seats to be visible after zooming
-      console.log("Waiting for seats to be visible after zoom...");
-      await page.waitForSelector(SELECTORS.SEATS, {
-        timeout: 60000,
-        state: "visible",
-      });
-
-      // Get seat count
-      const seatCount = await this.getAvailableSeatCount(page);
-
-      const checkDuration = ((Date.now() - startTime) / 1000).toFixed(2);
-      console.log(
-        `Quick check completed in ${checkDuration}s. Available seats: ${seatCount}`
-      );
-
-      return {
-        availableSeats: seatCount,
-        quickCheckDuration: checkDuration,
-      };
-    } catch (error) {
-      console.error("Error during quick check:", error.message);
-      throw error;
     }
-  }
-
-  async close() {
-    await this.context?.close().catch(() => {});
-    await this.browser?.close().catch(() => {});
   }
 }
 
-export default Scraper;
+// Function to check for Ticketmaster challenge (e.g., CAPTCHA)
+async function checkForTicketmasterChallenge(page) {
+  try {
+    // Check for CAPTCHA or other blocking mechanisms
+    const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
+    const isChallengePresent = (await page.$(challengeSelector)) !== null;
+
+    if (isChallengePresent) {
+      console.warn("Ticketmaster challenge detected");
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Error checking for Ticketmaster challenge:", error);
+    return false;
+  }
+}
+
+// Function to save cookies to a JSON file
+async function saveCookiesToFile(cookies) {
+  try {
+    const filePath = "./cookies.json";
+    await fs.promises.writeFile(filePath, JSON.stringify(cookies, null, 2));
+    console.log("Cookies saved to file:", filePath);
+  } catch (error) {
+    console.error("Error saving cookies to file:", error);
+  }
+}
+
+const GetData = async (headers, proxyAgent, url, eventId) => {
+  let abortController = new AbortController();
+
+  try {
+    const timeout = setTimeout(() => {
+      abortController.abort();
+      console.log("Request aborted due to timeout");
+      console.log(eventId, "eventId");
+    }, CONFIG.PAGE_TIMEOUT);
+
+    try {
+      const response = await axios.get(url, {
+        httpsAgent: proxyAgent,
+        headers: {
+          ...headers,
+          "Accept-Encoding": "gzip, deflate, br",
+          Connection: "keep-alive",
+        },
+        timeout: CONFIG.PAGE_TIMEOUT,
+        signal: abortController.signal,
+        validateStatus: (status) => status === 200,
+      });
+
+      clearTimeout(timeout);
+      return response.data;
+    } catch (error) {
+      clearTimeout(timeout);
+      console.log(`Request failed: ${error.message}`);
+      return false;
+    }
+  } catch (error) {
+    console.log(error, "error");
+    return false;
+  }
+};
+
+const GetProxy = () => {
+  let _proxy = [...proxyArray?.proxies];
+  const randomProxy = Math.floor(Math.random() * _proxy.length);
+  _proxy = _proxy[randomProxy];
+
+  if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
+    throw new Error("Invalid proxy configuration");
+  }
+
+  try {
+    const proxyUrl = new URL(`http://${_proxy.proxy}`);
+    const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
+      proxyUrl.hostname
+    }:${proxyUrl.port || 80}`;
+    const proxyAgent = new HttpsProxyAgent(proxyURl);
+    return { proxyAgent, proxy: _proxy };
+  } catch (error) {
+    console.error("Invalid proxy URL format:", error);
+    throw new Error("Invalid proxy URL format");
+  }
+};
+
+const ScrapeEvent = async (event) => {
+  try {
+    const { proxyAgent, proxy } = GetProxy();
+    const correlationId = generateCorrelationId();
+    const capturedData = await getCapturedData(event?.eventId, proxy);
+
+    if (!capturedData?.cookies?.length) {
+      throw new Error("Failed to capture cookies");
+    }
+
+    const cookieString = capturedData.cookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+
+    const userAgent = BrowserFingerprint.generateUserAgent(
+      capturedData.fingerprint
+    );
+
+    const MapHeader = {
+      "User-Agent": userAgent,
+      Accept: "*/*",
+      Origin: "https://www.ticketmaster.com",
+      Referer: "https://www.ticketmaster.com/",
+      "Content-Encoding": "gzip",
+      Cookie: cookieString,
+    };
+
+    const FacetHeader = {
+      Accept: "*/*",
+      "Accept-Language": capturedData.fingerprint.language,
+      "Accept-Encoding": "gzip, deflate, br, zstd",
+      "User-Agent": userAgent,
+      Referer: "https://www.ticketmaster.com/",
+      Origin: "https://www.ticketmaster.com",
+      Cookie: cookieString,
+      "tmps-correlation-id": correlationId,
+      "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
+    };
+
+    console.log("Starting event scraping with captured cookies...");
+
+    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${event?.eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${event?.eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+
+    const [DataMap, DataFacets] = await Promise.all([
+      GetData(MapHeader, proxyAgent, mapUrl, event?.eventId),
+      GetData(FacetHeader, proxyAgent, facetUrl, event?.eventId),
+    ]);
+
+    if (!DataFacets || !DataMap) {
+      console.log("Failed to get data from APIs");
+      return false;
+    }
+
+    console.log("API requests completed successfully");
+    const dataGet = GenerateNanoPlaces(DataFacets?.facets);
+    const finalData = AttachRowSection(
+      dataGet,
+      DataMap,
+      DataFacets?._embedded?.offer,
+      event,
+      DataFacets?._embedded?.description
+    );
+
+    return finalData;
+  } catch (error) {
+    console.error("Scraping error:", error);
+    return false;
+  } finally {
+    await cleanup(browser, context);
+  }
+};
+
+async function cleanup(browser, context) {
+  try {
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+  } catch (error) {
+    console.warn("Cleanup error:", error);
+  }
+}
+
+function resetCapturedState() {
+  capturedState = {
+    cookies: null,
+    fingerprint: null,
+    lastRefresh: null,
+    proxy: null,
+  };
+}
+
+export { ScrapeEvent, refreshHeaders };

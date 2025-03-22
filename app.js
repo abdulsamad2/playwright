@@ -1,307 +1,341 @@
-
 import express from "express";
 import mongoose from "mongoose";
-import { ScrapingManager } from "./scraperManager.js";
-import seatService from "./services/seatService.js";
 import morgan from "morgan";
-import dotenv from "dotenv";
 import cors from "cors";
-import fs from "fs";
+import dotenv from "dotenv";
+import ScraperManager from "./scraperManager.js";
+import { Event, ConsecutiveGroup, ErrorLog } from "./models/index.js";
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
-const corsOptions = {
-  origin: process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(",")
-    : ["http://localhost:3000", "http://localhost:5173"], // Default origins
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true,
-  maxAge: 86400, // 24 hours
-};
 const mongoUri =
   process.env.DATABASE_URL || "mongodb://localhost:27017/ticketScraper";
 
+// Initialize scraper manager
+const scraperManager = new ScraperManager();
 
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(morgan("dev"));
+
+// Database connection
 mongoose
   .connect(mongoUri)
   .then(() => console.log("Connected to MongoDB"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-const scrapingManager = new ScrapingManager();
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({
+    status: "healthy",
+    scraperRunning: scraperManager.isRunning,
+    mongoConnection: mongoose.connection.readyState === 1,
+  });
+});
 
-app.use(cors(corsOptions));
-app.use(express.json());
-app.use(morgan("dev"));
-
-// CORS preflight handler
-app.options("*", cors(corsOptions));
-
-// Routes
-app.post("/scrape", async (req, res) => {
+// Start scraping
+app.post("/api/scraper/start", async (req, res) => {
   try {
-    const { url } = req.body;
-    if (!url) {
+    if (scraperManager.isRunning) {
       return res.status(400).json({
-        error: "Missing URL",
         status: "error",
+        message: "Scraper is already running",
       });
     }
 
-    const result = await scrapingManager.startScraping(url);
-    res.json(result);
-  } catch (error) {
-    res.status(400).json({
-      error: error.message,
-      status: "error",
+    scraperManager.startContinuousScraping().catch((error) => {
+      console.error("Scraper error:", error);
+      scraperManager.isRunning = false;
     });
-  }
-});
 
-app.delete("/scrape", async (req, res) => {
-  try {
-    const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({
-        error: "Missing URL",
-        status: "error",
-      });
-    }
-    const result = await scrapingManager.stopScraping(url);
-    res.json(result);
-  } catch (error) {
-    res.status(404).json({
-      error: error.message,
-      status: "error",
+    res.json({
+      status: "success",
+      message: "Scraper started successfully",
     });
-  }
-});
-
-app.get("/status", async (req, res) => {
-  try {
-    const { url } = req.query;
-    const status = await scrapingManager.getStatus(url);
-    res.json(status);
-  } catch (error) {
-    res.status(404).json({
-      error: error.message,
-      status: "error",
-    });
-  }
-});
-
-app.get("/seats/:eventId", async (req, res) => {
-  try {
-    const { eventId } = req.params;
-    const data = await seatService.getEventData(eventId);
-    res.json(data);
-  } catch (error) {
-    res.status(404).json({
-      error: error.message,
-      status: "error",
-    });
-  }
-});
-
-app.get("/events", async (req, res) => {
-  try {
-    const events = await mongoose
-      .model("Event")
-      .find()
-      .sort({ lastUpdated: -1 });
-    res.json(events);
   } catch (error) {
     res.status(500).json({
-      error: error.message,
       status: "error",
+      message: error.message,
     });
   }
 });
 
-// Get list of events with basic info and last update times
-// Updated API endpoint
-app.get("/api/events/summary", async (req, res) => {
+// Stop scraping
+app.post("/api/scraper/stop", (req, res) => {
   try {
-    // Define the Event model properly
-    const Event = mongoose.model("Event");
-
-    const events = await Event.find(
-      {}, // Query criteria
-      { 
-        title: 1,
-        dateTime: 1,
-        availableSeats: 1,
-        lastUpdated: 1,
-        'metadata.lastUpdate': 1,
-        'metadata.ticketStats': 1,
-        _id: 1 // Explicitly include _id
-      }
-    )
-    .lean() // Convert to plain JavaScript objects (better performance)
-    .sort({ lastUpdated: -1 });
-
-    // Check if events were found
-    if (!events) {
-      return res.status(404).json({
+    if (!scraperManager.isRunning) {
+      return res.status(400).json({
         status: "error",
-        message: "No events found"
+        message: "Scraper is not running",
       });
     }
 
-    // Send response
-    return res.status(200).json({
-      status: "success",
-      data: events
-    });
+    scraperManager.stop();
 
+    res.json({
+      status: "success",
+      message: "Scraper stopped successfully",
+    });
   } catch (error) {
-    console.error('Error fetching events:', error);
-    return res.status(500).json({
+    res.status(500).json({
       status: "error",
-      message: "Internal server error",
-      error: error.message
+      message: error.message,
     });
   }
 });
 
-// Get single event with full details including all seat groups
-app.get("/api/events/:eventId/details", async (req, res) => {
+// Get scraper status
+app.get("/api/scraper/status", (req, res) => {
+  res.json({
+    isRunning: scraperManager.isRunning,
+    activeJobs: Array.from(scraperManager.activeJobs.keys()),
+    successCount: scraperManager.successCount,
+    failedEvents: Array.from(scraperManager.failedEvents),
+    retryQueueSize: scraperManager.retryQueue.length,
+  });
+});
+
+// Add new event to scrape
+app.post("/api/events", async (req, res) => {
+  try {
+    const {
+      Event_ID,
+      Event_Name,
+      Event_DateTime,
+      Venue,
+      URL,
+      inHandDate,
+      Available_Seats=0,
+      Skip_Scraping = true,
+      Zone,
+      
+    } = req.body;
+
+    if (!Event_Name,!inHandDate || !Event_DateTime || !URL) {
+      return res.status(400).json({
+        status: "error",
+        message: "Missing required fields",
+      });
+    }
+
+    const existingEvent = await Event.findOne({ URL });
+    if (existingEvent) {
+      return res.status(400).json({
+        status: "error",
+        message: "Event with this URL already exists",
+      });
+    }
+
+    const event = new Event({
+      Event_ID,
+      Event_Name,
+      Event_DateTime,
+      Venue,
+      URL,
+      inHandDate,
+      Zone: Zone || "none",
+      Available_Seats: Available_Seats || 0,
+      Skip_Scraping,
+      metadata: {
+        iterationNumber: 0,
+      },
+    });
+
+    await event.save();
+
+    res.status(201).json({
+      status: "success",
+      data: event,
+    });
+  } catch (error) {
+    console.log(error)
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+// Start scraping for a single event
+app.post("/api/events/:eventId/start", async (req, res) => {
   try {
     const { eventId } = req.params;
-    
-    const event = await mongoose.model("Event").findById(eventId);
+
+    // Find and update the event
+    const event = await Event.findOneAndUpdate(
+      { Event_ID: eventId },
+      { Skip_Scraping: false },
+      { new: true }
+    );
+
     if (!event) {
       return res.status(404).json({
-        error: "Event not found",
-        status: "error"
+        status: "error",
+        message: "Event not found",
       });
     }
 
-    const seatGroups = await mongoose.model("ConsecutiveGroup")
-      .find({ eventId: event._id })
-      .sort({ section: 1, row: 1 });
-
-    const eventDetails = {
-      ...event.toObject(),
-      seatGroups
-    };
-
-    res.json(eventDetails);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message,
-      status: "error"
-    });
-  }
-});
-
-// Get events by date range
-app.get("/api/events/range", async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
-    const query = {};
-    
-    if (startDate || endDate) {
-      query.dateTime = {};
-      if (startDate) query.dateTime.$gte = new Date(startDate);
-      if (endDate) query.dateTime.$lte = new Date(endDate);
+    // Check if the event is already being scraped
+    if (scraperManager.activeJobs.has(eventId)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Scraping is already running for this event",
+      });
     }
 
-    const events = await mongoose.model("Event")
-      .find(query)
-      .sort({ dateTime: 1 });
-    
-    res.json(events);
+    // Start scraping for this specific event
+    await scraperManager.scrapeEvent(eventId);
+
+    res.json({
+      status: "success",
+      message: `Scraping started for event ${eventId}`,
+      data: event,
+    });
   } catch (error) {
     res.status(500).json({
-      error: error.message,
-      status: "error"
+      status: "error",
+      message: error.message,
     });
   }
 });
 
-// Get event stats
-app.get("/api/events/stats", async (req, res) => {
+// Stop scraping for a single event
+app.post("/api/events/:eventId/stop", async (req, res) => {
   try {
-    const totalEvents = await mongoose.model("Event").countDocuments();
-    const totalSeats = await mongoose.model("Event").aggregate([
-      {
-        $group: {
-          _id: null,
-          totalSeats: { $sum: "$availableSeats" }
-        }
-      }
-    ]);
+    const { eventId } = req.params;
 
-    const latestUpdates = await mongoose.model("Event")
-      .find({}, {
-        title: 1,
-        lastUpdated: 1,
-        'metadata.ticketStats': 1
-      })
-      .sort({ lastUpdated: -1 })
+    // Update the event to skip scraping
+    const event = await Event.findOneAndUpdate(
+      { Event_ID: eventId },
+      { Skip_Scraping: true },
+      { new: true }
+    );
+
+    if (!event) {
+      return res.status(404).json({
+        status: "error",
+        message: "Event not found",
+      });
+    }
+
+    // Remove from active jobs if it's currently being scraped
+    if (scraperManager.activeJobs.has(eventId)) {
+      scraperManager.activeJobs.delete(eventId);
+    }
+
+    // Remove from retry queue if present
+    scraperManager.retryQueue = scraperManager.retryQueue.filter(
+      (item) => item.eventId !== eventId
+    );
+
+    res.json({
+      status: "success",
+      message: `Scraping stopped for event ${eventId}`,
+      data: event,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+// Get all events
+app.get("/api/events", async (req, res) => {
+  try {
+    const events = await Event.find().sort({ Last_Updated: -1 });
+
+    // Add active status to each event
+    const eventsWithStatus = events.map((event) => ({
+      ...event.toObject(),
+      isActive: scraperManager.activeJobs.has(event.Event_ID),
+    }));
+
+    res.json({
+      status: "success",
+      data: eventsWithStatus,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+// Get single event details
+app.get("/api/events/:eventId", async (req, res) => {
+  try {
+    const event = await Event.findOne({ Event_ID: req.params.eventId });
+    if (!event) {
+      return res.status(404).json({
+        status: "error",
+        message: "Event not found",
+      });
+    }
+
+    const seatGroups = await ConsecutiveGroup.find({
+      eventId: req.params.eventId,
+    });
+
+    const isActive = scraperManager.activeJobs.has(req.params.eventId);
+
+    res.json({
+      status: "success",
+      data: {
+        ...event.toObject(),
+        isActive,
+        seatGroups,
+      },
+    });
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+// Get scraping statistics
+app.get("/api/stats", async (req, res) => {
+  try {
+    const totalEvents = await Event.countDocuments();
+    const activeEvents = await Event.countDocuments({ Skip_Scraping: false });
+    const totalErrors = await ErrorLog.countDocuments();
+    const recentErrors = await ErrorLog.find().sort({ createdAt: -1 }).limit(5);
+
+    const eventsWithChanges = await Event.find({
+      "metadata.ticketStats.ticketCountChange": { $ne: 0 },
+    })
+      .sort({ Last_Updated: -1 })
       .limit(5);
 
     res.json({
-      totalEvents,
-      totalAvailableSeats: totalSeats[0]?.totalSeats || 0,
-      latestUpdates
+      status: "success",
+      data: {
+        totalEvents,
+        activeEvents,
+        totalErrors,
+        recentErrors,
+        eventsWithChanges,
+        scraperStatus: {
+          isRunning: scraperManager.isRunning,
+          successCount: scraperManager.successCount,
+          failedCount: scraperManager.failedEvents.size,
+          activeJobs: Array.from(scraperManager.activeJobs.keys()),
+          retryQueueSize: scraperManager.retryQueue.length,
+        },
+      },
     });
   } catch (error) {
     res.status(500).json({
-      error: error.message,
-      status: "error"
-    });
-  }
-});
-
-// Get seat availability history for an event
-app.get("/api/events/:eventId/history", async (req, res) => {
-  try {
-    const { eventId } = req.params;
-    const event = await mongoose.model("Event").findById(eventId);
-    
-    if (!event) {
-      return res.status(404).json({
-        error: "Event not found",
-        status: "error"
-      });
-    }
-
-    const seatGroups = await mongoose.model("ConsecutiveGroup")
-      .find({ 
-        eventId: event._id 
-      })
-      .sort({ createdAt: -1 });
-
-    // Group seat data by timestamp
-    const history = seatGroups.reduce((acc, group) => {
-      const timestamp = group.createdAt;
-      if (!acc[timestamp]) {
-        acc[timestamp] = {
-          timestamp,
-          totalSeats: 0,
-          sections: {}
-        };
-      }
-      
-      if (!acc[timestamp].sections[group.section]) {
-        acc[timestamp].sections[group.section] = 0;
-      }
-      
-      acc[timestamp].sections[group.section] += group.seatCount;
-      acc[timestamp].totalSeats += group.seatCount;
-      
-      return acc;
-    }, {});
-
-    res.json(Object.values(history));
-  } catch (error) {
-    res.status(500).json({
-      error: error.message,
-      status: "error"
+      status: "error",
+      message: error.message,
     });
   }
 });
@@ -310,15 +344,36 @@ app.get("/api/events/:eventId/history", async (req, res) => {
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
-    error: "Something broke!",
     status: "error",
-    message: err.message,
+    message: "Internal server error",
+    error: err.message,
   });
 });
 
 // Start server
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received. Starting graceful shutdown...");
+
+  // Stop the scraper
+  if (scraperManager.isRunning) {
+    scraperManager.stop();
+  }
+
+  // Close server
+  server.close(() => {
+    console.log("HTTP server closed");
+
+    // Close database connection
+    mongoose.connection.close(false, () => {
+      console.log("MongoDB connection closed");
+      process.exit(0);
+    });
+  });
 });
 
 export default app;
