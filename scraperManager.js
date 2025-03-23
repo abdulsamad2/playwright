@@ -300,7 +300,7 @@ class ScraperManager {
 
   async startContinuousScraping() {
     this.isRunning = true;
-    console.log("\n" + "=".repeat(50));
+    console.log(`Scraper started. isRunning: ${this.isRunning}`); // Debug log    console.log("\n" + "=".repeat(50));
     this.logWithTime("Continuous Scraper Manager Starting");
     this.logWithTime(`Event Refresh Interval: ${EVENT_REFRESH_INTERVAL}ms`);
     this.logWithTime(`Retry Attempts: ${MAX_RETRIES}`);
@@ -361,5 +361,6 @@ class ScraperManager {
     this.logWithTime("Stopping scraper manager");
   }
 }
+const scraperManager = new ScraperManager();
 
-export default ScraperManager;
+export default scraperManager;

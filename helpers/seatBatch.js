@@ -135,11 +135,11 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
    isNameAdded = true;
  }
 
-  // if(data?.accessibility.includes("sight") || data?.accessibility.includes("hearing"))
-  // {
-  //   allDescriptions+=", deaf/hard, blind/low";
-  //   isNameAdded=true;
-  // }
+  if(data?.accessibility.includes("sight") || data?.accessibility.includes("hearing"))
+  {
+    allDescriptions+=", deaf/hard, blind/low";
+    isNameAdded=true;
+  }
 
    const offerName = offer?.name || '';
   if (offerName.toLowerCase().includes("limited/obstructed")) {
@@ -220,19 +220,19 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
         "listPrice":totalCostWithPercentage,
         "customSplit":getSplitType(data?.seats,offer),
          "tickets":data?.seats.map(y=>{return {
-                "id": 0,
-                "seatNumber":y,
-                "notes": "string",
-                "cost": totalCost,
-                "faceValue": totalCost,
-                "taxedCost": totalCost,
-                "sellPrice": totalCostWithPercentage,
-                "stockType": "HARD",
-                "eventId": 0,
-                "accountId": 0,
-                "status": "AVAILABLE",
-                "auditNote": "string"
-         }})
+           id: 0,
+           seatNumber: y,
+           notes: "string",
+           cost: totalCost,
+           faceValue: faceValue,
+           taxedCost: totalCost,
+           sellPrice: totalCostWithPercentage,
+           stockType: "HARD",
+           eventId: 0,
+           accountId: 0,
+           status: "AVAILABLE",
+           auditNote: "string",
+         };})
     },
     "amount": 0,
     "lineItemType": "INVENTORY",
