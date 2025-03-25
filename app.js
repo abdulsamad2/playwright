@@ -19,8 +19,13 @@ const mongoUri =
   process.env.DATABASE_URL || "mongodb://localhost:27017/ticketScraper";
 
 // Middleware
-app.use(cors());
-app.use(express.json());
+app.use(
+  cors({
+    origin: "http://18.234.29.129", 
+    methods: "GET,POST,PUT,DELETE",
+    allowedHeaders: "Content-Type,Authorization",
+  })
+);app.use(express.json());
 app.use(morgan("dev"));
 
 // Database connection
