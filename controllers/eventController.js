@@ -199,3 +199,40 @@ export const stopEventScraping = async (req, res) => {
     });
   }
 };
+
+
+export const deleteEvent = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    // Find and delete the event
+    const event = await Event.findOneAndDelete({ Event_ID: eventId });
+
+    if (!event) {
+      return res.status(404).json({
+        status: "error",
+        message: "Event not found",
+      });
+    }
+
+    // Remove from active jobs if it's currently being scraped
+    if (scraperManager.activeJobs.has(eventId)) {
+      scraperManager.activeJobs.delete(eventId);
+    }
+
+    // Remove from retry queue if present
+    scraperManager.retryQueue = scraperManager.retryQueue.filter(
+      (item) => item.eventId !== eventId
+    );
+
+    res.json({
+      status: "success",
+      message: `Event ${eventId} deleted successfully`,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+};
