@@ -1,11 +1,15 @@
 import moment from "moment";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders } from "./scraper.js";
+import { setTimeout } from "timers/promises";
+import { cpus } from "os";
 
-const CONCURRENT_LIMIT = 500; // Adjust based on system capacity
+const CONCURRENT_LIMIT = Math.max(1, Math.floor(cpus().length * 1.5)); // Dynamic based on CPU cores
 const EVENT_REFRESH_INTERVAL = 60000; // 1 minute
 const MAX_RETRIES = 3;
-const SCRAPE_TIMEOUT = 60000; // 1 minute timeout per event
+const SCRAPE_TIMEOUT = 30000; // Reduced timeout to 30 seconds
+const BATCH_SIZE = CONCURRENT_LIMIT * 2; // Process events in batches
+const PRIORITY_UPDATE_WINDOW = 5000; // 5-second window for priority updates
 
 class ScraperManager {
   constructor() {
@@ -17,7 +21,9 @@ class ScraperManager {
     this.retryQueue = [];
     this.isRunning = false;
     this.headers = null;
-    this.eventUpdateTimestamps = new Map(); // Track last update time for each event
+    this.eventUpdateTimestamps = new Map();
+    this.priorityQueue = new Set(); // For events that need immediate attention
+    this.concurrencySemaphore = CONCURRENT_LIMIT; // Simple concurrency control
   }
 
   logWithTime(message, type = "info") {
@@ -33,20 +39,18 @@ class ScraperManager {
         info: "ℹ️",
       }[type] || "📝";
 
-    console.log(`${statusEmoji} [${formattedTime}] ${message}`);
     console.log(
-      `   Runtime: ${Math.floor(
-        runningTime.asHours()
-      )}h ${runningTime.minutes()}m ${runningTime.seconds()}s`
-    );
-    console.log(
-      `   Active Jobs: ${this.activeJobs.size}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}`
+      `${statusEmoji} [${formattedTime}] ${message}\n` +
+        `   Runtime: ${Math.floor(
+          runningTime.asHours()
+        )}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
+        `   Active: ${this.activeJobs.size}/${CONCURRENT_LIMIT}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}, Retry Queue: ${this.retryQueue.length}`
     );
   }
 
   async logError(eventId, errorType, error, metadata = {}) {
     try {
-      const event = await Event.findOne({ eventId: eventId });
+      const event = await Event.findOne({ eventId }).select("url _id").lean();
       if (!event) {
         console.error(`No event found for ID: ${eventId}`);
         return;
@@ -55,7 +59,7 @@ class ScraperManager {
       await ErrorLog.create({
         eventUrl: event.url,
         eventId: event._id,
-        externalEventId: event.eventId,
+        externalEventId: eventId,
         errorType,
         message: error.message,
         stack: error.stack,
@@ -72,295 +76,279 @@ class ScraperManager {
   }
 
   async updateEventMetadata(eventId, scrapeResult) {
+    const startTime = performance.now();
+    const session = await Event.startSession();
+
     try {
-      const event = await Event.findOne({ Event_ID: eventId });
-      if (!event) {
-        throw new Error(`Event ${eventId} not found in database`);
-      }
+      await session.withTransaction(async () => {
+        const event = await Event.findOne({ Event_ID: eventId }).session(
+          session
+        );
+        if (!event) {
+          throw new Error(`Event ${eventId} not found in database`);
+        }
 
-      const previousTicketCount = event.Available_Seats || 0;
-      const currentTicketCount = scrapeResult.length;
+        const previousTicketCount = event.Available_Seats || 0;
+        const currentTicketCount = scrapeResult.length;
 
-      const metadata = {
-        lastUpdate: moment().format("YYYY-MM-DD HH:mm:ss"),
-        iterationNumber: (event.metadata?.iterationNumber || 0) + 1,
-        scrapeStartTime: this.startTime.toDate(),
-        scrapeEndTime: new Date(),
-        scrapeDurationSeconds: moment().diff(this.startTime, "seconds"),
-        totalRunningTimeMinutes: moment().diff(this.startTime, "minutes"),
-        ticketStats: {
-          totalTickets: currentTicketCount,
-          ticketCountChange: currentTicketCount - previousTicketCount,
-          previousTicketCount,
-        },
-      };
-
-      await Event.findOneAndUpdate(
-        { Event_ID: eventId },
-        {
-          $set: {
-            Available_Seats: currentTicketCount,
-            Last_Updated: new Date(),
-            metadata,
+        const metadata = {
+          lastUpdate: moment().format("YYYY-MM-DD HH:mm:ss"),
+          iterationNumber: (event.metadata?.iterationNumber || 0) + 1,
+          scrapeDurationMs: performance.now() - startTime,
+          ticketStats: {
+            totalTickets: currentTicketCount,
+            ticketCountChange: currentTicketCount - previousTicketCount,
+            previousTicketCount,
           },
-        },
-        { new: true }
-      );
+        };
 
-      if (scrapeResult && scrapeResult.length > 0) {
-        const currentGroups = await ConsecutiveGroup.find({
-          eventId: event.Event_ID,
-        });
+        // First update the basic event info
+        await Event.updateOne(
+          { Event_ID: eventId },
+          {
+            $set: {
+              Available_Seats: currentTicketCount,
+              Last_Updated: new Date(),
+              "metadata.basic": metadata,
+            },
+          }
+        ).session(session);
 
-        const currentSeatsHash = new Set(
-          currentGroups.flatMap((group) =>
-            group.seats.map(
-              (seat) =>
-                `${group.section}-${group.row}-${seat.number}-${seat.price}`
+        if (scrapeResult?.length > 0) {
+          // Optimized seat comparison
+          const existingGroups = await ConsecutiveGroup.find(
+            { eventId },
+            { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 }
+          ).lean();
+
+          const existingSeats = new Set(
+            existingGroups.flatMap((g) =>
+              g.seats.map((s) => `${g.section}-${g.row}-${s.number}-${s.price}`)
             )
-          )
-        );
+          );
 
-        const newSeatsHash = new Set(
-          scrapeResult.flatMap((group) =>
-            group.seats.map(
-              (seatNumber) =>
-                `${group.section}-${group.row}-${seatNumber}-${group.inventory.listPrice}`
+          const newSeats = new Set(
+            scrapeResult.flatMap((g) =>
+              g.seats.map(
+                (s) => `${g.section}-${g.row}-${s}-${g.inventory.listPrice}`
+              )
             )
-          )
-        );
+          );
 
-        const hasChanges =
-          [...currentSeatsHash].some((seat) => !newSeatsHash.has(seat)) ||
-          [...newSeatsHash].some((seat) => !currentSeatsHash.has(seat));
+          if (
+            existingSeats.size !== newSeats.size ||
+            [...existingSeats].some((s) => !newSeats.has(s))
+          ) {
+            // Bulk delete and insert for better performance
+            await ConsecutiveGroup.deleteMany({ eventId }).session(session);
 
-        if (hasChanges) {
-          await ConsecutiveGroup.deleteMany({ eventId: event.Event_ID });
-
-          const consecutiveGroups = scrapeResult.map((group) => {
-            const seats = group.seats.map((seatNumber) => ({
-              number: seatNumber.toString(),
-              inHandDate: event.inHandDate,
-              price: group.inventory.listPrice,
-            }));
-
-            const increasedCost = group.inventory.cost;
-
-            return {
-              eventId: event.Event_ID,
+            const groupsToInsert = scrapeResult.map((group) => ({
+              eventId,
               section: group.section,
               row: group.row,
               seatCount: group.inventory.quantity,
               seatRange: `${Math.min(...group.seats)}-${Math.max(
                 ...group.seats
               )}`,
-              seats: seats,
-              inventory: {
-                quantity: group.inventory.quantity,
-                section: group.section,
-                hideSeatNumbers: group.inventory.hideSeatNumbers,
-                row: group.row,
-                cost: increasedCost,
-                stockType: group.inventory.stockType,
-                lineType: group.inventory.lineType,
-                seatType: group.inventory.seatType,
+              seats: group.seats.map((seatNumber) => ({
+                number: seatNumber.toString(),
                 inHandDate: event.inHandDate,
-                notes: group.inventory.notes,
-                tags: group.inventory.tags,
-                inventoryId: group.inventory.inventoryId,
-                offerId: group.inventory.offerId,
-                splitType: group.inventory.splitType,
-                publicNotes: group.inventory.publicNotes,
-                listPrice: group.inventory.listPrice,
-                customSplit: group.inventory.customSplit,
+                price: group.inventory.listPrice,
+              })),
+              inventory: {
+                ...group.inventory,
                 tickets: group.inventory.tickets.map((ticket) => ({
-                  id: ticket.id,
-                  seatNumber: ticket.seatNumber,
-                  notes: ticket.notes,
-                  cost: ticket.cost,
-                  faceValue: ticket.faceValue,
-                  taxedCost: ticket.taxedCost,
-                  sellPrice: ticket.sellPrice ** 1.25,
-                  stockType: ticket.stockType,
-                  eventId: ticket.eventId,
-                  accountId: ticket.accountId,
-                  status: ticket.status,
-                  auditNote: ticket.auditNote,
+                  ...ticket,
+                  sellPrice: ticket.sellPrice * 1.25, // Apply markup
                 })),
               },
-            };
-          });
+            }));
 
-          await ConsecutiveGroup.insertMany(consecutiveGroups);
-          this.logWithTime(
-            `Updated consecutive groups for event ${eventId}`,
-            "success"
-          );
-        } else {
-          this.logWithTime(
-            `No seat changes detected for event ${eventId}`,
-            "info"
-          );
+            await ConsecutiveGroup.insertMany(groupsToInsert, { session });
+          }
         }
-      }
 
-      this.logWithTime(`Successfully updated event ${eventId}`, "success");
+        // Final metadata update
+        await Event.updateOne(
+          { Event_ID: eventId },
+          { $set: { "metadata.full": metadata } }
+        ).session(session);
+      });
+
+      this.logWithTime(
+        `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
+          2
+        )}ms`,
+        "success"
+      );
     } catch (error) {
-      console.error("Error updating event metadata:", error);
       await this.logError(eventId, "DATABASE_ERROR", error);
       throw error;
+    } finally {
+      session.endSession();
     }
   }
 
-  async scrapeEvent(eventId, retryCount = 0) {
-    this.activeJobs.set(eventId, moment());
-    try {
-      this.logWithTime(
-        `Starting scrape for event ${eventId} (Attempt ${
-          retryCount + 1
-        }/${MAX_RETRIES})`
-      );
+  async acquireSemaphore() {
+    while (this.concurrencySemaphore <= 0) {
+      await setTimeout(100);
+    }
+    this.concurrencySemaphore--;
+  }
 
-      const event = await Event.findOne({ Event_ID: eventId });
+  releaseSemaphore() {
+    this.concurrencySemaphore++;
+  }
+
+  async scrapeEvent(eventId, retryCount = 0) {
+    await this.acquireSemaphore();
+    this.activeJobs.set(eventId, moment());
+
+    try {
+      this.logWithTime(`Scraping ${eventId} (Attempt ${retryCount + 1})`);
+
+      const event = await Event.findOne({ Event_ID: eventId })
+        .select("Skip_Scraping inHandDate")
+        .lean();
       if (!event) {
-        throw new Error(`Event ${eventId} not found in database`);
+        throw new Error(`Event ${eventId} not found`);
       }
 
       if (event.Skip_Scraping) {
-        this.logWithTime(
-          `Skipping event ${eventId} due to Skip_Scraping flag`,
-          "info"
-        );
+        this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
         return true;
       }
 
-      this.headers = await refreshHeaders(eventId);
-      if (!this.headers) {
-        throw new Error("Failed to refresh headers");
+      const headers = await refreshHeaders(eventId);
+      if (!headers) {
+        throw new Error("Header refresh failed");
       }
 
       const result = await Promise.race([
-        ScrapeEvent({
-          eventId: event.Event_ID,
-          headers: this.headers,
+        ScrapeEvent({ eventId, headers }),
+        setTimeout(SCRAPE_TIMEOUT).then(() => {
+          throw new Error("Scrape timed out");
         }),
-        new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error("Scrape timed out")),
-            SCRAPE_TIMEOUT
-          )
-        ),
       ]);
 
-      if (!result) {
-        throw new Error("No data returned from scraper");
-      }
+      if (!result) throw new Error("Empty scrape result");
 
       await this.updateEventMetadata(eventId, result);
       this.successCount++;
       this.lastSuccessTime = moment();
-      this.eventUpdateTimestamps.set(eventId, moment()); // Update last update time
-      this.logWithTime(`Successfully scraped event ${eventId}`, "success");
+      this.eventUpdateTimestamps.set(eventId, moment());
       return true;
     } catch (error) {
       this.failedEvents.add(eventId);
-      await this.logError(eventId, "SCRAPE_ERROR", error, {
-        retryCount,
-        iterationNumber: retryCount + 1,
-      });
+      await this.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
 
       if (retryCount < MAX_RETRIES) {
         this.retryQueue.push({ eventId, retryCount: retryCount + 1 });
-        this.logWithTime(
-          `Added event ${eventId} to retry queue (attempt ${retryCount + 1})`,
-          "warning"
-        );
+        this.logWithTime(`Queued for retry: ${eventId}`, "warning");
       } else {
-        this.logWithTime(
-          `Failed to scrape event ${eventId} after ${MAX_RETRIES} attempts`,
-          "error"
-        );
+        this.logWithTime(`Max retries exceeded for ${eventId}`, "error");
       }
       return false;
     } finally {
       this.activeJobs.delete(eventId);
+      this.releaseSemaphore();
     }
+  }
+
+  async processBatch(eventIds) {
+    const results = await Promise.allSettled(
+      eventIds.map((eventId) => this.scrapeEvent(eventId))
+    );
+
+    const failed = results
+      .filter((r) => r.status === "rejected")
+      .map((r, i) => ({ eventId: eventIds[i], error: r.reason }));
+
+    return { failed };
   }
 
   async processRetryQueue() {
     while (this.retryQueue.length > 0 && this.isRunning) {
-      const { eventId, retryCount } = this.retryQueue.shift();
-      this.logWithTime(`Processing retry for event ${eventId}`, "info");
-      await this.scrapeEvent(eventId, retryCount);
-      await new Promise((resolve) =>
-        setTimeout(resolve, EVENT_REFRESH_INTERVAL)
-      );
+      const batch = this.retryQueue.splice(0, BATCH_SIZE);
+      await this.processBatch(batch.map((job) => job.eventId));
+      await setTimeout(1000); // Brief pause between batches
     }
+  }
+
+  async getEventsToProcess() {
+    const now = moment();
+    const priorityCutoff = now.clone().subtract(PRIORITY_UPDATE_WINDOW, "ms");
+
+    // Get priority events first (recently updated or failed)
+    const priorityEvents = await Event.find({
+      $or: [
+        { Last_Updated: { $lt: priorityCutoff.toDate() } },
+        { Event_ID: { $in: [...this.failedEvents] } },
+      ],
+      Skip_Scraping: { $ne: true },
+    })
+      .sort({ Last_Updated: 1 })
+      .limit(BATCH_SIZE)
+      .select("Event_ID")
+      .lean();
+
+    // If we still have capacity, get regular events
+    const remainingCapacity = BATCH_SIZE - priorityEvents.length;
+    let regularEvents = [];
+
+    if (remainingCapacity > 0) {
+      regularEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+        Event_ID: { $nin: priorityEvents.map((e) => e.Event_ID) },
+      })
+        .sort({ Last_Updated: 1 })
+        .limit(remainingCapacity)
+        .select("Event_ID")
+        .lean();
+    }
+
+    return [...priorityEvents, ...regularEvents].map((e) => e.Event_ID);
   }
 
   async startContinuousScraping() {
     this.isRunning = true;
-    console.log(`Scraper started. isRunning: ${this.isRunning}`); // Debug log    console.log("\n" + "=".repeat(50));
-    this.logWithTime("Continuous Scraper Manager Starting");
-    this.logWithTime(`Event Refresh Interval: ${EVENT_REFRESH_INTERVAL}ms`);
-    this.logWithTime(`Retry Attempts: ${MAX_RETRIES}`);
-    console.log("=".repeat(50) + "\n");
+    this.logWithTime("Starting optimized scraper");
+    this.logWithTime(
+      `Concurrency: ${CONCURRENT_LIMIT}, Batch size: ${BATCH_SIZE}`
+    );
 
     while (this.isRunning) {
+      const cycleStart = performance.now();
+
       try {
-        const events = await Event.find({})
-          .sort({ lastUpdated: 1 })
-          .select("Event_ID");
-        this.logWithTime(`Total Events to Process: ${events.length}`);
-
-        const scrapePromises = [];
-        for (const event of events) {
-          if (!this.isRunning) break;
-
-          const lastUpdateTime = this.eventUpdateTimestamps.get(event.Event_ID);
-          const timeSinceLastUpdate = lastUpdateTime
-            ? moment().diff(lastUpdateTime, "milliseconds")
-            : EVENT_REFRESH_INTERVAL;
-
-          if (timeSinceLastUpdate >= EVENT_REFRESH_INTERVAL) {
-            scrapePromises.push(this.scrapeEvent(event.Event_ID));
-          }
+        const eventIds = await this.getEventsToProcess();
+        if (eventIds.length === 0) {
+          await setTimeout(EVENT_REFRESH_INTERVAL);
+          continue;
         }
 
-        await Promise.all(scrapePromises);
+        this.logWithTime(`Processing batch of ${eventIds.length} events`);
+        await this.processBatch(eventIds);
         await this.processRetryQueue();
 
-        if (this.failedEvents.size > 0) {
-          this.logWithTime(
-            `Failed events in this cycle: ${Array.from(this.failedEvents).join(
-              ", "
-            )}`,
-            "warning"
-          );
-          this.failedEvents.clear();
-        }
+        const cycleTime = performance.now() - cycleStart;
+        const delay = Math.max(0, EVENT_REFRESH_INTERVAL - cycleTime);
 
-        await new Promise((resolve) =>
-          setTimeout(resolve, EVENT_REFRESH_INTERVAL)
-        );
+        if (delay > 0) {
+          await setTimeout(delay);
+        }
       } catch (error) {
-        this.logWithTime(
-          `Fatal error in scraper manager: ${error.message}`,
-          "error"
-        );
-        console.error(error);
-        await new Promise((resolve) =>
-          setTimeout(resolve, EVENT_REFRESH_INTERVAL)
-        );
+        this.logWithTime(`Cycle error: ${error.message}`, "error");
+        await setTimeout(5000); // Wait 5 seconds after error
       }
     }
   }
 
   stop() {
     this.isRunning = false;
-    this.logWithTime("Stopping scraper manager");
+    this.logWithTime("Stopping scraper");
   }
 }
-const scraperManager = new ScraperManager();
 
+const scraperManager = new ScraperManager();
 export default scraperManager;
