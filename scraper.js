@@ -32,6 +32,8 @@ let capturedState = {
 let isRefreshingCookies = false;
 // Queue for pending cookie refresh requests
 let cookieRefreshQueue = [];
+// Track the current proxy index
+let currentProxyIndex = 0;
 
 function generateCorrelationId() {
   return crypto.randomUUID();
@@ -528,21 +530,29 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
 };
 
 const GetProxy = () => {
-  let _proxy = [...proxyArray?.proxies];
-  const randomProxy = Math.floor(Math.random() * _proxy.length);
-  _proxy = _proxy[randomProxy];
-
-  if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
+  const proxies = proxyArray?.proxies || [];
+  
+  if (!proxies.length) {
+    throw new Error("No proxies available");
+  }
+  
+  // Get the next proxy in sequence
+  const proxy = proxies[currentProxyIndex];
+  
+  // Update index to the next proxy, wrapping around if needed
+  currentProxyIndex = (currentProxyIndex + 1) % proxies.length;
+  
+  if (!proxy?.proxy || !proxy?.username || !proxy?.password) {
     throw new Error("Invalid proxy configuration");
   }
 
   try {
-    const proxyUrl = new URL(`http://${_proxy.proxy}`);
-    const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
+    const proxyUrl = new URL(`http://${proxy.proxy}`);
+    const proxyURl = `http://${proxy.username}:${proxy.password}@${
       proxyUrl.hostname
     }:${proxyUrl.port || 80}`;
     const proxyAgent = new HttpsProxyAgent(proxyURl);
-    return { proxyAgent, proxy: _proxy };
+    return { proxyAgent, proxy };
   } catch (error) {
     console.error("Invalid proxy URL format:", error);
     throw new Error("Invalid proxy URL format");
@@ -566,24 +576,26 @@ const ScrapeEvent = async (event) => {
     const userAgent = BrowserFingerprint.generateUserAgent(
       capturedData.fingerprint
     );
-
-    const MapHeader = {
+    
+    // Reuse the same headers object for both requests
+    const commonHeaders = {
       "User-Agent": userAgent,
-      Accept: "*/*",
+      "Accept-Language": capturedData.fingerprint.language,
+      "Accept-Encoding": "gzip, deflate, br",
       Origin: "https://www.ticketmaster.com",
       Referer: "https://www.ticketmaster.com/",
-      "Content-Encoding": "gzip",
       Cookie: cookieString,
     };
 
-    const FacetHeader = {
+    const MapHeader = {
+      ...commonHeaders,
       Accept: "*/*",
-      "Accept-Language": capturedData.fingerprint.language,
-      "Accept-Encoding": "gzip, deflate, br, zstd",
-      "User-Agent": userAgent,
-      Referer: "https://www.ticketmaster.com/",
-      Origin: "https://www.ticketmaster.com",
-      Cookie: cookieString,
+      "Content-Encoding": "gzip",
+    };
+
+    const FacetHeader = {
+      ...commonHeaders,
+      Accept: "*/*",
       "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
     };
