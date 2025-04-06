@@ -9,12 +9,16 @@ import path from "path";
 // Updated constants for stricter update intervals
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement
 const CONCURRENT_LIMIT = Math.max(4, Math.floor(cpus().length * 0.9)); // 90% of CPU cores
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 5; // Increased from 3 to 5 for more short attempts
 const SCRAPE_TIMEOUT = 30000; // Reduced timeout to 30 seconds
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 10); // Larger batches for efficiency
 const RETRY_BACKOFF_MS = 5000; // Base backoff time for retries
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds minimum between scrapes
 const URGENT_THRESHOLD = 110000; // Events needing update within 10 seconds of deadline
+
+// New cooldown settings - short, progressive cooldowns
+const SHORT_COOLDOWNS = [5000, 10000, 15000, 30000, 60000]; // 5s, 10s, 15s, 30s, 60s
+const LONG_COOLDOWN_MINUTES = 10; // 10 minutes for persistently failing events
 
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
@@ -384,21 +388,6 @@ class ScraperManager {
         return true;
       }
 
-      // Check for recent consecutive failures and apply longer cooldowns
-      const recentFailures = this.getRecentFailureCount(eventId);
-      if (recentFailures >= 3 && retryCount > 1) {
-        const backoffMinutes = Math.min(30, 5 * Math.pow(2, recentFailures - 3));
-        this.logWithTime(
-          `Event ${eventId} has failed ${recentFailures} times, extending cooldown to ${backoffMinutes} minutes`,
-          "warning"
-        );
-        this.cooldownEvents.set(eventId, moment().add(backoffMinutes, "minutes"));
-        
-        // Still update the schedule to prevent urgent flags
-        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
-        return false;
-      }
-
       // Refresh headers with backoff/caching strategy
       const headers = await this.refreshEventHeaders(eventId);
       if (!headers) {
@@ -418,6 +407,22 @@ class ScraperManager {
       }
 
       await this.updateEventMetadata(eventId, result);
+      
+      // Success! If this event was previously failing, update its status in DB
+      const recentFailures = this.getRecentFailureCount(eventId);
+      if (recentFailures > 0) {
+        try {
+          // Mark event as active again after successful scrape
+          await Event.updateOne(
+            { Event_ID: eventId },
+            { $set: { Skip_Scraping: false, status: "active" } }
+          );
+          this.logWithTime(`Reactivated previously failing event: ${eventId}`, "success");
+        } catch (err) {
+          console.error(`Failed to update status for event ${eventId}:`, err);
+        }
+      }
+      
       this.successCount++;
       this.lastSuccessTime = moment();
       this.eventUpdateTimestamps.set(eventId, moment());
@@ -434,47 +439,76 @@ class ScraperManager {
       
       await this.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
 
-      // Apply exponential backoff for retries with longer times for API errors
-      let backoffTime = RETRY_BACKOFF_MS * Math.pow(2, retryCount);
+      // Get current failure count for this event
+      const recentFailures = this.getRecentFailureCount(eventId);
       
-      // Detect API-specific errors and extend cooldown
-      if (error.message.includes("403") || 
-          error.message.includes("400") || 
-          error.message.includes("429") ||
-          error.message.includes("API")) {
-        // For API errors, apply longer cooldown (between 2-15 minutes)
-        const apiBackoffMinutes = Math.min(15, 2 + retryCount * 3);
-        backoffTime = apiBackoffMinutes * 60 * 1000;
-        
-        // Still update the event schedule to prevent it from being flagged urgent repeatedly
-        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
+      // Apply the new short cooldown strategy
+      let backoffTime;
+      let shouldMarkStopped = false;
+      
+      // Use API-specific message for API errors
+      const isApiError = error.message.includes("403") || 
+                        error.message.includes("400") || 
+                        error.message.includes("429") ||
+                        error.message.includes("API");
+      
+      if (retryCount < SHORT_COOLDOWNS.length) {
+        // Use the short, progressive cooldowns for initial retries
+        backoffTime = SHORT_COOLDOWNS[retryCount];
         
         this.logWithTime(
-          `API error for ${eventId}: ${error.message}. Extended cooldown for ${apiBackoffMinutes} minutes`,
+          `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
+          "warning"
+        );
+      } else {
+        // For persistent failures, use a longer cooldown and mark as stopped
+        backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // Convert minutes to ms
+        shouldMarkStopped = true;
+        
+        this.logWithTime(
+          `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. Marking as stopped with ${LONG_COOLDOWN_MINUTES} minute cooldown`,
           "error"
         );
-        
-        // Increment global consecutive error counter for API errors
+      }
+      
+      // If we've had 3 consecutive API errors, trigger a cookie reset
+      if (isApiError) {
         this.globalConsecutiveErrors++;
-        
-        // If we've had 3 consecutive API errors, trigger a cookie reset
         if (this.globalConsecutiveErrors >= 3) {
           // Don't await here to prevent blocking the current event processing
           this.resetCookiesAndHeaders().catch(e => 
             console.error("Error during cookie reset:", e)
           );
         }
-      } else {
-        this.logWithTime(
-          `Error scraping ${eventId}: ${error.message}. Cooldown for ${
-            backoffTime / 1000
-          }s`,
-          "error"
-        );
       }
       
+      // Set the cooldown
       const cooldownUntil = moment().add(backoffTime, "milliseconds");
       this.cooldownEvents.set(eventId, cooldownUntil);
+
+      // Mark event as stopped in database if it's a persistent failure
+      if (shouldMarkStopped) {
+        try {
+          await Event.updateOne(
+            { Event_ID: eventId },
+            { 
+              $set: { 
+                Skip_Scraping: true,
+                status: "stopped",
+                stopReason: isApiError ? "API Error" : "Persistent Failure",
+                lastErrorMessage: error.message,
+                lastErrorTime: new Date()
+              } 
+            }
+          );
+          this.logWithTime(`Marked event ${eventId} as stopped in database`, "warning");
+        } catch (err) {
+          console.error(`Failed to update status for event ${eventId}:`, err);
+        }
+      }
+      
+      // Still update the event schedule for 2-minute compliance
+      this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
 
       if (retryCount < MAX_RETRIES) {
         this.retryQueue.push({
@@ -490,11 +524,6 @@ class ScraperManager {
         );
       } else {
         this.logWithTime(`Max retries exceeded for ${eventId}`, "error");
-        
-        // For max retries, set a longer cooldown to give system a break (30 minutes)
-        this.cooldownEvents.set(eventId, moment().add(30, "minutes"));
-        // Update schedule to prevent urgent flags
-        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
       }
       return false;
     } finally {
