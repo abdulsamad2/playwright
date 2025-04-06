@@ -27,8 +27,7 @@ class ScraperManager {
       activeJobs: new Map(),
       successCount: 0,
       failedEvents: new Set(),
-      retryQueue: [],
-      getEventById: this.getEventById.bind(this),
+      retryQueue: []
     };
     
     // Initialize components
@@ -38,6 +37,11 @@ class ScraperManager {
     this.scheduler = new EventScheduler(this.logger);
     this.errorTracker = new ErrorTracker(this.logger);
     this.databaseManager = new DatabaseManager(this.logger);
+    
+    // Now connect state handlers after databaseManager is initialized
+    this.state.getEventById = this.databaseManager.getEventById.bind(this.databaseManager);
+    
+    // Create event processor last since it depends on other components
     this.eventProcessor = new EventProcessor(
       this.logger,
       this.concurrencyManager,
@@ -46,9 +50,6 @@ class ScraperManager {
       this.errorTracker,
       this.scheduler
     );
-    
-    // Connect state handlers
-    this.state.getEventById = this.databaseManager.getEventById.bind(this.databaseManager);
   }
 
   /**
