@@ -31,6 +31,8 @@ class ScraperManager {
     this.headerRefreshTimestamps = new Map(); // Track when headers were last refreshed
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
     this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
+    this.eventFailureCounts = new Map(); // Track consecutive failures per event
+    this.eventFailureTimes = new Map(); // Track when failures happened
   }
 
   logWithTime(message, type = "info") {
@@ -66,24 +68,31 @@ class ScraperManager {
         .select("url _id")
         .lean();
 
-      if (!event) {
-        console.error(`No event found for ID: ${eventId} when logging error`);
-        return;
-      }
+      // Fix for missing eventUrl - provide a fallback
+      const eventUrl = event?.url || `unknown-url-for-event-${eventId}`;
+      const eventObjectId = event?._id || null;
 
-      await ErrorLog.create({
-        eventUrl: event.url,
-        eventId: event._id,
-        externalEventId: eventId,
-        errorType,
-        message: error.message,
-        stack: error.stack,
-        metadata: {
-          ...metadata,
-          timestamp: new Date(),
-          iteration: metadata.iterationNumber || 1,
-        },
-      });
+      // Log to console first in case DB logging fails
+      console.error(`Error for event ${eventId} (${errorType}): ${error.message}`);
+      
+      // Only try to log to database if we have minimal required data
+      if (eventObjectId) {
+        await ErrorLog.create({
+          eventUrl: eventUrl,
+          eventId: eventObjectId,
+          externalEventId: eventId,
+          errorType,
+          message: error.message,
+          stack: error.stack,
+          metadata: {
+            ...metadata,
+            timestamp: new Date(),
+            iteration: metadata.iterationNumber || 1,
+          },
+        });
+      } else {
+        console.error(`Cannot log to ErrorLog - event ${eventId} not found in database`);
+      }
     } catch (err) {
       console.error("Error logging to database:", err);
       console.error("Original error:", error);
@@ -304,7 +313,7 @@ class ScraperManager {
 
       // Look up the event first before trying to scrape
       const event = await Event.findOne({ Event_ID: eventId })
-        .select("Skip_Scraping inHandDate")
+        .select("Skip_Scraping inHandDate url")
         .lean();
 
       if (!event) {
@@ -316,7 +325,24 @@ class ScraperManager {
 
       if (event.Skip_Scraping) {
         this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
+        // Still update the schedule for next time
+        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
         return true;
+      }
+
+      // Check for recent consecutive failures and apply longer cooldowns
+      const recentFailures = this.getRecentFailureCount(eventId);
+      if (recentFailures >= 3 && retryCount > 1) {
+        const backoffMinutes = Math.min(30, 5 * Math.pow(2, recentFailures - 3));
+        this.logWithTime(
+          `Event ${eventId} has failed ${recentFailures} times, extending cooldown to ${backoffMinutes} minutes`,
+          "warning"
+        );
+        this.cooldownEvents.set(eventId, moment().add(backoffMinutes, "minutes"));
+        
+        // Still update the schedule to prevent urgent flags
+        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
+        return false;
       }
 
       // Refresh headers with backoff/caching strategy
@@ -342,22 +368,44 @@ class ScraperManager {
       this.lastSuccessTime = moment();
       this.eventUpdateTimestamps.set(eventId, moment());
       this.failedEvents.delete(eventId);
+      this.clearFailureCount(eventId);
       return true;
     } catch (error) {
       this.failedEvents.add(eventId);
+      this.incrementFailureCount(eventId);
+      
       await this.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
 
-      // Apply exponential backoff for retries
-      const backoffTime = RETRY_BACKOFF_MS * Math.pow(2, retryCount);
+      // Apply exponential backoff for retries with longer times for API errors
+      let backoffTime = RETRY_BACKOFF_MS * Math.pow(2, retryCount);
+      
+      // Detect API-specific errors and extend cooldown
+      if (error.message.includes("403") || 
+          error.message.includes("400") || 
+          error.message.includes("429") ||
+          error.message.includes("API")) {
+        // For API errors, apply longer cooldown (between 2-15 minutes)
+        const apiBackoffMinutes = Math.min(15, 2 + retryCount * 3);
+        backoffTime = apiBackoffMinutes * 60 * 1000;
+        
+        // Still update the event schedule to prevent it from being flagged urgent repeatedly
+        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
+        
+        this.logWithTime(
+          `API error for ${eventId}: ${error.message}. Extended cooldown for ${apiBackoffMinutes} minutes`,
+          "error"
+        );
+      } else {
+        this.logWithTime(
+          `Error scraping ${eventId}: ${error.message}. Cooldown for ${
+            backoffTime / 1000
+          }s`,
+          "error"
+        );
+      }
+      
       const cooldownUntil = moment().add(backoffTime, "milliseconds");
       this.cooldownEvents.set(eventId, cooldownUntil);
-
-      this.logWithTime(
-        `Error scraping ${eventId}: ${error.message}. Cooldown for ${
-          backoffTime / 1000
-        }s`,
-        "error"
-      );
 
       if (retryCount < MAX_RETRIES) {
         this.retryQueue.push({
@@ -373,6 +421,11 @@ class ScraperManager {
         );
       } else {
         this.logWithTime(`Max retries exceeded for ${eventId}`, "error");
+        
+        // For max retries, set a longer cooldown to give system a break (30 minutes)
+        this.cooldownEvents.set(eventId, moment().add(30, "minutes"));
+        // Update schedule to prevent urgent flags
+        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
       }
       return false;
     } finally {
@@ -608,7 +661,7 @@ class ScraperManager {
           "info"
         );
         
-        // Clear old cooldowns
+        // Clear old cooldowns and failure records
         const expiredCooldowns = [];
         for (const [eventId, cooldownTime] of this.cooldownEvents.entries()) {
           if (now.isAfter(cooldownTime)) {
@@ -618,6 +671,14 @@ class ScraperManager {
         
         for (const eventId of expiredCooldowns) {
           this.cooldownEvents.delete(eventId);
+        }
+        
+        // Clear failure counts older than 1 hour to prevent permanent penalties
+        const oldFailureThreshold = moment().subtract(1, 'hour');
+        for (const [eventId, failureTime] of this.eventFailureTimes.entries()) {
+          if (failureTime.isBefore(oldFailureThreshold)) {
+            this.clearFailureCount(eventId);
+          }
         }
       } catch (error) {
         console.error("Error in monitoring task:", error);
@@ -639,6 +700,22 @@ class ScraperManager {
   stop() {
     this.isRunning = false;
     this.logWithTime("Stopping scraper");
+  }
+
+  getRecentFailureCount(eventId) {
+    const count = this.eventFailureCounts.get(eventId) || 0;
+    return count;
+  }
+
+  incrementFailureCount(eventId) {
+    const currentCount = this.eventFailureCounts.get(eventId) || 0;
+    this.eventFailureCounts.set(eventId, currentCount + 1);
+    this.eventFailureTimes.set(eventId, moment());
+  }
+
+  clearFailureCount(eventId) {
+    this.eventFailureCounts.delete(eventId);
+    this.eventFailureTimes.delete(eventId);
   }
 }
 
