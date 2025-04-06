@@ -12,6 +12,7 @@ class ConcurrencyManager {
     this.activeJobs = new Map(); // eventId -> start time
     this.processingEvents = new Set(); // Currently processing event IDs
     this.cooldownEvents = new Map(); // eventId -> cooldown until timestamp
+    this.getEventById = null; // Will be set after DatabaseManager is initialized
   }
 
   /**
