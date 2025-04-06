@@ -4,14 +4,15 @@ import { ScrapeEvent, refreshHeaders } from "./scraper.js";
 import { setTimeout } from "timers/promises";
 import { cpus } from "os";
 
-const CONCURRENT_LIMIT = Math.max(1, Math.floor(cpus().length * 0.75)); // Reduced concurrency to 75% of CPU cores
-const EVENT_REFRESH_INTERVAL = 120000; // Increased to 2 minutes
+// Updated constants for stricter update intervals
+const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement
+const CONCURRENT_LIMIT = Math.max(4, Math.floor(cpus().length * 0.9)); // Increased concurrency to 90% of CPU cores
 const MAX_RETRIES = 3;
-const SCRAPE_TIMEOUT = 45000; // Increased timeout to 45 seconds
-const BATCH_SIZE = Math.max(1, Math.floor(CONCURRENT_LIMIT * 1.5)); // Smaller batches
-const PRIORITY_UPDATE_WINDOW = 20000; // 20-second window for priority updates
+const SCRAPE_TIMEOUT = 30000; // Reduced timeout to 30 seconds
+const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 10); // Larger batches for efficiency
 const RETRY_BACKOFF_MS = 5000; // Base backoff time for retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 30000; // Minimum 30 seconds between scrapes of the same event
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds minimum between scrapes
+const URGENT_THRESHOLD = 110000; // Events needing update within 10 seconds of deadline
 
 class ScraperManager {
   constructor() {
@@ -26,9 +27,10 @@ class ScraperManager {
     this.eventUpdateTimestamps = new Map();
     this.priorityQueue = new Set();
     this.concurrencySemaphore = CONCURRENT_LIMIT;
-    this.processingEvents = new Set(); // Track events currently being processed to prevent duplicates
+    this.processingEvents = new Set(); // Track events currently being processed
     this.headerRefreshTimestamps = new Map(); // Track when headers were last refreshed
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
+    this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
   }
 
   logWithTime(message, type = "info") {
@@ -195,10 +197,12 @@ class ScraperManager {
         ).session(session);
       });
 
+      // Update the event's update schedule for next update
+      this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
       this.logWithTime(
         `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
           2
-        )}ms`,
+        )}ms, next update by ${this.eventUpdateSchedule.get(eventId).format('HH:mm:ss')}`,
         "success"
       );
     } catch (error) {
@@ -379,31 +383,42 @@ class ScraperManager {
   }
 
   async processBatch(eventIds) {
-    // Filter out any events that should be skipped
-    const filteredEventIds = eventIds.filter(
-      (eventId) => !this.shouldSkipEvent(eventId)
-    );
-
-    if (filteredEventIds.length === 0) {
-      return { failed: [] };
-    }
-
-    // Process events sequentially instead of all at once to reduce strain
+    // For very large batches, process parallel but with throttling
     const results = [];
     const failed = [];
-
-    for (const eventId of filteredEventIds) {
-      try {
-        const result = await this.scrapeEvent(eventId);
-        results.push({ eventId, success: result });
-
-        // Add a small delay between each event to prevent rate limiting
-        await setTimeout(1000);
-      } catch (error) {
-        failed.push({ eventId, error });
+    
+    if (eventIds.length <= 0) {
+      return { failed };
+    }
+    
+    // Split into smaller groups for better control
+    const chunkSize = Math.min(5, Math.ceil(CONCURRENT_LIMIT / 2));
+    const chunks = [];
+    
+    for (let i = 0; i < eventIds.length; i += chunkSize) {
+      chunks.push(eventIds.slice(i, i + chunkSize));
+    }
+    
+    // Process chunks with controlled parallelism
+    for (const chunk of chunks) {
+      // Process each chunk in parallel
+      const promises = chunk.map(async (eventId) => {
+        try {
+          const result = await this.scrapeEvent(eventId);
+          results.push({ eventId, success: result });
+        } catch (error) {
+          failed.push({ eventId, error });
+        }
+      });
+      
+      await Promise.all(promises);
+      
+      // Small delay between chunks to prevent rate limiting
+      if (chunks.length > 1) {
+        await setTimeout(200);
       }
     }
-
+    
     return { failed };
   }
 
@@ -437,90 +452,107 @@ class ScraperManager {
 
   async getEventsToProcess() {
     const now = moment();
-    const priorityCutoff = now.clone().subtract(PRIORITY_UPDATE_WINDOW, "ms");
-
-    // Get priority events first (recently updated or failed)
-    const priorityEvents = await Event.find({
-      $or: [
-        { Last_Updated: { $lt: priorityCutoff.toDate() } },
-        { Event_ID: { $in: [...this.failedEvents].slice(0, 5) } }, // Limit failed events to 5
-      ],
+    
+    // First, identify events approaching their 2-minute deadline
+    const urgentEvents = [];
+    const nearDeadlineEvents = [];
+    const regularEvents = [];
+    
+    // Get all events that need updating
+    const allEvents = await Event.find({
       Skip_Scraping: { $ne: true },
-      // Don't process events we're already handling
       Event_ID: { $nin: [...this.processingEvents] },
     })
       .sort({ Last_Updated: 1 })
-      .limit(Math.ceil(BATCH_SIZE / 2)) // Half the batch size
-      .select("Event_ID")
+      .select("Event_ID Last_Updated")
       .lean();
-
-    // If we still have capacity, get regular events
-    const remainingCapacity = BATCH_SIZE - priorityEvents.length;
-    let regularEvents = [];
-
-    if (remainingCapacity > 0) {
-      regularEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-        Event_ID: {
-          $nin: [
-            ...priorityEvents.map((e) => e.Event_ID),
-            ...this.processingEvents,
-          ],
-        },
-      })
-        .sort({ Last_Updated: 1 })
-        .limit(remainingCapacity)
-        .select("Event_ID")
-        .lean();
+    
+    // Process based on deadline proximity
+    for (const event of allEvents) {
+      // If we don't have a scheduled update time, set one based on last update
+      if (!this.eventUpdateSchedule.has(event.Event_ID)) {
+        const lastUpdate = moment(event.Last_Updated);
+        this.eventUpdateSchedule.set(
+          event.Event_ID, 
+          lastUpdate.add(MAX_UPDATE_INTERVAL, 'milliseconds')
+        );
+      }
+      
+      const deadline = this.eventUpdateSchedule.get(event.Event_ID);
+      const timeToDeadline = deadline.diff(now);
+      
+      // Past deadline or within 10 seconds of deadline
+      if (timeToDeadline <= 0) {
+        urgentEvents.push(event.Event_ID);
+      } 
+      // Within 30 seconds of deadline
+      else if (timeToDeadline <= URGENT_THRESHOLD) {
+        nearDeadlineEvents.push(event.Event_ID);
+      }
+      // All other events
+      else {
+        regularEvents.push(event.Event_ID);
+      }
     }
-
-    return [...priorityEvents, ...regularEvents].map((e) => e.Event_ID);
+    
+    // Log urgency metrics
+    if (urgentEvents.length > 0) {
+      this.logWithTime(`URGENT: ${urgentEvents.length} events past deadline`, "warning");
+    }
+    
+    // Prioritize urgent events first, then near deadline, then some regular events
+    const urgentBatchSize = Math.min(urgentEvents.length, BATCH_SIZE);
+    const remainingCapacity = BATCH_SIZE - urgentBatchSize;
+    
+    let result = urgentEvents.slice(0, urgentBatchSize);
+    
+    if (remainingCapacity > 0) {
+      const nearDeadlineBatchSize = Math.min(nearDeadlineEvents.length, Math.floor(remainingCapacity * 0.7));
+      result = [...result, ...nearDeadlineEvents.slice(0, nearDeadlineBatchSize)];
+      
+      const regularBatchSize = remainingCapacity - nearDeadlineBatchSize;
+      if (regularBatchSize > 0) {
+        result = [...result, ...regularEvents.slice(0, regularBatchSize)];
+      }
+    }
+    
+    return result;
   }
 
   async startContinuousScraping() {
     this.isRunning = true;
     this.logWithTime(
-      "Starting optimized scraper with rate limiting and cooldowns"
+      `Starting strict 2-minute scraper with ${CONCURRENT_LIMIT} concurrent jobs`
     );
-    this.logWithTime(
-      `Concurrency: ${CONCURRENT_LIMIT}, Batch size: ${BATCH_SIZE}, Retry backoff: ${RETRY_BACKOFF_MS}ms base`
-    );
-
+    
+    // Schedule checking every second for urgent events
+    const checkInterval = 1000; // Check every second
+    
     while (this.isRunning) {
       const cycleStart = performance.now();
-
+      
       try {
         // Process retries first
         await this.processRetryQueue();
-
-        // Get events to process
+        
+        // Get events to process with strict prioritization
         const eventIds = await this.getEventsToProcess();
-        if (eventIds.length === 0) {
-          this.logWithTime(
-            "No events to process, waiting for next cycle",
-            "info"
-          );
-          await setTimeout(EVENT_REFRESH_INTERVAL);
-          continue;
+        
+        if (eventIds.length > 0) {
+          this.logWithTime(`Processing batch of ${eventIds.length} events (${this.processingEvents.size} already in progress)`);
+          await this.processBatch(eventIds);
         }
-
-        this.logWithTime(`Processing batch of ${eventIds.length} events`);
-        await this.processBatch(eventIds);
-
+        
+        // Short delay before next check
         const cycleTime = performance.now() - cycleStart;
-        const delay = Math.max(0, EVENT_REFRESH_INTERVAL - cycleTime);
-
+        const delay = Math.max(0, checkInterval - cycleTime);
+        
         if (delay > 0) {
-          this.logWithTime(
-            `Cycle completed in ${Math.round(
-              cycleTime
-            )}ms, waiting ${Math.round(delay)}ms until next cycle`
-          );
           await setTimeout(delay);
         }
       } catch (error) {
         this.logWithTime(`Cycle error: ${error.message}`, "error");
-        await setTimeout(30000); // Wait 30 seconds after error to recover
+        await setTimeout(5000); // Shorter recovery time
       }
     }
   }
@@ -550,26 +582,49 @@ class ScraperManager {
     while (this.isRunning) {
       try {
         await this.cleanupStaleTasks();
-
-        // Log system status every 10 minutes
+        
+        // Check for events that missed their deadlines
+        const now = moment();
+        let missedDeadlines = 0;
+        
+        for (const [eventId, deadline] of this.eventUpdateSchedule.entries()) {
+          if (now.isAfter(deadline) && !this.processingEvents.has(eventId)) {
+            missedDeadlines++;
+            // Force immediate processing of missed events
+            this.priorityQueue.add(eventId);
+          }
+        }
+        
+        if (missedDeadlines > 0) {
+          this.logWithTime(`WARNING: ${missedDeadlines} events missed their 2-minute update deadline`, "error");
+        }
+        
+        // Log system health status
         this.logWithTime(
-          `System status: ${this.successCount} successful scrapes, ${this.failedEvents.size} failed events, ${this.retryQueue.length} in retry queue`,
+          `System status: ${this.successCount} successful scrapes, ` +
+          `${this.activeJobs.size}/${CONCURRENT_LIMIT} active, ` +
+          `${this.failedEvents.size} failed, ${this.retryQueue.length} in retry queue, ` +
+          `${this.eventUpdateSchedule.size} total tracked events`,
           "info"
         );
-
+        
         // Clear old cooldowns
-        const now = moment();
+        const expiredCooldowns = [];
         for (const [eventId, cooldownTime] of this.cooldownEvents.entries()) {
           if (now.isAfter(cooldownTime)) {
-            this.cooldownEvents.delete(eventId);
+            expiredCooldowns.push(eventId);
           }
+        }
+        
+        for (const eventId of expiredCooldowns) {
+          this.cooldownEvents.delete(eventId);
         }
       } catch (error) {
         console.error("Error in monitoring task:", error);
       }
-
-      // Run monitoring every 10 minutes
-      await setTimeout(10 * 60 * 1000);
+      
+      // Run monitoring every 30 seconds
+      await setTimeout(30 * 1000);
     }
   }
 
