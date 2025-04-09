@@ -876,6 +876,261 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 
 // Extracted API call logic to reduce duplicate code
 async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
+  // Maximum retries and delay configuration
+  const maxRetries = 3;
+  const baseDelayMs = 500;
+  const maxDelayMs = 2000;
+  const jitterFactor = 0.2; // 20% jitter
+  
+  // Track success metrics for this call
+  let attempts = 0;
+  let lastError = null;
+  const startTime = Date.now();
+  
+  // IP rotation strategies for 403s (reuse from proxy pool)
+  let alternativeProxies = [];
+  try {
+    // Pre-select a few alternative proxies to try if we get blocked
+    for (let i = 0; i < 2; i++) {
+      const { proxyAgent: altAgent, proxy: altProxy } = GetProxy();
+      if (altAgent && altProxy) {
+        alternativeProxies.push({ proxyAgent: altAgent, proxy: altProxy });
+      }
+    }
+  } catch (err) {
+    console.log(`Could not prepare alternative proxies: ${err.message}`);
+  }
+  
+  // Enhanced version with more effective randomization techniques for 403s
+  const generateAlternativeHeaders = () => {
+    const fp = BrowserFingerprint.generate();
+    const ua = BrowserFingerprint.generateUserAgent(fp);
+    
+    // Extract just the essential cookie values if we have them
+    let cookieParts = [];
+    if (facetHeader.Cookie) {
+      try {
+        // Try to preserve critical authentication cookies like session ID, auth tokens
+        const cookieStr = facetHeader.Cookie;
+        const cookiesSplit = cookieStr.split(';');
+        const essentialCookies = ['SESSION', 'TM_TKTS', 'TMPS', 'aud', 'TMRANDOM', 'tmTrackID', 'at'];
+        
+        cookiesSplit.forEach(cookie => {
+          const name = cookie.split('=')[0]?.trim();
+          if (essentialCookies.some(essential => name?.includes(essential))) {
+            cookieParts.push(cookie.trim());
+          }
+        });
+      } catch (error) {
+        console.log(`Error extracting cookies: ${error.message}`);
+      }
+    }
+    
+    // Add subtle timezone and language variations
+    const languages = ["en-US", "en-GB", "en-CA", "en"];
+    const timezones = ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London"];
+    
+    // Randomize accepted formats slightly
+    const accepts = [
+      "*/*",
+      "application/json, text/plain, */*",
+      "application/json, text/javascript, */*; q=0.01"
+    ];
+    
+    // Common mobile and desktop User-Agent patterns
+    const useNewUa = Math.random() > 0.5;
+    const userAgent = useNewUa ? ua : [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    ][Math.floor(Math.random() * 4)];
+    
+    return {
+      "User-Agent": userAgent,
+      "Accept": accepts[Math.floor(Math.random() * accepts.length)],
+      "Accept-Language": languages[Math.floor(Math.random() * languages.length)],
+      "Accept-Encoding": "gzip, deflate, br",
+      "Referer": "https://www.ticketmaster.com/",
+      "Origin": "https://www.ticketmaster.com",
+      "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
+      "x-tm-api-key": "b462oi7fic6pehcdkzony5bxhe",
+      "tmps-correlation-id": generateCorrelationId(),
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
+      "sec-ch-ua": `"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"`,
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": Math.random() > 0.2 ? "Windows" : "macOS",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-site",
+      "Cookie": cookieParts.length > 0 ? cookieParts.join('; ') : undefined
+    };
+  };
+  
+  // Helper to create an optimized version of the request with retries
+  const makeRequestWithRetry = async (url, headers, agent, attemptNum = 0, isRetryWithNewProxy = false) => {
+    // Add jitter to prevent thundering herd pattern and appear more human
+    const jitter = 1 + (Math.random() * jitterFactor * 2 - jitterFactor);
+    const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
+    
+    if (attemptNum > 0) {
+      // Wait with exponential backoff before retry
+      await new Promise(resolve => setTimeout(resolve, delay));
+      console.log(`Retry attempt ${attemptNum} for ${eventId} (${url.includes('mapsapi') ? 'map' : 'facet'} API) after ${delay.toFixed(0)}ms`);
+    }
+    
+    // Create a fresh abort controller for each attempt
+    let abortController = new AbortController();
+    const timeout = setTimeout(() => {
+      abortController.abort();
+      console.log(`Request aborted due to timeout for ${eventId}`);
+    }, CONFIG.PAGE_TIMEOUT);
+    
+    try {
+      // Add slight randomization to headers to avoid fingerprinting
+      const modifiedHeaders = { ...headers };
+      
+      // Slightly randomize headers while keeping essential values
+      if (attemptNum > 0) {
+        // Add "random" parameters that won't affect functionality
+        modifiedHeaders['X-Request-ID'] = generateCorrelationId();
+        modifiedHeaders['X-Attempt-Num'] = attemptNum.toString();
+        
+        // IMPORTANT: Remove If-Modified-Since header to avoid 304 errors
+        // The server may return 304 Not Modified if we send this with a future date
+        delete modifiedHeaders['If-Modified-Since'];
+        
+        // Add subtle browser-like variations
+        if (Math.random() > 0.5) {
+          modifiedHeaders['X-Requested-With'] = 'XMLHttpRequest';
+        }
+        
+        // Add random viewport size to appear more like a real browser
+        const viewportWidth = 1200 + Math.floor(Math.random() * 400);
+        const viewportHeight = 800 + Math.floor(Math.random() * 300);
+        modifiedHeaders['X-Viewport-Size'] = `${viewportWidth}x${viewportHeight}`;
+        
+        // Mimic browser behavior by changing headers slightly based on destination
+        if (url.includes('mapsapi')) {
+          modifiedHeaders['Sec-Fetch-Site'] = 'cross-site';
+        } else {
+          modifiedHeaders['Sec-Fetch-Site'] = 'same-site';
+        }
+      }
+      
+      // Make the request using browser-like settings
+      const response = await axios.get(url, {
+        httpsAgent: agent,
+        headers: modifiedHeaders,
+        timeout: CONFIG.PAGE_TIMEOUT,
+        signal: abortController.signal,
+        // Update validateStatus to accept 304 Not Modified as a valid response
+        validateStatus: (status) => status === 200 || status === 304,
+      });
+      
+      clearTimeout(timeout);
+      
+      // Handle 304 Not Modified responses
+      if (response.status === 304) {
+        console.log(`Received 304 Not Modified for ${eventId} - this is OK, using cached data`);
+        // For 304 responses, we need to get data from cache or make a fresh request
+        // without the If-Modified-Since header
+        if (attemptNum === 0) {
+          // Try again without cache validation headers
+          const cleanHeaders = { ...modifiedHeaders };
+          // Remove all cache-related headers
+          delete cleanHeaders['If-Modified-Since'];
+          delete cleanHeaders['If-None-Match'];
+          return makeRequestWithRetry(url, cleanHeaders, agent, attemptNum + 1);
+        }
+      }
+      
+      return response.data;
+    } catch (error) {
+      clearTimeout(timeout);
+      
+      // Check if this is a 403 error
+      const is403Error = error.response && error.response.status === 403;
+      const is429Error = error.response && error.response.status === 429;
+      const is304Error = error.response && error.response.status === 304;
+      const isNetworkError = !error.response && error.code;
+      
+      // Special handling for 304 Not Modified errors
+      if (is304Error) {
+        console.log(`304 Not Modified for ${eventId} - trying with fresh request`);
+        // Make a new request without cache validation headers
+        const cleanHeaders = { ...headers };
+        delete cleanHeaders['If-Modified-Since'];
+        delete cleanHeaders['If-None-Match'];
+        delete cleanHeaders['If-Match'];
+        delete cleanHeaders['Cache-Control'];
+        // Add explicit cache-busting
+        cleanHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+        cleanHeaders['Pragma'] = 'no-cache';
+        cleanHeaders['Expires'] = '0';
+        
+        // Add a random query parameter to avoid cache
+        const cacheBuster = `?_=${Date.now()}`;
+        const urlWithBuster = url.includes('?') 
+          ? `${url}&_=${Date.now()}` 
+          : `${url}?_=${Date.now()}`;
+          
+        return makeRequestWithRetry(urlWithBuster, cleanHeaders, agent, attemptNum + 1);
+      }
+      
+      // On 403/429 errors, we need to try a different approach
+      if (is403Error || is429Error) {
+        console.log(`${error.response.status} error for ${eventId} (${url.includes('mapsapi') ? 'map' : 'facet'} API)`);
+        
+        if (attemptNum < maxRetries) {
+          // Try with alternative headers or proxy if available
+          if (is403Error && alternativeProxies.length > 0 && (attemptNum > 0 || isRetryWithNewProxy)) {
+            // On second+ retry with 403, try a different proxy
+            const altProxyData = alternativeProxies.shift();
+            console.log(`Switching to alternative proxy for ${eventId} retry`);
+            
+            // Try with the alternative proxy and completely fresh headers
+            const altHeaders = generateAlternativeHeaders();
+            return makeRequestWithRetry(url, altHeaders, altProxyData.proxyAgent, attemptNum + 1, true);
+          } else {
+            // Try with fresh headers but same proxy
+            const altHeaders = generateAlternativeHeaders();
+            
+            // For stubborn 403s, try completely different approach
+            if (attemptNum > 1) {
+              // Further randomize request properties on persistent 403s
+              // Add small delay to appear more human-like
+              await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+              
+              // Try a different approach to the request
+              console.log(`Using alternative request approach for persistent 403s on ${eventId}`);
+              
+              // Construct a more browser-like request to attempt to bypass protections
+              const browserLikeHeaders = {
+                ...altHeaders,
+                "Referer": `https://www.ticketmaster.com/event/${eventId}`,
+                "Host": new URL(url).hostname,
+                "Connection": "keep-alive",
+                "TE": "trailers"
+              };
+              
+              return makeRequestWithRetry(url, browserLikeHeaders, agent, attemptNum + 1);
+            }
+            
+            return makeRequestWithRetry(url, altHeaders, agent, attemptNum + 1);
+          }
+        }
+      } else if (isNetworkError && attemptNum < maxRetries) {
+        // For network errors, simply retry with the same parameters
+        console.log(`Network error for ${eventId}: ${error.message}, retrying...`);
+        return makeRequestWithRetry(url, headers, agent, attemptNum + 1);
+      }
+      
+      throw error;
+    }
+  };
+  
   try {
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
     const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
@@ -886,18 +1141,74 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       Accept: "*/*",
       "Content-Encoding": "gzip"
     };
-
-    const [DataMap, DataFacets] = await Promise.all([
-      GetData(effectiveMapHeader, proxyAgent, mapUrl, eventId),
-      GetData(facetHeader, proxyAgent, facetUrl, eventId),
-    ]);
+    
+    // Randomize request order slightly to appear more human-like
+    const randomizeOrder = Math.random() > 0.5;
+    
+    // Stagger requests by a small random amount (20-100ms)
+    const staggerDelay = 20 + Math.floor(Math.random() * 80);
+    
+    // Sometimes add a fake visit to the event page first to establish session context
+    if (Math.random() > 0.6) {
+      try {
+        const eventPageUrl = `https://www.ticketmaster.com/event/${eventId}`;
+        console.log(`Making context-establishing request to ${eventPageUrl} for ${eventId}`);
+        
+        // Make a HEAD request to the event page to establish browser context
+        await axios({
+          method: 'head',
+          url: eventPageUrl,
+          headers: {
+            ...facetHeader,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1"
+          },
+          httpsAgent: proxyAgent,
+          timeout: 5000, // Short timeout as we don't need a full response
+        }).catch(e => {
+          // Ignore errors - this is just to establish some context
+          console.log(`Context request for ${eventId} failed (this is okay): ${e.message}`);
+        });
+        
+        // Small delay after the context request
+        await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
+      } catch (contextError) {
+        // Ignore any errors from the context-establishing request
+      }
+    }
+    
+    // Make both requests with automatic retry logic
+    let DataMap, DataFacets;
+    
+    if (randomizeOrder) {
+      // Map API first
+      DataMap = await makeRequestWithRetry(mapUrl, effectiveMapHeader, proxyAgent);
+      
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, staggerDelay));
+      
+      // Then Facet API
+      DataFacets = await makeRequestWithRetry(facetUrl, facetHeader, proxyAgent);
+    } else {
+      // Facet API first
+      DataFacets = await makeRequestWithRetry(facetUrl, facetHeader, proxyAgent);
+      
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, staggerDelay));
+      
+      // Then Map API
+      DataMap = await makeRequestWithRetry(mapUrl, effectiveMapHeader, proxyAgent);
+    }
 
     if (!DataFacets || !DataMap) {
       console.log(`Failed to get data from APIs for event ${eventId}`);
       return false;
     }
 
-    console.log(`API requests completed successfully for event ${eventId}`);
+    console.log(`API requests completed successfully for event ${eventId} in ${Date.now() - startTime}ms`);
     const dataGet = GenerateNanoPlaces(DataFacets?.facets);
     const finalData = AttachRowSection(
       dataGet,
@@ -910,6 +1221,9 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     return finalData;
   } catch (error) {
     console.error(`API error for event ${eventId}:`, error);
+    // Track errors by type to identify patterns
+    const errorType = error.response?.status || error.code || 'unknown';
+    console.error(`Error type: ${errorType}, attempt ${attempts}/${maxRetries}`);
     return false;
   }
 }

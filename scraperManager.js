@@ -340,6 +340,10 @@ class ScraperManager {
           lastUpdate: moment().format("YYYY-MM-DD HH:mm:ss"),
           iterationNumber: (event.metadata?.iterationNumber || 0) + 1,
           scrapeDurationMs: performance.now() - startTime,
+          scrapeStartTime: this.startTime.toDate(),
+          scrapeEndTime: new Date(),
+          scrapeDurationSeconds: moment().diff(this.startTime, "seconds"),
+          totalRunningTimeMinutes: moment().diff(this.startTime, "minutes"),
           ticketStats: {
             totalTickets: currentTicketCount,
             ticketCountChange: currentTicketCount - previousTicketCount,
@@ -360,19 +364,20 @@ class ScraperManager {
         ).session(session);
 
         if (scrapeResult?.length > 0) {
-          // Optimized seat comparison
-          const existingGroups = await ConsecutiveGroup.find(
+          // Check if seats have actually changed before performing database operations
+          const currentGroups = await ConsecutiveGroup.find(
             { eventId },
             { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 }
-          ).lean();
+          ).lean().session(session);
 
-          const existingSeats = new Set(
-            existingGroups.flatMap((g) =>
+          // Create hash sets for efficient comparison
+          const currentSeatsHash = new Set(
+            currentGroups.flatMap((g) =>
               g.seats.map((s) => `${g.section}-${g.row}-${s.number}-${s.price}`)
             )
           );
 
-          const newSeats = new Set(
+          const newSeatsHash = new Set(
             scrapeResult.flatMap((g) =>
               g.seats.map(
                 (s) => `${g.section}-${g.row}-${s}-${g.inventory.listPrice}`
@@ -380,10 +385,15 @@ class ScraperManager {
             )
           );
 
-          if (
-            existingSeats.size !== newSeats.size ||
-            [...existingSeats].some((s) => !newSeats.has(s))
-          ) {
+          // Check if there are differences in the seats
+          const hasChanges =
+            currentSeatsHash.size !== newSeatsHash.size ||
+            [...currentSeatsHash].some((s) => !newSeatsHash.has(s)) ||
+            [...newSeatsHash].some((s) => !currentSeatsHash.has(s));
+
+          if (hasChanges) {
+            this.logWithTime(`Seat changes detected for event ${eventId}, updating database`, "info");
+            
             // Bulk delete and insert for better performance
             await ConsecutiveGroup.deleteMany({ eventId }).session(session);
 
@@ -401,10 +411,36 @@ class ScraperManager {
                 price: group.inventory.listPrice,
               })),
               inventory: {
-                ...group.inventory,
+                quantity: group.inventory.quantity,
+                section: group.section,
+                hideSeatNumbers: group.inventory.hideSeatNumbers,
+                row: group.row,
+                cost: group.inventory.cost,
+                stockType: group.inventory.stockType,
+                lineType: group.inventory.lineType,
+                seatType: group.inventory.seatType,
+                inHandDate: event.inHandDate,
+                notes: group.inventory.notes,
+                tags: group.inventory.tags,
+                inventoryId: group.inventory.inventoryId,
+                offerId: group.inventory.offerId,
+                splitType: group.inventory.splitType,
+                publicNotes: group.inventory.publicNotes,
+                listPrice: group.inventory.listPrice,
+                customSplit: group.inventory.customSplit,
                 tickets: group.inventory.tickets.map((ticket) => ({
-                  ...ticket,
-                  sellPrice: ticket.sellPrice * 1.25, // Apply markup
+                  id: ticket.id,
+                  seatNumber: ticket.seatNumber,
+                  notes: ticket.notes,
+                  cost: ticket.cost,
+                  faceValue: ticket.faceValue,
+                  taxedCost: ticket.taxedCost,
+                  sellPrice: ticket.sellPrice ** 1.25, // Using exponentiation as in old code
+                  stockType: ticket.stockType,
+                  eventId: ticket.eventId,
+                  accountId: ticket.accountId,
+                  status: ticket.status,
+                  auditNote: ticket.auditNote,
                 })),
               },
             }));
@@ -415,6 +451,10 @@ class ScraperManager {
               const chunk = groupsToInsert.slice(i, i + CHUNK_SIZE);
               await ConsecutiveGroup.insertMany(chunk, { session });
             }
+            
+            this.logWithTime(`Updated ${groupsToInsert.length} consecutive groups for event ${eventId}`, "success");
+          } else {
+            this.logWithTime(`No seat changes detected for event ${eventId}`, "info");
           }
         }
 
