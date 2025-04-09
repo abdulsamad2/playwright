@@ -51,6 +51,24 @@ class ScraperManager {
     // Initialize the proxy manager
     this.proxyManager = new ProxyManager(this);
     this.batchProxies = new Map(); // Map batch ID to proxy
+
+    // New: Data caching and API error handling
+    this.responseCache = new Map(); // Cache successful responses
+    this.headerRotationPool = []; // Pool of working headers
+    this.proxySuccessRates = new Map(); // Track success rates per proxy
+    this.apiCircuitBreaker = {
+      failures: 0,
+      threshold: 10,
+      resetTimeout: 30000,
+      lastTripped: null,
+      tripped: false
+    };
+    this.headerSuccessRates = new Map(); // Track which headers work better
+    
+    // New: Failed events batching
+    this.failureTypeGroups = new Map(); // Group failed events by error type
+    this.lastFailedBatchProcess = null; // Last time we processed a batch of failed events
+    this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
   }
 
   logWithTime(message, type = "info") {
@@ -176,6 +194,18 @@ class ScraperManager {
     if (!lastRefresh || moment().diff(lastRefresh) > 300000) {
       try {
         this.logWithTime(`Refreshing headers for ${eventId}`);
+        
+        // New: Check if we have successful headers in the rotation pool first
+        if (this.headerRotationPool.length > 0) {
+          // Use headers that have been successful recently
+          const headerIndex = Math.floor(Math.random() * this.headerRotationPool.length);
+          const cachedHeaders = this.headerRotationPool[headerIndex];
+          
+          // Update timestamp but don't overwrite the original headers
+          this.headerRefreshTimestamps.set(eventId, moment());
+          return cachedHeaders;
+        }
+        
         const capturedState = await refreshHeaders(eventId);
         
         if (capturedState) {
@@ -217,6 +247,18 @@ class ScraperManager {
           
           this.headersCache.set(eventId, standardizedHeaders);
           this.headerRefreshTimestamps.set(eventId, moment());
+          
+          // New: Add to rotation pool if not already there
+          if (!this.headerRotationPool.some(h => 
+            h.headers.Cookie === standardizedHeaders.headers.Cookie
+          )) {
+            this.headerRotationPool.push(standardizedHeaders);
+            // Limit pool size
+            if (this.headerRotationPool.length > 10) {
+              this.headerRotationPool.shift();
+            }
+          }
+          
           return standardizedHeaders;
         }
       } catch (error) {
@@ -405,6 +447,18 @@ class ScraperManager {
       return false;
     }
 
+    // If circuit breaker is tripped, delay non-critical events
+    if (this.apiCircuitBreaker.tripped) {
+      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
+      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
+      
+      // Only process critical events when circuit breaker is tripped
+      if (timeSinceUpdate < MAX_UPDATE_INTERVAL - 20000) {
+        this.logWithTime(`Skipping ${eventId} temporarily: Circuit breaker tripped`, "warning");
+        return false;
+      }
+    }
+
     await this.acquireSemaphore();
     this.processingEvents.add(eventId);
     this.activeJobs.set(eventId, moment());
@@ -441,6 +495,26 @@ class ScraperManager {
         return true;
       }
 
+      // New: Check response cache first if it's a non-critical update
+      const cachedResponse = this.responseCache.get(eventId);
+      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
+      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
+      
+      // Use cache for non-critical updates to reduce API load
+      if (cachedResponse && timeSinceUpdate < MAX_UPDATE_INTERVAL - 30000) {
+        // Cache is recent enough for non-critical updates
+        await this.updateEventMetadata(eventId, cachedResponse);
+        
+        this.successCount++;
+        this.lastSuccessTime = moment();
+        this.eventUpdateTimestamps.set(eventId, moment());
+        this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
+        
+        // Log as cache hit
+        this.logWithTime(`Using cached data for ${eventId} (non-critical update)`, "success");
+        return true;
+      }
+
       // Refresh headers with backoff/caching strategy
       const headers = await this.refreshEventHeaders(eventId);
       if (!headers) {
@@ -457,6 +531,29 @@ class ScraperManager {
 
       if (!result || !Array.isArray(result) || result.length === 0) {
         throw new Error("Empty or invalid scrape result");
+      }
+      
+      // Update the response cache with successful result
+      this.responseCache.set(eventId, result);
+      
+      // Mark this header as successful
+      if (headers) {
+        const headerKey = headers.headers.Cookie?.substring(0, 20) || headers.headers["User-Agent"]?.substring(0, 20);
+        const currentSuccessRate = this.headerSuccessRates.get(headerKey) || { success: 0, failure: 0 };
+        currentSuccessRate.success++;
+        this.headerSuccessRates.set(headerKey, currentSuccessRate);
+        
+        // Add to rotation pool if not already there
+        if (!this.headerRotationPool.some(h => 
+          h.headers.Cookie?.substring(0, 20) === headerKey ||
+          h.headers["User-Agent"]?.substring(0, 20) === headerKey
+        )) {
+          this.headerRotationPool.push(headers);
+          // Limit pool size
+          if (this.headerRotationPool.length > 10) {
+            this.headerRotationPool.shift();
+          }
+        }
       }
 
       await this.updateEventMetadata(eventId, result);
@@ -482,12 +579,41 @@ class ScraperManager {
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
       
+      // Reset API error counter on success
+      this.apiCircuitBreaker.failures = Math.max(0, this.apiCircuitBreaker.failures - 1);
+      
       // Reset global consecutive error counter on success
       this.globalConsecutiveErrors = 0;
       
       return true;
     } catch (error) {
       this.failedEvents.add(eventId);
+      
+      // New: Try to handle the API error with smart strategies first
+      const errorHandled = await this.handleApiError(eventId, error, this.headersCache.get(eventId));
+      
+      if (errorHandled) {
+        // If we handled the error with our special strategies, use a very short cooldown
+        // and don't increment the failure count (we're trying a different approach)
+        const shortCooldown = 1000; // 1 second
+        this.cooldownEvents.set(eventId, moment().add(shortCooldown, "milliseconds"));
+        
+        // Put directly into retry queue with same retry count (don't increment)
+        this.retryQueue.push({
+          eventId,
+          retryCount: retryCount, // Keep same retry count since we're trying a different approach
+          retryAfter: moment().add(shortCooldown, "milliseconds"),
+        });
+        
+        this.logWithTime(
+          `API error for ${eventId} handled with special strategy, retrying in 1s`,
+          "warning"
+        );
+        
+        return false;
+      }
+      
+      // Normal error handling for non-API errors
       this.incrementFailureCount(eventId);
       
       await this.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
@@ -1245,6 +1371,9 @@ class ScraperManager {
         // Process retry queue first (process more at once for high volume)
         await this.processRetryQueue();
         
+        // New: Process batches of failed events by error type
+        await this.processFailedEventsBatch();
+        
         // Get events to process
         const eventsToProcess = await this.getEventsToProcess();
         
@@ -1425,6 +1554,217 @@ class ScraperManager {
   // Add a function to export that allows checking logs
   checkLogs() {
     // Implementation of checkLogs method
+  }
+
+  // Add new method for handling 403 errors smartly
+  async handleApiError(eventId, error, headers) {
+    const is403Error = error.message.includes("403") || error.message.includes("Forbidden");
+    const is429Error = error.message.includes("429") || error.message.includes("Too Many Requests");
+    
+    if (is403Error || is429Error) {
+      this.apiCircuitBreaker.failures++;
+      
+      // Mark this header as problematic
+      if (headers) {
+        const headerKey = headers.headers.Cookie?.substring(0, 20) || headers.headers["User-Agent"]?.substring(0, 20);
+        const currentSuccessRate = this.headerSuccessRates.get(headerKey) || { success: 0, failure: 0 };
+        currentSuccessRate.failure++;
+        this.headerSuccessRates.set(headerKey, currentSuccessRate);
+        
+        // Remove from rotation pool if success rate is too low
+        if (currentSuccessRate.failure > (currentSuccessRate.success * 2) && currentSuccessRate.failure > 5) {
+          this.headerRotationPool = this.headerRotationPool.filter(h => 
+            h.headers.Cookie?.substring(0, 20) !== headerKey &&
+            h.headers["User-Agent"]?.substring(0, 20) !== headerKey
+          );
+        }
+      }
+      
+      // Check if circuit breaker should trip
+      if (this.apiCircuitBreaker.failures >= this.apiCircuitBreaker.threshold) {
+        if (!this.apiCircuitBreaker.tripped) {
+          this.logWithTime(`Circuit breaker tripped: Too many API errors (${this.apiCircuitBreaker.failures})`, "error");
+          this.apiCircuitBreaker.tripped = true;
+          this.apiCircuitBreaker.lastTripped = moment();
+          
+          // Clear all current headers and reset cookies
+          await this.resetCookiesAndHeaders();
+          
+          // Reset after timeout
+          setTimeout(() => {
+            this.apiCircuitBreaker.tripped = false;
+            this.apiCircuitBreaker.failures = 0;
+            this.logWithTime("Circuit breaker reset", "info");
+          }, this.apiCircuitBreaker.resetTimeout);
+        }
+        return true; // Error was handled by circuit breaker
+      }
+      
+      // Try rotating proxy and headers for this event
+      if (this.proxyManager.getAvailableProxyCount() > 1) {
+        this.logWithTime(`Rotating proxy for event ${eventId} due to ${is403Error ? '403' : '429'} error`, "info");
+        this.proxyManager.blacklistCurrentProxy(eventId);
+        return true; // Error handled by proxy rotation
+      }
+    }
+    
+    return false; // Error not handled
+  }
+
+  // Add new method to process batches of failed events by error type
+  async processFailedEventsBatch() {
+    const now = moment();
+    
+    // Don't process too frequently
+    if (this.lastFailedBatchProcess && moment().diff(this.lastFailedBatchProcess) < this.failedEventsProcessingInterval) {
+      return;
+    }
+    
+    this.lastFailedBatchProcess = moment();
+    
+    // Skip if no failed events
+    if (this.failedEvents.size === 0) {
+      return;
+    }
+    
+    this.logWithTime(`Processing ${this.failedEvents.size} failed events in batches`, "info");
+    
+    // Group failed events by error types and failure count
+    const failureGroups = new Map();
+    
+    // Group similar events together
+    for (const eventId of this.failedEvents) {
+      // Skip events in cooldown
+      if (this.cooldownEvents.has(eventId) && now.isBefore(this.cooldownEvents.get(eventId))) {
+        continue;
+      }
+      
+      // Skip events already being processed
+      if (this.processingEvents.has(eventId)) {
+        continue;
+      }
+      
+      const failureCount = this.getRecentFailureCount(eventId);
+      const key = `count-${failureCount}`;
+      
+      if (!failureGroups.has(key)) {
+        failureGroups.set(key, []);
+      }
+      
+      failureGroups.get(key).push(eventId);
+    }
+    
+    // Process each group separately, starting with fewer failures first
+    const sortedGroups = Array.from(failureGroups.entries())
+      .sort(([keyA], [keyB]) => {
+        const countA = parseInt(keyA.split('-')[1]);
+        const countB = parseInt(keyB.split('-')[1]);
+        return countA - countB; // Lower failure count first
+      });
+    
+    for (const [key, eventIds] of sortedGroups) {
+      if (eventIds.length === 0) continue;
+      
+      // Determine optimal batch size based on failure count
+      // More failures = smaller batch size for better error isolation
+      const failureCount = parseInt(key.split('-')[1]);
+      const batchSize = Math.max(
+        1, 
+        Math.min(
+          eventIds.length,
+          Math.ceil(CONCURRENT_LIMIT / (1 + failureCount)) // Decrease batch size as failure count increases
+        )
+      );
+      
+      // Split into batches
+      const batches = [];
+      for (let i = 0; i < eventIds.length; i += batchSize) {
+        batches.push(eventIds.slice(i, i + batchSize));
+      }
+      
+      this.logWithTime(`Processing ${eventIds.length} events with ${failureCount} failure(s) in ${batches.length} batches`, "info");
+      
+      // Process each batch
+      for (const batch of batches) {
+        if (!this.isRunning) break;
+        
+        // Skip events that are now in cooldown or being processed
+        const validEvents = batch.filter(
+          eventId => !this.cooldownEvents.has(eventId) || 
+                    now.isAfter(this.cooldownEvents.get(eventId))
+        ).filter(
+          eventId => !this.processingEvents.has(eventId)
+        );
+        
+        if (validEvents.length === 0) continue;
+        
+        // Group by domain for better proxy utilization
+        const domains = {};
+        for (const eventId of validEvents) {
+          const event = await Event.findOne({ Event_ID: eventId })
+            .select("url")
+            .lean();
+          
+          if (!event || !event.url) {
+            // No URL, use eventId as domain key
+            if (!domains[eventId]) domains[eventId] = [];
+            domains[eventId].push(eventId);
+            continue;
+          }
+          
+          try {
+            const url = new URL(event.url);
+            const domain = url.hostname;
+            if (!domains[domain]) domains[domain] = [];
+            domains[domain].push(eventId);
+          } catch (e) {
+            // Invalid URL, use eventId as domain key
+            if (!domains[eventId]) domains[eventId] = [];
+            domains[eventId].push(eventId);
+          }
+        }
+        
+        // Process each domain group with a shared proxy
+        const domainGroups = Object.values(domains);
+        
+        // Process domain groups in parallel
+        await Promise.all(domainGroups.map(async (domainEvents) => {
+          try {
+            // Get a proxy for this batch
+            const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(domainEvents);
+            
+            // Get headers from the rotation pool or generate new ones if needed
+            let headers = null;
+            if (this.headerRotationPool.length > 0) {
+              const headerIndex = Math.floor(Math.random() * this.headerRotationPool.length);
+              headers = this.headerRotationPool[headerIndex];
+            } else {
+              // Try to get headers for first event
+              headers = await this.refreshEventHeaders(domainEvents[0]);
+            }
+            
+            if (!headers) {
+              throw new Error("Failed to obtain valid headers for batch");
+            }
+            
+            // Process events in this domain group with shared proxy and headers
+            const promises = domainEvents.map(eventId => 
+              this.scrapeEvent(eventId, this.getRecentFailureCount(eventId), proxyAgent, proxy)
+            );
+            
+            await Promise.all(promises);
+          } catch (error) {
+            this.logWithTime(`Error processing domain group: ${error.message}`, "error");
+          }
+        }));
+        
+        // Brief pause between batches to avoid overwhelming system
+        await setTimeout(500);
+      }
+      
+      // Pause between different failure count groups
+      await setTimeout(1000);
+    }
   }
 }
 
