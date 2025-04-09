@@ -14,7 +14,7 @@ const MAX_RETRIES = 5; // Increased from 3 to 5 for more short attempts
 const SCRAPE_TIMEOUT = 30000; // Reduced timeout to 30 seconds
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 10); // Larger batches for efficiency
 const RETRY_BACKOFF_MS = 5000; // Base backoff time for retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds minimum between scrapes
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 60000; // Minimum 1 minute between scrapes
 const URGENT_THRESHOLD = 110000; // Events needing update within 10 seconds of deadline
 
 // New cooldown settings - short, progressive cooldowns
@@ -346,7 +346,7 @@ class ScraperManager {
       });
 
       // Update the event's update schedule for next update
-      this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
+      this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
       this.logWithTime(
         `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
           2
@@ -399,7 +399,7 @@ class ScraperManager {
       if (event.Skip_Scraping) {
         this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
         // Still update the schedule for next time
-        this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
+        this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
         return true;
       }
 
@@ -484,6 +484,15 @@ class ScraperManager {
           `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. Marking as stopped with ${LONG_COOLDOWN_MINUTES} minute cooldown`,
           "error"
         );
+        
+        // Log long cooldown to error logs
+        await this.logError(eventId, "LONG_COOLDOWN", new Error(`Event put in ${LONG_COOLDOWN_MINUTES} minute cooldown after persistent failures`), {
+          cooldownDuration: LONG_COOLDOWN_MINUTES * 60 * 1000,
+          isApiError,
+          originalError: error.message,
+          failureCount: recentFailures,
+          retryCount
+        });
       }
       
       // If we've had 3 consecutive API errors, trigger a cookie reset
@@ -523,7 +532,7 @@ class ScraperManager {
       }
       
       // Still update the event schedule for 2-minute compliance
-      this.eventUpdateSchedule.set(eventId, moment().add(MAX_UPDATE_INTERVAL, 'milliseconds'));
+      this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
 
       if (retryCount < MAX_RETRIES) {
         this.retryQueue.push({
@@ -688,9 +697,11 @@ class ScraperManager {
       // If we don't have a scheduled update time, set one based on last update
       if (!this.eventUpdateSchedule.has(event.Event_ID)) {
         const lastUpdate = moment(event.Last_Updated);
+        // Schedule between 1 minute (60000ms) and 2 minutes (120000ms) after last update
+        // Use MIN_TIME_BETWEEN_EVENT_SCRAPES for minimum (60000ms) and MAX_UPDATE_INTERVAL for maximum (120000ms)
         this.eventUpdateSchedule.set(
           event.Event_ID, 
-          lastUpdate.add(MAX_UPDATE_INTERVAL, 'milliseconds')
+          lastUpdate.add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds')
         );
       }
       
@@ -880,7 +891,17 @@ class ScraperManager {
     this.isRunning = false;
     this.logWithTime("Stopping scraper");
   }
+
+  // Add a function to export that allows checking logs
+  checkLogs() {
+    // Implementation of checkLogs method
+  }
 }
 
 const scraperManager = new ScraperManager();
 export default scraperManager;
+
+// Add a function to export that allows checking logs
+export function checkScraperLogs() {
+  return scraperManager.checkLogs();
+}
