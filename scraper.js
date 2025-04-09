@@ -314,15 +314,24 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
   try {
     isRefreshingCookies = true;
 
+    // Check if we have valid cookies in memory first
     if (
       capturedState.cookies?.length &&
       capturedState.lastRefresh &&
       Date.now() - capturedState.lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL
     ) {
       console.log("Using existing cookies from memory");
+      
+      // Process queued refresh requests
+      while (cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieRefreshQueue.shift();
+        resolve(capturedState);
+      }
+      
       return capturedState;
     }
 
+    // If specific cookies are provided, use them
     if (existingCookies !== null) {
       console.log(`Using provided cookies for event ${eventId}`);
 
@@ -336,37 +345,94 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         lastRefresh: Date.now(),
         proxy: capturedState.proxy || proxy,
       };
+      
+      // Process queued refresh requests
+      while (cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieRefreshQueue.shift();
+        resolve(capturedState);
+      }
 
       return capturedState;
     }
 
-    const cookiesFromFile = await loadCookiesFromFile();
-    if (cookiesFromFile) {
-      console.log("Using cookies from file");
-      if (!capturedState.fingerprint) {
-        capturedState.fingerprint = BrowserFingerprint.generate();
+    // Try to load cookies from file with improved validation
+    try {
+      const cookiesFromFile = await loadCookiesFromFile();
+      if (cookiesFromFile && cookiesFromFile.length >= 3) { // Ensure we have enough cookies
+        console.log("Using cookies from file");
+        if (!capturedState.fingerprint) {
+          capturedState.fingerprint = BrowserFingerprint.generate();
+        }
+
+        capturedState = {
+          cookies: cookiesFromFile,
+          fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
+          lastRefresh: Date.now(),
+          proxy: capturedState.proxy || proxy,
+        };
+        
+        // Process queued refresh requests
+        while (cookieRefreshQueue.length > 0) {
+          const { resolve } = cookieRefreshQueue.shift();
+          resolve(capturedState);
+        }
+
+        return capturedState;
       }
-
-      capturedState = {
-        cookies: cookiesFromFile,
-        fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
-        lastRefresh: Date.now(),
-        proxy: capturedState.proxy || proxy,
-      };
-
-      return capturedState;
+    } catch (err) {
+      console.error("Error loading cookies from file:", err);
     }
 
     console.log(
       `No valid cookies found, getting new cookies using event ${eventId}`
     );
 
-    const { context: newContext, fingerprint } = await initBrowser(proxy);
-    if (!newContext || !fingerprint) {
-      throw new Error("Failed to initialize browser or generate fingerprint");
+    // Generate fallback headers if we can't get proper ones
+    const fallbackHeaders = generateFallbackHeaders();
+    
+    // Initialize browser with improved error handling
+    let initAttempts = 0;
+    let initSuccess = false;
+    let initError = null;
+    
+    while (initAttempts < 3 && !initSuccess) {
+      try {
+        const { context: newContext, fingerprint } = await initBrowser(proxy);
+        if (!newContext || !fingerprint) {
+          throw new Error("Failed to initialize browser or generate fingerprint");
+        }
+        
+        localContext = newContext;
+        initSuccess = true;
+      } catch (error) {
+        initAttempts++;
+        initError = error;
+        console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
+        await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
+      }
     }
-
-    localContext = newContext;
+    
+    if (!initSuccess) {
+      console.error("All browser initialization attempts failed");
+      
+      // Return fallback headers since we couldn't initialize browser
+      capturedState = {
+        cookies: null,
+        fingerprint: BrowserFingerprint.generate(),
+        lastRefresh: Date.now(),
+        headers: fallbackHeaders,
+        proxy: capturedState.proxy || proxy,
+      };
+      
+      // Process queued refresh requests with fallback data
+      while (cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieRefreshQueue.shift();
+        resolve(capturedState);
+      }
+      
+      isRefreshingCookies = false;
+      throw initError;
+    }
 
     // Create page in try-catch block
     let page;
@@ -389,7 +455,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       // Use domcontentloaded instead of networkidle for faster, more reliable loading
       await page.goto(url, {
         waitUntil: "domcontentloaded",
-        timeout: 60000, // 60 second timeout
+        timeout: 30000, // 30 second timeout
       });
 
       console.log(`Successfully loaded page for event ${eventId}`);
@@ -398,105 +464,135 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       const isChallengePresent = await checkForTicketmasterChallenge(page);
       if (isChallengePresent) {
         console.warn(
-          "Ticketmaster challenge detected, skipping cookie capture"
+          "Detected Ticketmaster challenge page, attempting to resolve..."
         );
-        throw new Error("Ticketmaster challenge detected");
+        await handleTicketmasterChallenge(page);
       }
 
-      try {
-        await page.waitForTimeout(2000);
-        await simulateHumanBehavior(page);
-      } catch (behaviorError) {
-        console.warn(
-          "Human behavior simulation failed:",
-          behaviorError.message
-        );
-        // Continue anyway - not critical
-      }
+      // Simulate human behavior
+      await simulateHumanBehavior(page);
 
-      const data = await captureCookies(page, fingerprint);
+      // Additional wait for cookies to be fully set
+      await page.waitForTimeout(1000);
 
-      if (data?.cookies && data.cookies.length > 0) {
+      // Capture cookies
+      const { cookies, fingerprint: newFingerprint } = await captureCookies(
+        page,
+        capturedState.fingerprint || BrowserFingerprint.generate()
+      );
+
+      if (!cookies || cookies.length === 0) {
+        console.error("Failed to capture cookies for event", eventId);
+        
+        // Use fallback headers if we couldn't get cookies
         capturedState = {
-          cookies: data.cookies,
-          fingerprint: fingerprint,
+          cookies: null,
+          fingerprint: newFingerprint,
           lastRefresh: Date.now(),
-          proxy: proxy,
+          headers: fallbackHeaders,
+          proxy: capturedState.proxy || proxy,
         };
-        console.log(
-          `Successfully captured ${data.cookies.length} cookies for event ${eventId}`
-        );
-
-        // Save cookies to JSON file and verify it's valid
-        const cookiesValid = await saveCookiesToFile(data.cookies);
-        if (!cookiesValid) {
-          console.error("Failed to save valid cookies file - aborting scrape");
-          resetCapturedState();
-          throw new Error("Invalid cookies file - too small or corrupted");
+        
+        // Process queued refresh requests with fallback data
+        while (cookieRefreshQueue.length > 0) {
+          const { resolve } = cookieRefreshQueue.shift();
+          resolve(capturedState);
         }
-        console.log("Cookies saved to file and validated");
-      } else {
-        console.error(`No cookies captured for event ${eventId}`);
-        resetCapturedState();
+        
+        isRefreshingCookies = false;
+        return capturedState;
       }
 
-      // Wait for proper page closure
-      try {
-        await page.close();
-      } catch (closeError) {
-        console.warn("Error closing page:", closeError.message);
+      // Update captured state with new cookies and fingerprint
+      capturedState = {
+        cookies,
+        fingerprint: newFingerprint,
+        lastRefresh: Date.now(),
+        proxy: capturedState.proxy || proxy,
+      };
+
+      // Save cookies to file in the background
+      saveCookiesToFile(cookies).catch((error) => {
+        console.error("Error saving cookies to file:", error);
+      });
+      
+      // Process queued refresh requests
+      while (cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieRefreshQueue.shift();
+        resolve(capturedState);
       }
 
       return capturedState;
-    } catch (navigationError) {
-      console.error(
-        `Navigation error for ${eventId}:`,
-        navigationError.message
-      );
-
-      // Try direct API approach as fallback
-      try {
-        console.log("Attempting direct API approach for cookies");
-        const directData = await getDirectAPICookies(eventId);
-        if (directData) {
-          return directData;
-        }
-      } catch (apiError) {
-        console.error("Direct API approach failed:", apiError.message);
+    } catch (error) {
+      console.error("Error refreshing headers:", error);
+      
+      // Use fallback headers on error
+      capturedState = {
+        cookies: null,
+        fingerprint: BrowserFingerprint.generate(),
+        lastRefresh: Date.now(),
+        headers: fallbackHeaders,
+        proxy: capturedState.proxy || proxy,
+      };
+      
+      // Process queued refresh requests with fallback data
+      while (cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieRefreshQueue.shift();
+        resolve(capturedState);
       }
-
-      throw navigationError;
+      
+      throw error;
     } finally {
-      // Ensure page is closed
       if (page) {
         try {
-          await page.close().catch(() => {});
+          await page.close();
         } catch (e) {
-          console.warn("Error closing page in finally block");
+          console.error("Error closing page:", e);
         }
       }
+      
+      await cleanup(localBrowser, localContext);
+      isRefreshingCookies = false;
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
-    resetCapturedState();
-    throw error;
-  } finally {
-    // Clean up local instances, not affecting global ones
-    await cleanup(localBrowser, localContext);
-
-    // Set the refreshing flag back to false
-    isRefreshingCookies = false;
-
-    // Process any queued refresh requests
-    while (cookieRefreshQueue.length > 0) {
-      const { resolve, reject } = cookieRefreshQueue.shift();
-      if (capturedState.cookies) {
-        resolve(capturedState);
-      } else {
-        reject(new Error("Failed to refresh cookies"));
-      }
+    
+    // Make sure we clean up on error
+    if (localBrowser) {
+      await cleanup(localBrowser, localContext);
     }
+    
+    isRefreshingCookies = false;
+    
+    // Reject any queued requests
+    while (cookieRefreshQueue.length > 0) {
+      const { reject } = cookieRefreshQueue.shift();
+      reject(error);
+    }
+    
+    throw error;
   }
+}
+
+// Generate fallback headers to use when proper cookies can't be obtained
+function generateFallbackHeaders() {
+  const fingerprint = BrowserFingerprint.generate();
+  const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
+  
+  return {
+    "User-Agent": userAgent,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://www.ticketmaster.com/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Pragma": "no-cache",
+    "Cache-Control": "no-cache",
+    "x-tm-api-key": "b462oi7fic6pehcdkzony5bxhe",
+  };
 }
 
 // Function to check for Ticketmaster challenge (e.g., CAPTCHA)
@@ -640,15 +736,38 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
     let useProvidedHeaders = false;
     if (event?.headers) {
       console.log(`Processing headers for event ${eventId} (batch processing)`);
-      cookieString = event.headers.Cookie || event.headers.cookie;
-      userAgent = event.headers["User-Agent"] || event.headers["user-agent"];
+      
+      // Check different header formats for compatibility
+      if (typeof event.headers === 'object') {
+        // If it's a complete headers object with all required fields
+        if (event.headers.headers) {
+          // Extract from nested headers property if available
+          cookieString = event.headers.headers.Cookie || event.headers.headers.cookie;
+          userAgent = event.headers.headers["User-Agent"] || event.headers.headers["user-agent"];
+        } else {
+          // Try direct properties
+          cookieString = event.headers.Cookie || event.headers.cookie;
+          userAgent = event.headers["User-Agent"] || event.headers["user-agent"];
+        }
+        
+        // For backwards compatibility, check if headers contains capturedState format
+        if (event.headers.cookies && Array.isArray(event.headers.cookies)) {
+          cookieString = event.headers.cookies
+            .map((cookie) => `${cookie.name}=${cookie.value}`)
+            .join("; ");
+        }
+      }
       
       // Check if we have valid headers to use
       if (cookieString && userAgent) {
         console.log(`Reusing existing headers for batch processing of event ${eventId}`);
         useProvidedHeaders = true;
-        // Initialize fingerprint with at least a language property
-        fingerprint = { language: "en-US" };
+        // Initialize fingerprint with at least basic properties
+        fingerprint = event.headers.fingerprint || { 
+          language: "en-US",
+          timezone: "America/New_York",
+          screen: { width: 1920, height: 1080 }
+        };
       } else {
         console.log(`Incomplete headers for event ${eventId}, falling back to standard flow`);
       }
@@ -658,6 +777,16 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
       // Standard flow - get cookies and headers
       const correlationId = generateCorrelationId();
       const capturedData = await getCapturedData(eventId, proxy);
+
+      if (!capturedData) {
+        throw new Error("Failed to get captured data");
+      }
+      
+      // Use headers from capturedData if available (fallback mechanism)
+      if (capturedData.headers && !capturedData.cookies) {
+        console.log(`Using fallback headers for event ${eventId}`);
+        return callTicketmasterAPI(capturedData.headers, proxyAgent, eventId, event);
+      }
 
       if (!capturedData?.cookies?.length) {
         throw new Error("Failed to capture cookies");
@@ -697,12 +826,31 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 
     console.log(`Starting event scraping for ${eventId} with${event?.headers ? " shared" : ""} cookies...`);
 
+    return callTicketmasterAPI(FacetHeader, proxyAgent, eventId, event, MapHeader);
+  } catch (error) {
+    console.error(`Scraping error for event ${event?.eventId || event}:`, error);
+    return false;
+  } finally {
+    await cleanup(browser, context);
+  }
+};
+
+// Extracted API call logic to reduce duplicate code
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
+  try {
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
     const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
 
+    // If mapHeader is not provided, use facetHeader with adjustments
+    const effectiveMapHeader = mapHeader || {
+      ...facetHeader,
+      Accept: "*/*",
+      "Content-Encoding": "gzip"
+    };
+
     const [DataMap, DataFacets] = await Promise.all([
-      GetData(MapHeader, proxyAgent, mapUrl, eventId),
-      GetData(FacetHeader, proxyAgent, facetUrl, eventId),
+      GetData(effectiveMapHeader, proxyAgent, mapUrl, eventId),
+      GetData(facetHeader, proxyAgent, facetUrl, eventId),
     ]);
 
     if (!DataFacets || !DataMap) {
@@ -722,12 +870,10 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 
     return finalData;
   } catch (error) {
-    console.error(`Scraping error for event ${event?.eventId || event}:`, error);
+    console.error(`API error for event ${eventId}:`, error);
     return false;
-  } finally {
-    await cleanup(browser, context);
   }
-};
+}
 
 async function cleanup(browser, context) {
   try {
