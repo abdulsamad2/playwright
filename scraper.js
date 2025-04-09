@@ -991,6 +991,12 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       // Add slight randomization to headers to avoid fingerprinting
       const modifiedHeaders = { ...headers };
       
+      // IMPORTANT: Trim cookie length if it's too large (Ticketmaster has limits)
+      if (modifiedHeaders.Cookie && modifiedHeaders.Cookie.length > 2000) {
+        modifiedHeaders.Cookie = trimCookieHeader(modifiedHeaders.Cookie);
+        console.log(`Trimmed cookie header to ${modifiedHeaders.Cookie.length} chars for ${eventId}`);
+      }
+      
       // Slightly randomize headers while keeping essential values
       if (attemptNum > 0) {
         // Add "random" parameters that won't affect functionality
@@ -1054,7 +1060,38 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       const is403Error = error.response && error.response.status === 403;
       const is429Error = error.response && error.response.status === 429;
       const is304Error = error.response && error.response.status === 304;
+      const is400Error = error.response && error.response.status === 400;
       const isNetworkError = !error.response && error.code;
+      
+      // Special handling for 400 Bad Request - likely caused by malformed request
+      if (is400Error) {
+        console.log(`400 Bad Request for ${eventId} - likely invalid request format or cookie issue`);
+        
+        // Try with minimal headers and essential cookies only
+        if (attemptNum < maxRetries) {
+          // Create minimal headers with only essential cookies
+          const minimalHeaders = { 
+            "User-Agent": headers["User-Agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.ticketmaster.com/",
+            "Origin": "https://www.ticketmaster.com",
+            "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe"
+          };
+          
+          // Extract just essential cookies if we have them
+          if (headers.Cookie) {
+            const essentialCookieString = extractEssentialCookies(headers.Cookie);
+            if (essentialCookieString) {
+              minimalHeaders["Cookie"] = essentialCookieString;
+            }
+          }
+          
+          console.log(`Retrying ${eventId} with minimal headers after 400 error`);
+          return makeRequestWithRetry(url, minimalHeaders, agent, attemptNum + 1);
+        }
+      }
       
       // Special handling for 304 Not Modified errors
       if (is304Error) {
@@ -1130,6 +1167,54 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       throw error;
     }
   };
+  
+  // Function to trim cookie header to a reasonable size
+  // This prevents 400 Bad Request errors from overly large cookies
+  function trimCookieHeader(cookieString) {
+    if (!cookieString || cookieString.length < 2000) return cookieString;
+    
+    // Most important cookies for Ticketmaster API functionality
+    const essentialCookieNames = [
+      'TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit', 'CMPS', 'CMID', 
+      'MUID', 'au_id', 'aud', 'tmTrackID', 'TapAd_DID', 'uid'
+    ];
+    
+    // Split cookie string into individual cookies
+    const cookies = cookieString.split(';').map(c => c.trim());
+    
+    // First pass: keep only essential cookies
+    let result = cookies.filter(cookie => {
+      const name = cookie.split('=')[0]?.trim();
+      return essentialCookieNames.some(essential => name === essential);
+    });
+    
+    // If we don't have enough essential cookies, add some of the first cookies
+    // to ensure we have at least a few cookies in the request
+    if (result.length < 3) {
+      // Add some of the first cookies from the original string (up to 5)
+      result = result.concat(cookies.slice(0, 5).filter(c => !result.includes(c)));
+    }
+    
+    return result.join('; ');
+  }
+  
+  // Function to extract just the essential cookies from a cookie string
+  function extractEssentialCookies(cookieString) {
+    if (!cookieString) return '';
+    
+    // Most critical cookies for authentication and functionality
+    const criticalCookies = ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'];
+    
+    // Try to extract just these cookies
+    const cookies = cookieString.split(';').map(c => c.trim());
+    const essential = cookies.filter(cookie => {
+      const name = cookie.split('=')[0]?.trim();
+      return criticalCookies.some(critical => name === critical);
+    });
+    
+    // Return minimal set of cookies
+    return essential.join('; ');
+  }
   
   try {
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
