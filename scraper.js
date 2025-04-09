@@ -619,10 +619,13 @@ const GetProxy = () => {
 
 const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = null) => {
   try {
+    // Determine event ID from either object or simple ID
+    const eventId = event?.eventId || event;
+    
     // Use provided proxy if available, otherwise get a new one
     let proxyAgent, proxy;
     if (externalProxyAgent && externalProxy) {
-      console.log(`Using provided proxy ${externalProxy.proxy} for event ${event?.eventId}`);
+      console.log(`Using provided proxy ${externalProxy.proxy} for event ${eventId}`);
       proxyAgent = externalProxyAgent;
       proxy = externalProxy;
     } else {
@@ -631,20 +634,39 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
       proxy = proxyData.proxy;
     }
     
-    const correlationId = generateCorrelationId();
-    const capturedData = await getCapturedData(event?.eventId, proxy);
+    // If headers are provided (for batch processing), use them directly
+    let cookieString, userAgent, fingerprint;
+    
+    if (event?.headers) {
+      console.log(`Using provided headers for event ${eventId} (batch processing)`);
+      cookieString = event.headers.Cookie || event.headers.cookie;
+      userAgent = event.headers["User-Agent"] || event.headers["user-agent"];
+      
+      // Extract only what we need without rerunning the entire cookie capture process
+      if (cookieString && userAgent) {
+        console.log(`Reusing existing headers for batch processing of event ${eventId}`);
+      } else {
+        throw new Error("Incomplete headers provided for batch processing");
+      }
+    } else {
+      // Standard flow - get cookies and headers
+      const correlationId = generateCorrelationId();
+      const capturedData = await getCapturedData(eventId, proxy);
 
-    if (!capturedData?.cookies?.length) {
-      throw new Error("Failed to capture cookies");
+      if (!capturedData?.cookies?.length) {
+        throw new Error("Failed to capture cookies");
+      }
+
+      cookieString = capturedData.cookies
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+
+      userAgent = BrowserFingerprint.generateUserAgent(
+        capturedData.fingerprint
+      );
+      
+      fingerprint = capturedData.fingerprint;
     }
-
-    const cookieString = capturedData.cookies
-      .map((cookie) => `${cookie.name}=${cookie.value}`)
-      .join("; ");
-
-    const userAgent = BrowserFingerprint.generateUserAgent(
-      capturedData.fingerprint
-    );
 
     const MapHeader = {
       "User-Agent": userAgent,
@@ -657,44 +679,44 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 
     const FacetHeader = {
       Accept: "*/*",
-      "Accept-Language": capturedData.fingerprint.language,
+      "Accept-Language": fingerprint?.language || "en-US",
       "Accept-Encoding": "gzip, deflate, br, zstd",
       "User-Agent": userAgent,
       Referer: "https://www.ticketmaster.com/",
       Origin: "https://www.ticketmaster.com",
       Cookie: cookieString,
-      "tmps-correlation-id": correlationId,
+      "tmps-correlation-id": generateCorrelationId(),
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
     };
 
-    console.log("Starting event scraping with captured cookies...");
+    console.log(`Starting event scraping for ${eventId} with${event?.headers ? " shared" : ""} cookies...`);
 
-    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${event?.eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
-    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${event?.eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
 
     const [DataMap, DataFacets] = await Promise.all([
-      GetData(MapHeader, proxyAgent, mapUrl, event?.eventId),
-      GetData(FacetHeader, proxyAgent, facetUrl, event?.eventId),
+      GetData(MapHeader, proxyAgent, mapUrl, eventId),
+      GetData(FacetHeader, proxyAgent, facetUrl, eventId),
     ]);
 
     if (!DataFacets || !DataMap) {
-      console.log("Failed to get data from APIs");
+      console.log(`Failed to get data from APIs for event ${eventId}`);
       return false;
     }
 
-    console.log("API requests completed successfully");
+    console.log(`API requests completed successfully for event ${eventId}`);
     const dataGet = GenerateNanoPlaces(DataFacets?.facets);
     const finalData = AttachRowSection(
       dataGet,
       DataMap,
       DataFacets?._embedded?.offer,
-      event,
+      { eventId, inHandDate: event?.inHandDate },
       DataFacets?._embedded?.description
     );
 
     return finalData;
   } catch (error) {
-    console.error("Scraping error:", error);
+    console.error(`Scraping error for event ${event?.eventId || event}:`, error);
     return false;
   } finally {
     await cleanup(browser, context);

@@ -608,22 +608,9 @@ class ScraperManager {
         this.batchProxies.set(batchId, { proxy, chunk });
         
         this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`);
-        
-        // Process each chunk in parallel
-        const promises = chunk.map(async (eventId) => {
-          try {
-            // Pass the batch proxy to the scrapeEvent function
-            const result = await this.scrapeEvent(eventId, 0, proxyAgent, proxy);
-            results.push({ eventId, success: result });
-          } catch (error) {
-            failed.push({ eventId, error });
-          } finally {
-            // Release proxy for this event
-            this.proxyManager.releaseProxy(eventId);
-          }
-        });
-        
-        await Promise.all(promises);
+
+        // Process the entire chunk efficiently as a batch
+        await this.processBatchEfficiently(chunk, batchId, proxyAgent, proxy);
         
         // Small delay between chunks to prevent rate limiting
         if (chunks.length > 1) {
@@ -644,6 +631,245 @@ class ScraperManager {
     }
     
     return { results, failed };
+  }
+
+  // New method to process a batch of events efficiently by handling API requests together
+  async processBatchEfficiently(eventIds, batchId, proxyAgent, proxy) {
+    const results = [];
+    const failed = [];
+
+    // Step 1: Validate all events in the batch first
+    const validEvents = [];
+    for (const eventId of eventIds) {
+      // Skip if the event should be skipped
+      if (this.shouldSkipEvent(eventId)) {
+        continue;
+      }
+
+      this.processingEvents.add(eventId);
+      this.activeJobs.set(eventId, moment());
+      
+      try {
+        // Look up the event first before trying to scrape
+        const event = await Event.findOne({ Event_ID: eventId })
+          .select("Skip_Scraping inHandDate url")
+          .lean();
+
+        if (!event) {
+          this.logWithTime(`Event ${eventId} not found in database`, "error");
+          // Put event in cooldown to avoid immediate retries
+          this.cooldownEvents.set(eventId, moment().add(60, "minutes"));
+          failed.push({ eventId, error: new Error("Event not found in database") });
+          continue;
+        }
+
+        if (event.Skip_Scraping) {
+          this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
+          // Still update the schedule for next time
+          this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
+          continue;
+        }
+
+        validEvents.push({ eventId, event });
+      } catch (error) {
+        this.logWithTime(`Error validating event ${eventId}: ${error.message}`, "error");
+        failed.push({ eventId, error });
+        this.activeJobs.delete(eventId);
+        this.processingEvents.delete(eventId);
+      }
+    }
+
+    if (validEvents.length === 0) {
+      this.logWithTime(`No valid events to process in batch ${batchId}`, "warning");
+      return { results, failed };
+    }
+
+    // Step 2: Refresh headers only once for the batch (using the first event)
+    let sharedHeaders = null;
+    try {
+      await this.acquireSemaphore();
+      const firstEventId = validEvents[0].eventId;
+      this.logWithTime(`Refreshing headers for batch ${batchId} using event ${firstEventId}`, "info");
+      
+      sharedHeaders = await this.refreshEventHeaders(firstEventId);
+      if (!sharedHeaders) {
+        throw new Error("Failed to obtain valid headers for batch");
+      }
+    } catch (error) {
+      this.logWithTime(`Failed to refresh headers for batch ${batchId}: ${error.message}`, "error");
+      // Release all events in batch
+      for (const { eventId } of validEvents) {
+        this.activeJobs.delete(eventId);
+        this.processingEvents.delete(eventId);
+        failed.push({ eventId, error });
+      }
+      this.releaseSemaphore();
+      return { results, failed };
+    }
+
+    // Step 3: Process all valid events in parallel using the same headers and proxy
+    const promises = validEvents.map(async ({ eventId, event }) => {
+      try {
+        this.logWithTime(`Processing ${eventId} in batch ${batchId}`);
+        
+        // Set a longer timeout for the scrape
+        const result = await Promise.race([
+          ScrapeEvent({ eventId, headers: sharedHeaders }),
+          setTimeout(SCRAPE_TIMEOUT).then(() => {
+            throw new Error("Scrape timed out");
+          }),
+        ]);
+
+        if (!result || !Array.isArray(result) || result.length === 0) {
+          throw new Error("Empty or invalid scrape result");
+        }
+
+        await this.updateEventMetadata(eventId, result);
+        
+        // Success! If this event was previously failing, update its status in DB
+        const recentFailures = this.getRecentFailureCount(eventId);
+        if (recentFailures > 0) {
+          try {
+            // Mark event as active again after successful scrape
+            await Event.updateOne(
+              { Event_ID: eventId },
+              { $set: { Skip_Scraping: false, status: "active" } }
+            );
+            this.logWithTime(`Reactivated previously failing event: ${eventId}`, "success");
+          } catch (err) {
+            console.error(`Failed to update status for event ${eventId}:`, err);
+          }
+        }
+        
+        this.successCount++;
+        this.lastSuccessTime = moment();
+        this.eventUpdateTimestamps.set(eventId, moment());
+        this.failedEvents.delete(eventId);
+        this.clearFailureCount(eventId);
+        
+        // Reset global consecutive error counter on success
+        this.globalConsecutiveErrors = 0;
+        
+        results.push({ eventId, success: true });
+      } catch (error) {
+        this.handleEventError(eventId, error, 0, failed);
+      } finally {
+        this.activeJobs.delete(eventId);
+        this.processingEvents.delete(eventId);
+      }
+    });
+
+    await Promise.all(promises);
+    this.releaseSemaphore();
+    
+    this.logWithTime(`Completed batch ${batchId}: ${results.length} successes, ${failed.length} failures`, "info");
+    return { results, failed };
+  }
+
+  // Helper method to handle event errors consistently
+  async handleEventError(eventId, error, retryCount, failedList) {
+    this.failedEvents.add(eventId);
+    this.incrementFailureCount(eventId);
+    
+    await this.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
+
+    // Get current failure count for this event
+    const recentFailures = this.getRecentFailureCount(eventId);
+    
+    // Apply the new short cooldown strategy
+    let backoffTime;
+    let shouldMarkStopped = false;
+    
+    // Use API-specific message for API errors
+    const isApiError = error.message.includes("403") || 
+                      error.message.includes("400") || 
+                      error.message.includes("429") ||
+                      error.message.includes("API");
+    
+    if (retryCount < SHORT_COOLDOWNS.length) {
+      // Use the short, progressive cooldowns for initial retries
+      backoffTime = SHORT_COOLDOWNS[retryCount];
+      
+      this.logWithTime(
+        `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
+        "warning"
+      );
+    } else {
+      // For persistent failures, use a longer cooldown and mark as stopped
+      backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // Convert minutes to ms
+      shouldMarkStopped = true;
+      
+      this.logWithTime(
+        `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. Marking as stopped with ${LONG_COOLDOWN_MINUTES} minute cooldown`,
+        "error"
+      );
+      
+      // Log long cooldown to error logs
+      await this.logError(eventId, "LONG_COOLDOWN", new Error(`Event put in ${LONG_COOLDOWN_MINUTES} minute cooldown after persistent failures`), {
+        cooldownDuration: LONG_COOLDOWN_MINUTES * 60 * 1000,
+        isApiError,
+        originalError: error.message,
+        failureCount: recentFailures,
+        retryCount
+      });
+    }
+    
+    // If we've had 3 consecutive API errors, trigger a cookie reset
+    if (isApiError) {
+      this.globalConsecutiveErrors++;
+      if (this.globalConsecutiveErrors >= 3) {
+        // Don't await here to prevent blocking the current event processing
+        this.resetCookiesAndHeaders().catch(e => 
+          console.error("Error during cookie reset:", e)
+        );
+      }
+    }
+    
+    // Set the cooldown
+    const cooldownUntil = moment().add(backoffTime, "milliseconds");
+    this.cooldownEvents.set(eventId, cooldownUntil);
+
+    // Mark event as stopped in database if it's a persistent failure
+    if (shouldMarkStopped) {
+      try {
+        await Event.updateOne(
+          { Event_ID: eventId },
+          { 
+            $set: { 
+              Skip_Scraping: true,
+              status: "stopped",
+              stopReason: isApiError ? "API Error" : "Persistent Failure",
+              lastErrorMessage: error.message,
+              lastErrorTime: new Date()
+            } 
+          }
+        );
+        this.logWithTime(`Marked event ${eventId} as stopped in database`, "warning");
+      } catch (err) {
+        console.error(`Failed to update status for event ${eventId}:`, err);
+      }
+    }
+    
+    // Still update the event schedule for 2-minute compliance
+    this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
+
+    if (retryCount < MAX_RETRIES) {
+      this.retryQueue.push({
+        eventId,
+        retryCount: retryCount + 1,
+        retryAfter: cooldownUntil,
+      });
+      this.logWithTime(
+        `Queued for retry: ${eventId} (after ${
+          backoffTime / 1000
+        }s cooldown)`,
+        "warning"
+      );
+    } else {
+      this.logWithTime(`Max retries exceeded for ${eventId}`, "error");
+    }
+    
+    failedList.push({ eventId, error });
   }
 
   async processRetryQueue() {
