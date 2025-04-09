@@ -19,14 +19,28 @@ const mongoUri =
   process.env.DATABASE_URL || "mongodb://localhost:27017/ticketScraper";
 
 // Middleware
+const allowedOrigins = [
+  "http://18.234.29.129", // Production
+  "http://localhost:5173", // Local development
+];
+
 app.use(
   cors({
-    origin: "http://18.234.29.129", 
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     methods: "GET,POST,PUT,DELETE",
     allowedHeaders: "Content-Type,Authorization",
   })
-);app.use(express.json());
+);
+
+app.use(express.json());
 app.use(morgan("dev"));
+
 
 // Database connection
 mongoose

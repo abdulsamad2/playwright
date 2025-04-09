@@ -549,9 +549,20 @@ const GetProxy = () => {
   }
 };
 
-const ScrapeEvent = async (event) => {
+const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = null) => {
   try {
-    const { proxyAgent, proxy } = GetProxy();
+    // Use provided proxy if available, otherwise get a new one
+    let proxyAgent, proxy;
+    if (externalProxyAgent && externalProxy) {
+      console.log(`Using provided proxy ${externalProxy.proxy} for event ${event?.eventId}`);
+      proxyAgent = externalProxyAgent;
+      proxy = externalProxy;
+    } else {
+      const proxyData = GetProxy();
+      proxyAgent = proxyData.proxyAgent;
+      proxy = proxyData.proxy;
+    }
+    
     const correlationId = generateCorrelationId();
     const capturedData = await getCapturedData(event?.eventId, proxy);
 

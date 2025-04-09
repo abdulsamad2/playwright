@@ -5,6 +5,7 @@ import { ScrapeEvent, refreshHeaders } from "./scraper.js";
 import { cpus } from "os";
 import fs from "fs/promises";
 import path from "path";
+import ProxyManager from "./helpers/ProxyManager.js";
 
 // Updated constants for stricter update intervals
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement
@@ -45,6 +46,10 @@ class ScraperManager {
     this.globalConsecutiveErrors = 0; // Track consecutive errors across all events
     this.lastCookieReset = null; // Track when cookies were last reset
     this.cookiesPath = path.join(process.cwd(), "cookies.json"); // Path to cookies file
+    
+    // Initialize the proxy manager
+    this.proxyManager = new ProxyManager(this);
+    this.batchProxies = new Map(); // Map batch ID to proxy
   }
 
   logWithTime(message, type = "info") {
@@ -356,7 +361,7 @@ class ScraperManager {
     }
   }
 
-  async scrapeEvent(eventId, retryCount = 0) {
+  async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null) {
     // Skip if the event should be skipped
     if (this.shouldSkipEvent(eventId)) {
       return false;
@@ -368,6 +373,16 @@ class ScraperManager {
 
     try {
       this.logWithTime(`Scraping ${eventId} (Attempt ${retryCount + 1})`);
+
+      // Use passed proxy if available, otherwise get a new one
+      let proxyToUse = proxy;
+      let proxyAgentToUse = proxyAgent;
+      
+      if (!proxyAgentToUse || !proxyToUse) {
+        const { proxyAgent: newProxyAgent, proxy: newProxy } = this.proxyManager.getProxyForBatch([eventId]);
+        proxyAgentToUse = newProxyAgent;
+        proxyToUse = newProxy;
+      }
 
       // Look up the event first before trying to scrape
       const event = await Event.findOne({ Event_ID: eventId })
@@ -530,6 +545,11 @@ class ScraperManager {
       this.activeJobs.delete(eventId);
       this.processingEvents.delete(eventId);
       this.releaseSemaphore();
+      
+      // Only release proxy if we created it in this method (not if it was passed in)
+      if (!proxyAgent && !proxy) {
+        this.proxyManager.releaseProxy(eventId);
+      }
     }
   }
 
@@ -566,23 +586,51 @@ class ScraperManager {
       chunks.push(eventIds.slice(i, i + chunkSize));
     }
     
+    // Generate a unique batch ID for tracking
+    const batchId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    
     // Process chunks with controlled parallelism
     for (const chunk of chunks) {
-      // Process each chunk in parallel
-      const promises = chunk.map(async (eventId) => {
-        try {
-          const result = await this.scrapeEvent(eventId);
-          results.push({ eventId, success: result });
-        } catch (error) {
-          failed.push({ eventId, error });
+      try {
+        // Get a proxy for this specific batch
+        const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(chunk);
+        
+        // Store the proxy assignment for this batch
+        this.batchProxies.set(batchId, { proxy, chunk });
+        
+        this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`);
+        
+        // Process each chunk in parallel
+        const promises = chunk.map(async (eventId) => {
+          try {
+            // Pass the batch proxy to the scrapeEvent function
+            const result = await this.scrapeEvent(eventId, 0, proxyAgent, proxy);
+            results.push({ eventId, success: result });
+          } catch (error) {
+            failed.push({ eventId, error });
+          } finally {
+            // Release proxy for this event
+            this.proxyManager.releaseProxy(eventId);
+          }
+        });
+        
+        await Promise.all(promises);
+        
+        // Small delay between chunks to prevent rate limiting
+        if (chunks.length > 1) {
+          await setTimeout(500); // Increased delay between chunks
         }
-      });
-      
-      await Promise.all(promises);
-      
-      // Small delay between chunks to prevent rate limiting
-      if (chunks.length > 1) {
-        await setTimeout(200);
+      } catch (error) {
+        this.logWithTime(`Error processing batch ${batchId}: ${error.message}`, "error");
+        
+        // If there's a proxy error, release all events from this batch
+        if (this.batchProxies.has(batchId)) {
+          const { chunk } = this.batchProxies.get(batchId);
+          this.proxyManager.releaseProxyBatch(chunk);
+        }
+      } finally {
+        // Clean up batch tracking
+        this.batchProxies.delete(batchId);
       }
     }
     
