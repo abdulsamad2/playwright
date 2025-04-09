@@ -9,8 +9,8 @@ import ProxyManager from "./helpers/ProxyManager.js";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 
 // Updated constants for stricter update intervals
-const MAX_UPDATE_INTERVAL = 80000; // Strict 2-minute update requirement
-const CONCURRENT_LIMIT = Math.max(8, Math.floor(cpus().length * 1.2)); // Increase to 120% of CPU cores
+const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement
+const CONCURRENT_LIMIT = Math.max(8, Math.floor(cpus().length * 1)); // Increase to 120% of CPU cores
 const MAX_RETRIES = 3; // Reduced to 3 for faster failure detection
 const SCRAPE_TIMEOUT = 25000; // Reduced timeout to 25 seconds
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 3, 15); // Larger batches for efficiency
@@ -681,7 +681,7 @@ class ScraperManager {
       if (this.shouldSkipEvent(eventId)) {
         return { eventId, valid: false, reason: "skip" };
       }
-
+      
       try {
         const event = await Event.findOne({ Event_ID: eventId })
           .select("Skip_Scraping inHandDate url")
@@ -742,8 +742,26 @@ class ScraperManager {
 
     await this.acquireSemaphore();
     
+    // Helper function to validate headers are complete
+    const validateHeaders = (headers) => {
+      if (!headers) return false;
+      
+      // Check for required fields
+      const hasHeaders = headers.headers && typeof headers.headers === 'object';
+      if (!hasHeaders) return false;
+      
+      // Check for required header fields
+      const hasCookie = headers.headers.Cookie || headers.headers.cookie;
+      const hasUserAgent = headers.headers["User-Agent"] || headers.headers["user-agent"];
+      
+      return hasCookie && hasUserAgent;
+    };
+    
     // Implement header caching strategy for better efficiency
     let sharedHeaders = null;
+    let headerAttempts = 0;
+    const maxHeaderAttempts = Math.min(validEvents.length, 3);
+    
     try {
       // First check if we have recent valid headers for any event in the batch
       for (const { eventId } of validEvents) {
@@ -752,53 +770,71 @@ class ScraperManager {
         
         if (cachedHeaders && lastRefresh && moment().diff(lastRefresh) < 300000) { // 5 minutes
           // Validate the headers are complete before using them
-          if (cachedHeaders.headers && 
-              (cachedHeaders.headers.Cookie || cachedHeaders.headers.cookie) && 
-              (cachedHeaders.headers["User-Agent"] || cachedHeaders.headers["user-agent"])) {
+          if (validateHeaders(cachedHeaders)) {
             sharedHeaders = cachedHeaders;
             this.logWithTime(`Using recent cached headers from event ${eventId} for batch ${batchId}`, "info");
             break;
+          } else {
+            this.logWithTime(`Cached headers for ${eventId} are incomplete, will try refresh`, "warning");
           }
         }
       }
       
-      // If no recent cached headers, refresh using first event
-      if (!sharedHeaders) {
-        const firstEventId = validEvents[0].eventId;
-        this.logWithTime(`Starting event scraping for ${firstEventId} with shared cookies...`, "info");
+      // If no valid cached headers, try to refresh headers until we get valid ones
+      while (!sharedHeaders && headerAttempts < maxHeaderAttempts) {
+        headerAttempts++;
+        const eventToTry = validEvents[headerAttempts - 1].eventId;
+        this.logWithTime(`Attempt ${headerAttempts}: Getting headers using event ${eventToTry}`, "info");
         
-        sharedHeaders = await this.refreshEventHeaders(firstEventId);
-        if (!sharedHeaders) {
-          throw new Error("Failed to obtain valid headers for batch");
-        }
-        
-        // Verify the headers are complete
-        if (!sharedHeaders.headers || 
-            !(sharedHeaders.headers.Cookie || sharedHeaders.headers.cookie) || 
-            !(sharedHeaders.headers["User-Agent"] || sharedHeaders.headers["user-agent"])) {
+        try {
+          // Force refresh headers for this attempt
+          const headers = await this.refreshEventHeaders(eventToTry);
           
-          // Try one more time with a different event
-          if (validEvents.length > 1) {
-            const secondEventId = validEvents[1].eventId;
-            this.logWithTime(`First event headers incomplete, trying with ${secondEventId}`, "warning");
-            sharedHeaders = await this.refreshEventHeaders(secondEventId);
-            
-            if (!sharedHeaders || 
-                !sharedHeaders.headers || 
-                !(sharedHeaders.headers.Cookie || sharedHeaders.headers.cookie) || 
-                !(sharedHeaders.headers["User-Agent"] || sharedHeaders.headers["user-agent"])) {
-              throw new Error("Failed to obtain complete headers after multiple attempts");
-            }
+          // Validate the headers
+          if (validateHeaders(headers)) {
+            sharedHeaders = headers;
+            this.logWithTime(`Successfully obtained valid headers from ${eventToTry}`, "success");
+            break;
           } else {
-            throw new Error("Failed to obtain complete headers for batch");
+            this.logWithTime(`Headers from ${eventToTry} are incomplete (attempt ${headerAttempts}/${maxHeaderAttempts})`, "warning");
           }
+        } catch (headerError) {
+          this.logWithTime(`Failed to get headers for ${eventToTry}: ${headerError.message}`, "error");
         }
         
-        // Cache headers for all events in this batch
-        for (const { eventId } of validEvents) {
-          this.headersCache.set(eventId, sharedHeaders);
-          this.headerRefreshTimestamps.set(eventId, moment());
+        // Short delay before next attempt
+        if (!sharedHeaders && headerAttempts < maxHeaderAttempts) {
+          await setTimeout(1000);
         }
+      }
+      
+      // If we still don't have valid headers after all attempts, try to create fallback headers
+      if (!sharedHeaders) {
+        this.logWithTime(`Failed to get valid headers after ${headerAttempts} attempts, creating fallback headers`, "warning");
+        
+        // Create fallback headers with minimal required fields
+        const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+        const fallbackHeaders = {
+          headers: {
+            "User-Agent": userAgent,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "x-tm-api-key": "b462oi7fic6pehcdkzony5bxhe"
+          },
+          fingerprint: {
+            language: "en-US",
+            timezone: "America/New_York",
+            screen: { width: 1920, height: 1080 }
+          }
+        };
+        
+        sharedHeaders = fallbackHeaders;
+      }
+      
+      // Cache headers for all events in this batch
+      for (const { eventId } of validEvents) {
+        this.headersCache.set(eventId, sharedHeaders);
+        this.headerRefreshTimestamps.set(eventId, moment());
       }
     } catch (error) {
       this.logWithTime(`Failed to refresh headers for batch ${batchId}: ${error.message}`, "error");
@@ -824,53 +860,53 @@ class ScraperManager {
     // Process chunks in sequence but events within chunks in parallel
     for (const chunk of chunks) {
       const chunkPromises = chunk.map(async ({ eventId }) => {
-        try {
-          this.logWithTime(`Processing ${eventId} in batch ${batchId}`);
-          
-          const result = await Promise.race([
-            ScrapeEvent({ eventId, headers: sharedHeaders }),
-            setTimeout(SCRAPE_TIMEOUT).then(() => {
-              throw new Error("Scrape timed out");
-            }),
-          ]);
+      try {
+        this.logWithTime(`Processing ${eventId} in batch ${batchId}`);
+        
+        const result = await Promise.race([
+          ScrapeEvent({ eventId, headers: sharedHeaders }),
+          setTimeout(SCRAPE_TIMEOUT).then(() => {
+            throw new Error("Scrape timed out");
+          }),
+        ]);
 
-          if (!result || !Array.isArray(result) || result.length === 0) {
-            throw new Error("Empty or invalid scrape result");
-          }
+        if (!result || !Array.isArray(result) || result.length === 0) {
+          throw new Error("Empty or invalid scrape result");
+        }
 
-          await this.updateEventMetadata(eventId, result);
-          
+        await this.updateEventMetadata(eventId, result);
+        
           // Success handling
-          const recentFailures = this.getRecentFailureCount(eventId);
-          if (recentFailures > 0) {
-            try {
-              await Event.updateOne(
-                { Event_ID: eventId },
-                { $set: { Skip_Scraping: false, status: "active" } }
-              );
-              this.logWithTime(`Reactivated previously failing event: ${eventId}`, "success");
-            } catch (err) {
-              console.error(`Failed to update status for event ${eventId}:`, err);
-            }
+        const recentFailures = this.getRecentFailureCount(eventId);
+        if (recentFailures > 0) {
+          try {
+            await Event.updateOne(
+              { Event_ID: eventId },
+              { $set: { Skip_Scraping: false, status: "active" } }
+            );
+            this.logWithTime(`Reactivated previously failing event: ${eventId}`, "success");
+          } catch (err) {
+            console.error(`Failed to update status for event ${eventId}:`, err);
           }
-          
-          this.successCount++;
-          this.lastSuccessTime = moment();
-          this.eventUpdateTimestamps.set(eventId, moment());
-          this.failedEvents.delete(eventId);
-          this.clearFailureCount(eventId);
-          this.globalConsecutiveErrors = 0;
-          results.push({ eventId, success: true });
+        }
+        
+        this.successCount++;
+        this.lastSuccessTime = moment();
+        this.eventUpdateTimestamps.set(eventId, moment());
+        this.failedEvents.delete(eventId);
+        this.clearFailureCount(eventId);
+        this.globalConsecutiveErrors = 0;
+        results.push({ eventId, success: true });
           return { eventId, success: true };
-        } catch (error) {
+      } catch (error) {
           await this.handleEventError(eventId, error, 0, failed);
           return { eventId, success: false, error };
-        } finally {
-          this.activeJobs.delete(eventId);
-          this.processingEvents.delete(eventId);
-        }
-      });
-      
+      } finally {
+        this.activeJobs.delete(eventId);
+        this.processingEvents.delete(eventId);
+      }
+    });
+
       await Promise.all(chunkPromises);
       
       // Small delay between chunks to prevent rate limiting
@@ -1021,23 +1057,23 @@ class ScraperManager {
 
   async getEventsToProcess() {
     try {
-      const now = moment();
+    const now = moment();
       const twoMinutesFromNow = now.clone().add(2, 'minutes').toDate();
       
       // Prioritize events needing update soon
       // Find all active events due for update within the next 2 minutes
       const urgentEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
+      Skip_Scraping: { $ne: true },
         $or: [
           { Last_Updated: { $exists: false } },
           { Last_Updated: { $lt: now.clone().subtract(1, 'minute').toDate() } }
         ]
-      })
+    })
       .select('Event_ID url Last_Updated')
       .sort({ Last_Updated: 1 }) // Oldest first
       .limit(BATCH_SIZE * 4) // Get a larger sample to select from
       .lean();
-      
+    
       // No events needing update
       if (!urgentEvents.length) {
         return [];
@@ -1135,7 +1171,7 @@ class ScraperManager {
     if (this.isRunning) return;
     this.isRunning = true;
     this.logWithTime("Starting continuous scraping...");
-
+    
     while (this.isRunning) {
       try {
         // Process retry queue first

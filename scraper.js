@@ -298,13 +298,33 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
 }
 
 async function refreshHeaders(eventId, proxy, existingCookies = null) {
-  // If cookies are already being refreshed, add this request to the queue
+  // If cookies are already being refreshed, add this request to the queue with a timeout
   if (isRefreshingCookies) {
     console.log(
       `Cookies are already being refreshed, queueing request for event ${eventId}`
     );
     return new Promise((resolve, reject) => {
-      cookieRefreshQueue.push({ resolve, reject });
+      // Add a timeout to prevent requests from getting stuck in the queue forever
+      const timeoutId = setTimeout(() => {
+        // Find and remove this request from the queue
+        const index = cookieRefreshQueue.findIndex(item => item.timeoutId === timeoutId);
+        if (index !== -1) {
+          cookieRefreshQueue.splice(index, 1);
+        }
+        
+        // Generate fallback headers since we timed out waiting
+        console.log(`Queue timeout for event ${eventId}, using fallback headers`);
+        const fallbackHeaders = generateFallbackHeaders();
+        resolve({
+          cookies: null,
+          fingerprint: BrowserFingerprint.generate(),
+          lastRefresh: Date.now(),
+          headers: fallbackHeaders,
+          proxy: proxy
+        });
+      }, 30000); // 30 second timeout
+      
+      cookieRefreshQueue.push({ resolve, reject, eventId, timeoutId });
     });
   }
 
@@ -313,6 +333,40 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
   try {
     isRefreshingCookies = true;
+    
+    // Set up a cleanup function to ensure we always reset the flag and process the queue
+    const cleanupRefreshProcess = (error = null) => {
+      isRefreshingCookies = false;
+      
+      // Process any queued refresh requests
+      while (cookieRefreshQueue.length > 0) {
+        const { resolve, reject, timeoutId } = cookieRefreshQueue.shift();
+        clearTimeout(timeoutId); // Clear the timeout for this request
+        
+        if (error) {
+          reject(error);
+        } else if (capturedState.cookies || capturedState.headers) {
+          resolve(capturedState);
+        } else {
+          // If we don't have cookies or headers, use fallback headers
+          const fallbackHeaders = generateFallbackHeaders();
+          const fallbackState = {
+            cookies: null,
+            fingerprint: BrowserFingerprint.generate(),
+            lastRefresh: Date.now(),
+            headers: fallbackHeaders,
+            proxy: proxy
+          };
+          resolve(fallbackState);
+        }
+      }
+    };
+    
+    // Add a global timeout for the entire refresh process
+    const globalTimeoutId = setTimeout(() => {
+      console.error(`Global timeout reached when refreshing cookies for event ${eventId}`);
+      cleanupRefreshProcess(new Error("Global timeout for cookie refresh"));
+    }, 60000); // 60 second timeout for the entire process
 
     // Check if we have valid cookies in memory first
     if (
@@ -321,13 +375,8 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       Date.now() - capturedState.lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL
     ) {
       console.log("Using existing cookies from memory");
-      
-      // Process queued refresh requests
-      while (cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieRefreshQueue.shift();
-        resolve(capturedState);
-      }
-      
+      clearTimeout(globalTimeoutId);
+      cleanupRefreshProcess();
       return capturedState;
     }
 
@@ -346,12 +395,8 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         proxy: capturedState.proxy || proxy,
       };
       
-      // Process queued refresh requests
-      while (cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieRefreshQueue.shift();
-        resolve(capturedState);
-      }
-
+      clearTimeout(globalTimeoutId);
+      cleanupRefreshProcess();
       return capturedState;
     }
 
@@ -371,12 +416,8 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           proxy: capturedState.proxy || proxy,
         };
         
-        // Process queued refresh requests
-        while (cookieRefreshQueue.length > 0) {
-          const { resolve } = cookieRefreshQueue.shift();
-          resolve(capturedState);
-        }
-
+        clearTimeout(globalTimeoutId);
+        cleanupRefreshProcess();
         return capturedState;
       }
     } catch (err) {
@@ -424,14 +465,9 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         proxy: capturedState.proxy || proxy,
       };
       
-      // Process queued refresh requests with fallback data
-      while (cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieRefreshQueue.shift();
-        resolve(capturedState);
-      }
-      
-      isRefreshingCookies = false;
-      throw initError;
+      clearTimeout(globalTimeoutId);
+      cleanupRefreshProcess();
+      return capturedState;
     }
 
     // Create page in try-catch block
@@ -552,7 +588,8 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       }
       
       await cleanup(localBrowser, localContext);
-      isRefreshingCookies = false;
+      clearTimeout(globalTimeoutId);
+      cleanupRefreshProcess();
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
@@ -562,11 +599,13 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       await cleanup(localBrowser, localContext);
     }
     
+    // Reset the flag to allow new requests
     isRefreshingCookies = false;
     
-    // Reject any queued requests
+    // In case of error, reject all queued requests
     while (cookieRefreshQueue.length > 0) {
-      const { reject } = cookieRefreshQueue.shift();
+      const { reject, timeoutId } = cookieRefreshQueue.shift();
+      clearTimeout(timeoutId); // Clear the timeout
       reject(error);
     }
     
