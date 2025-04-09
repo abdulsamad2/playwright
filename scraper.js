@@ -217,11 +217,44 @@ async function captureCookies(page, fingerprint) {
 async function loadCookiesFromFile() {
   try {
     if (fs.existsSync(COOKIES_FILE)) {
+      // Check file size first
+      const stats = await fs.promises.stat(COOKIES_FILE);
+      const fileSize = stats.size;
+      
+      // Verify file size meets minimum requirements
+      if (fileSize < 1000) {
+        console.error(`Cookies file is too small: ${fileSize} bytes (minimum 1000 bytes required)`);
+        // Delete the invalid file
+        await fs.promises.unlink(COOKIES_FILE);
+        console.error("Deleted invalid cookies file - will get new cookies");
+        return null;
+      }
+      
+      // File size is valid, proceed with loading
       const cookiesData = fs.readFileSync(COOKIES_FILE, "utf8");
-      return JSON.parse(cookiesData);
+      const cookies = JSON.parse(cookiesData);
+      
+      // Also validate that we have cookies
+      if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
+        console.error("Cookies file exists but contains no valid cookies");
+        await fs.promises.unlink(COOKIES_FILE);
+        return null;
+      }
+      
+      console.log(`Loaded valid cookies file (${fileSize} bytes) with ${cookies.length} cookies`);
+      return cookies;
     }
   } catch (error) {
     console.error("Error loading cookies from file:", error);
+    // Try to delete the file if there was an error parsing it
+    try {
+      if (fs.existsSync(COOKIES_FILE)) {
+        await fs.promises.unlink(COOKIES_FILE);
+        console.error("Deleted corrupted cookies file");
+      }
+    } catch (deleteError) {
+      console.error("Error deleting corrupted cookies file:", deleteError);
+    }
   }
   return null;
 }
@@ -394,9 +427,14 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           `Successfully captured ${data.cookies.length} cookies for event ${eventId}`
         );
 
-        // Save cookies to JSON file
-        await saveCookiesToFile(data.cookies);
-        console.log("Cookies saved to file");
+        // Save cookies to JSON file and verify it's valid
+        const cookiesValid = await saveCookiesToFile(data.cookies);
+        if (!cookiesValid) {
+          console.error("Failed to save valid cookies file - aborting scrape");
+          resetCapturedState();
+          throw new Error("Invalid cookies file - too small or corrupted");
+        }
+        console.log("Cookies saved to file and validated");
       } else {
         console.error(`No cookies captured for event ${eventId}`);
         resetCapturedState();
@@ -484,10 +522,40 @@ async function checkForTicketmasterChallenge(page) {
 async function saveCookiesToFile(cookies) {
   try {
     const filePath = "./cookies.json";
+    
+    // Only save if we have cookies
+    if (!cookies || cookies.length === 0) {
+      console.error("No cookies to save - skipping file write");
+      return false;
+    }
+    
+    // Write cookies to file
     await fs.promises.writeFile(filePath, JSON.stringify(cookies, null, 2));
     console.log("Cookies saved to file:", filePath);
+    
+    // Verify file size/content meets minimum requirements
+    try {
+      const stats = await fs.promises.stat(filePath);
+      const fileSize = stats.size;
+      
+      // Check if file is too small (less than 1000 bytes)
+      if (fileSize < 1000) {
+        console.error(`Cookies file is too small: ${fileSize} bytes (minimum 1000 bytes required)`);
+        // Delete the invalid file
+        await fs.promises.unlink(filePath);
+        console.error("Deleted invalid cookies file - will try to get new cookies on next request");
+        return false;
+      }
+      
+      console.log(`Cookies file size: ${fileSize} bytes (valid size)`);
+      return true;
+    } catch (statError) {
+      console.error("Error checking cookies file size:", statError);
+      return false;
+    }
   } catch (error) {
     console.error("Error saving cookies to file:", error);
+    return false;
   }
 }
 
