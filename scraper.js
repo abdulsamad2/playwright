@@ -637,18 +637,24 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
     // If headers are provided (for batch processing), use them directly
     let cookieString, userAgent, fingerprint;
     
+    let useProvidedHeaders = false;
     if (event?.headers) {
-      console.log(`Using provided headers for event ${eventId} (batch processing)`);
+      console.log(`Processing headers for event ${eventId} (batch processing)`);
       cookieString = event.headers.Cookie || event.headers.cookie;
       userAgent = event.headers["User-Agent"] || event.headers["user-agent"];
       
-      // Extract only what we need without rerunning the entire cookie capture process
+      // Check if we have valid headers to use
       if (cookieString && userAgent) {
         console.log(`Reusing existing headers for batch processing of event ${eventId}`);
+        useProvidedHeaders = true;
+        // Initialize fingerprint with at least a language property
+        fingerprint = { language: "en-US" };
       } else {
-        throw new Error("Incomplete headers provided for batch processing");
+        console.log(`Incomplete headers for event ${eventId}, falling back to standard flow`);
       }
-    } else {
+    }
+    
+    if (!useProvidedHeaders) {
       // Standard flow - get cookies and headers
       const correlationId = generateCorrelationId();
       const capturedData = await getCapturedData(eventId, proxy);
