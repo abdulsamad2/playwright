@@ -10,17 +10,17 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 
 // Updated constants for stricter update intervals and high performance on 32GB system
 const MAX_UPDATE_INTERVAL = 110000; // Strict 110-second update requirement (buffer for 2-minute rule)
-const CONCURRENT_LIMIT = Math.max(50, Math.floor(cpus().length * 4)); // Scale to 4x CPU cores for 32GB system
+const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 3)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
 const MAX_RETRIES = 3; // Reduced to 3 for faster failure detection
-const SCRAPE_TIMEOUT = 50000; // Reduced timeout to 25 seconds
-const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 4, 60); // Larger batches for high-memory systems
-const RETRY_BACKOFF_MS = 2000; // Reduced base backoff time for faster retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 80000; // Minimum 1 minute between scrapes
+const SCRAPE_TIMEOUT = 35000; // Reduced timeout to 35 seconds for faster failure detection
+const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 45); // Smaller batches for better control with limited proxies
+const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 80000; // Minimum 1.33 minutes between scrapes
 const URGENT_THRESHOLD = 100000; // Events needing update within 20 seconds of deadline (tighter window)
 
 // New cooldown settings - shorter cooldowns
-const SHORT_COOLDOWNS = [2000, 4000, 8000]; // 2s, 4s, 8s - faster recovery
-const LONG_COOLDOWN_MINUTES = 5; // Reduced to 5 minutes for persistently failing events
+const SHORT_COOLDOWNS = [1500, 3000, 6000]; // Even shorter cooldowns: 1.5s, 3s, 6s for faster recovery
+const LONG_COOLDOWN_MINUTES = 3; // Reduced to 3 minutes for persistently failing events
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 2; // Default to warnings and errors only
@@ -855,49 +855,107 @@ class ScraperManager {
       return { failed };
     }
     
-    // Split into smaller groups for better control - increased for 32GB system
-    const chunkSize = Math.min(20, Math.ceil(CONCURRENT_LIMIT / 3));
+    // Get available proxy count to better determine batch sizing
+    const availableProxies = this.proxyManager.getAvailableProxyCount();
+    // Determine optimal batch size based on available proxies
+    // We want to use smaller batches when we have fewer proxies to avoid overloading
+    const maxEventsPerProxy = this.proxyManager.MAX_EVENTS_PER_PROXY;
+    // Dynamic chunk sizing based on available proxies
+    const chunkSize = Math.min(
+      maxEventsPerProxy, 
+      Math.max(3, Math.min(Math.ceil(eventIds.length / Math.max(1, availableProxies)), 10))
+    );
+    
+    if (LOG_LEVEL >= 1) {
+      this.logWithTime(
+        `Processing ${eventIds.length} events using ${availableProxies} proxies with chunk size ${chunkSize}`,
+        "info"
+      );
+    }
+    
+    // Split into smaller groups for better control
     const chunks = [];
     
     for (let i = 0; i < eventIds.length; i += chunkSize) {
       chunks.push(eventIds.slice(i, i + chunkSize));
     }
     
-    // Generate a unique batch ID for tracking
-    const batchId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    // Process chunks with controlled parallelism and better error handling
+    let successCount = 0;
+    let failureCount = 0;
     
-    // Process chunks with controlled parallelism
-    for (const chunk of chunks) {
-      try {
-        // Get a proxy for this specific batch
-        const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(chunk);
+    // Process in smaller batches for better control
+    const batchCount = Math.ceil(chunks.length / 4); // Process up to 4 chunks in parallel
+    
+    for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
+      const batchStart = batchIndex * 4;
+      const batchEnd = Math.min(batchStart + 4, chunks.length);
+      const batchChunks = chunks.slice(batchStart, batchEnd);
+      
+      // Generate unique batch IDs for each chunk
+      const batchProcesses = batchChunks.map(async (chunk) => {
+        const batchId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         
-        // Store the proxy assignment for this batch
-        this.batchProxies.set(batchId, { proxy, chunk });
-        
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
-        }
+        try {
+          // Get a proxy for this specific batch
+          const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(chunk);
+          
+          // Store the proxy assignment for this batch
+          this.batchProxies.set(batchId, { proxy, chunk });
+          
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
+          }
 
-        // Process the entire chunk efficiently as a batch
-        await this.processBatchEfficiently(chunk, batchId, proxyAgent, proxy);
-        
-        // Minimal delay between chunks to prevent rate limiting but maintain high throughput
-        if (chunks.length > 1) {
-          await setTimeout(200); // Reduced delay between chunks for higher throughput
+          // Process the entire chunk efficiently as a batch
+          const result = await this.processBatchEfficiently(chunk, batchId, proxyAgent, proxy);
+          successCount += result.results.length;
+          failureCount += result.failed.length;
+          results.push(...result.results);
+          failed.push(...result.failed);
+          
+          // Mark this proxy as successful
+          if (result.results.length > 0) {
+            this.proxyManager.updateProxyHealth(proxy.proxy, true);
+          }
+          
+          // If we had failures, and they outnumber successes, mark proxy as having issues
+          if (result.failed.length > result.results.length && result.failed.length > 0) {
+            this.proxyManager.updateProxyHealth(proxy.proxy, false);
+          }
+        } catch (error) {
+          this.logWithTime(`Error processing batch ${batchId}: ${error.message}`, "error");
+          
+          // If there's a proxy error, mark the proxy as unhealthy
+          if (this.batchProxies.has(batchId)) {
+            const { proxy, chunk } = this.batchProxies.get(batchId);
+            this.proxyManager.updateProxyHealth(proxy.proxy, false);
+            this.proxyManager.releaseProxyBatch(chunk);
+          }
+          
+          // Add these events to failed list
+          failed.push(...chunk.map(eventId => ({ 
+            eventId, 
+            error: new Error(`Batch processing error: ${error.message}`) 
+          })));
+          failureCount += chunk.length;
+        } finally {
+          // Clean up batch tracking
+          this.batchProxies.delete(batchId);
         }
-      } catch (error) {
-        this.logWithTime(`Error processing batch ${batchId}: ${error.message}`, "error");
-        
-        // If there's a proxy error, release all events from this batch
-        if (this.batchProxies.has(batchId)) {
-          const { chunk } = this.batchProxies.get(batchId);
-          this.proxyManager.releaseProxyBatch(chunk);
-        }
-      } finally {
-        // Clean up batch tracking
-        this.batchProxies.delete(batchId);
+      });
+      
+      // Wait for this batch of chunks to complete before moving to next batch
+      await Promise.all(batchProcesses);
+      
+      // Add a small delay between batches to prevent rate limiting
+      if (batchIndex < batchCount - 1) {
+        await setTimeout(200);
       }
+    }
+    
+    if (LOG_LEVEL >= 1 && eventIds.length > 10) {
+      this.logWithTime(`Completed processing ${eventIds.length} events: ${successCount} successful, ${failureCount} failed`, "info");
     }
     
     return { results, failed };
@@ -908,12 +966,21 @@ class ScraperManager {
     const results = [];
     const failed = [];
 
-    // Preload all event validations in parallel to save time
-    const validationPromises = eventIds.map(async (eventId) => {
-      if (this.shouldSkipEvent(eventId)) {
-        return { eventId, valid: false, reason: "skip" };
+    // Skip excessive logging for small batches to reduce log noise
+    const shouldLogDetails = LOG_LEVEL >= 2 && eventIds.length > 5;
+
+    // Pre-filter events that should be skipped to avoid unnecessary DB lookups
+    const filteredIds = eventIds.filter(eventId => !this.shouldSkipEvent(eventId));
+    
+    if (filteredIds.length === 0) {
+      if (LOG_LEVEL >= 1) {
+        this.logWithTime(`All events in batch ${batchId} should be skipped, skipping validation`, "warning");
       }
-      
+      return { results, failed };
+    }
+
+    // Preload all event validations in parallel to save time
+    const validationPromises = filteredIds.map(async (eventId) => {
       try {
         const event = await Event.findOne({ Event_ID: eventId })
           .select("Skip_Scraping inHandDate url")
@@ -942,40 +1009,29 @@ class ScraperManager {
       .map(result => ({ eventId: result.eventId, event: result.event }));
 
     // Log invalid events (only log summary for large batches)
-    if (validationResults.filter(result => !result.valid).length > 0) {
-      if (validationResults.length > 20) {
-        // For large batches, just log a summary
-        const skipCount = validationResults.filter(r => r.reason === "skip").length;
-        const notFoundCount = validationResults.filter(r => r.reason === "not_found").length;
-        const flaggedCount = validationResults.filter(r => r.reason === "flagged").length;
-        const errorCount = validationResults.filter(r => r.reason === "error").length;
-        
-        this.logWithTime(`Batch ${batchId} invalid events: ${skipCount} skipped, ${notFoundCount} not found, ${flaggedCount} flagged, ${errorCount} errors`, "info");
-      } else {
-        // For smaller batches, log each invalid event
-        validationResults
-          .filter(result => !result.valid)
-          .forEach(result => {
-            switch (result.reason) {
-              case "skip":
-                // Already logged in shouldSkipEvent
-                break;
-              case "not_found":
-                this.logWithTime(`Event ${result.eventId} not found in database`, "error");
-                break;
-              case "flagged":
-                this.logWithTime(`Skipping ${result.eventId} (flagged)`, "info");
-                break;
-              case "error":
-                this.logWithTime(`Error validating event ${result.eventId}: ${result.error.message}`, "error");
-                break;
-            }
-          });
+    const invalidEvents = validationResults.filter(result => !result.valid);
+    if (invalidEvents.length > 0 && shouldLogDetails) {
+      // For large batches, just log a summary
+      const skipCount = invalidEvents.filter(r => r.reason === "skip").length;
+      const notFoundCount = invalidEvents.filter(r => r.reason === "not_found").length;
+      const flaggedCount = invalidEvents.filter(r => r.reason === "flagged").length;
+      const errorCount = invalidEvents.filter(r => r.reason === "error").length;
+      
+      this.logWithTime(`Batch ${batchId} invalid events: ${skipCount} skipped, ${notFoundCount} not found, ${flaggedCount} flagged, ${errorCount} errors`, "warning");
+      
+      // Log specific errors for debugging
+      const errorEvents = invalidEvents.filter(r => r.reason === "error");
+      if (errorEvents.length > 0 && LOG_LEVEL >= 2) {
+        errorEvents.forEach(result => {
+          this.logWithTime(`Error validating event ${result.eventId}: ${result.error.message}`, "error");
+        });
       }
     }
 
     if (validEvents.length === 0) {
-      this.logWithTime(`No valid events to process in batch ${batchId}`, "warning");
+      if (LOG_LEVEL >= 1) {
+        this.logWithTime(`No valid events to process in batch ${batchId}`, "warning");
+      }
       return { results, failed };
     }
 
@@ -985,29 +1041,29 @@ class ScraperManager {
       this.activeJobs.set(eventId, moment());
     });
 
-    await this.acquireSemaphore();
-    
-    // Helper function to validate headers are complete
-    const validateHeaders = (headers) => {
-      if (!headers) return false;
-      
-      // Check for required fields
-      const hasHeaders = headers.headers && typeof headers.headers === 'object';
-      if (!hasHeaders) return false;
-      
-      // Check for required header fields
-      const hasCookie = headers.headers.Cookie || headers.headers.cookie;
-      const hasUserAgent = headers.headers["User-Agent"] || headers.headers["user-agent"];
-      
-      return hasCookie && hasUserAgent;
-    };
-    
-    // Implement header caching strategy for better efficiency
-    let sharedHeaders = null;
-    let headerAttempts = 0;
-    const maxHeaderAttempts = Math.min(validEvents.length, 3);
-    
     try {
+      await this.acquireSemaphore();
+      
+      // Helper function to validate headers are complete
+      const validateHeaders = (headers) => {
+        if (!headers) return false;
+        
+        // Check for required fields
+        const hasHeaders = headers.headers && typeof headers.headers === 'object';
+        if (!hasHeaders) return false;
+        
+        // Check for required header fields
+        const hasCookie = headers.headers.Cookie || headers.headers.cookie;
+        const hasUserAgent = headers.headers["User-Agent"] || headers.headers["user-agent"];
+        
+        return hasCookie && hasUserAgent;
+      };
+      
+      // Implement header caching strategy for better efficiency
+      let sharedHeaders = null;
+      let headerAttempts = 0;
+      const maxHeaderAttempts = Math.min(validEvents.length, 3);
+      
       // First check if we have recent valid headers for any event in the batch
       for (const { eventId } of validEvents) {
         const cachedHeaders = this.headersCache.get(eventId);
@@ -1017,7 +1073,9 @@ class ScraperManager {
           // Validate the headers are complete before using them
           if (validateHeaders(cachedHeaders)) {
             sharedHeaders = cachedHeaders;
-            this.logWithTime(`Using recent cached headers from event ${eventId} for batch ${batchId}`, "info");
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(`Using recent cached headers from event ${eventId} for batch ${batchId}`, "debug");
+            }
             break;
           }
         }
@@ -1074,86 +1132,117 @@ class ScraperManager {
         this.headerRefreshTimestamps.set(eventId, moment());
       }
     } catch (error) {
-      this.logWithTime(`Failed to refresh headers for batch ${batchId}: ${error.message}`, "error");
+      if (LOG_LEVEL >= 1) {
+        this.logWithTime(`Failed to refresh headers for batch ${batchId}: ${error.message}`, "error");
+      }
+      
       // Release all events in batch
       validEvents.forEach(({ eventId }) => {
         this.activeJobs.delete(eventId);
         this.processingEvents.delete(eventId);
         failed.push({ eventId, error });
       });
+      
       this.releaseSemaphore();
       return { results, failed };
     }
 
     // Process all valid events with increased parallelism for high-memory system
-    const chunkSize = Math.min(validEvents.length, Math.max(10, Math.ceil(CONCURRENT_LIMIT / 3)));
-    const chunks = [];
+    // Use smaller chunk size for better throughput and error isolation
+    const chunkSize = Math.min(validEvents.length, 5);
+    const eventChunks = [];
     
     for (let i = 0; i < validEvents.length; i += chunkSize) {
-      chunks.push(validEvents.slice(i, i + chunkSize));
+      eventChunks.push(validEvents.slice(i, i + chunkSize));
     }
     
-    // Process chunks in parallel for maximum efficiency on high-memory systems
-    const chunkPromises = chunks.map(async (chunk, chunkIndex) => {
-      const eventsPromises = chunk.map(async ({ eventId }) => {
-        try {
-          const result = await Promise.race([
-            ScrapeEvent({ eventId, headers: sharedHeaders }),
-            setTimeout(SCRAPE_TIMEOUT).then(() => {
-              throw new Error("Scrape timed out");
-            }),
-          ]);
+    // Process chunks one by one for better error handling
+    for (const chunk of eventChunks) {
+      try {
+        const chunkPromises = chunk.map(async ({ eventId }) => {
+          try {
+            const result = await Promise.race([
+              ScrapeEvent({ eventId, headers: sharedHeaders }),
+              setTimeout(SCRAPE_TIMEOUT).then(() => {
+                throw new Error("Scrape timed out");
+              }),
+            ]);
 
-          if (!result || !Array.isArray(result) || result.length === 0) {
-            throw new Error("Empty or invalid scrape result");
-          }
-
-          await this.updateEventMetadata(eventId, result);
-          
-          // Success handling
-          const recentFailures = this.getRecentFailureCount(eventId);
-          if (recentFailures > 0) {
-            try {
-              await Event.updateOne(
-                { Event_ID: eventId },
-                { $set: { Skip_Scraping: false, status: "active" } }
-              );
-            } catch (err) {
-              console.error(`Failed to update status for event ${eventId}:`, err);
+            if (!result || !Array.isArray(result) || result.length === 0) {
+              throw new Error("Empty or invalid scrape result");
             }
+
+            // We're still storing in the cache for metrics/monitoring purposes
+            // but we'll never use the cached results for returning to the client
+            this.responseCache.set(eventId, result);
+            
+            // Mark this header as successful
+            if (sharedHeaders) {
+              const headerKey = sharedHeaders.headers.Cookie?.substring(0, 20) || sharedHeaders.headers["User-Agent"]?.substring(0, 20);
+              const currentSuccessRate = this.headerSuccessRates.get(headerKey) || { success: 0, failure: 0 };
+              currentSuccessRate.success++;
+              this.headerSuccessRates.set(headerKey, currentSuccessRate);
+              
+              // Add to rotation pool if not already there
+              if (!this.headerRotationPool.some(h => 
+                h.headers.Cookie?.substring(0, 20) === headerKey ||
+                h.headers["User-Agent"]?.substring(0, 20) === headerKey
+              )) {
+                this.headerRotationPool.push(sharedHeaders);
+                // Limit pool size
+                if (this.headerRotationPool.length > 10) {
+                  this.headerRotationPool.shift();
+                }
+              }
+            }
+
+            await this.updateEventMetadata(eventId, result);
+            
+            // Success handling
+            const recentFailures = this.getRecentFailureCount(eventId);
+            if (recentFailures > 0) {
+              try {
+                await Event.updateOne(
+                  { Event_ID: eventId },
+                  { $set: { Skip_Scraping: false, status: "active" } }
+                );
+              } catch (err) {
+                console.error(`Failed to update status for event ${eventId}:`, err);
+              }
+            }
+            
+            this.successCount++;
+            this.lastSuccessTime = moment();
+            this.eventUpdateTimestamps.set(eventId, moment());
+            this.failedEvents.delete(eventId);
+            this.clearFailureCount(eventId);
+            this.globalConsecutiveErrors = 0;
+            
+            results.push({ eventId, success: true });
+            return { eventId, success: true };
+          } catch (error) {
+            await this.handleEventError(eventId, error, 0, failed);
+            return { eventId, success: false, error };
+          } finally {
+            this.activeJobs.delete(eventId);
+            this.processingEvents.delete(eventId);
           }
-          
-          this.successCount++;
-          this.lastSuccessTime = moment();
-          this.eventUpdateTimestamps.set(eventId, moment());
-          this.failedEvents.delete(eventId);
-          this.clearFailureCount(eventId);
-          this.globalConsecutiveErrors = 0;
-          results.push({ eventId, success: true });
-          return { eventId, success: true };
-        } catch (error) {
-          await this.handleEventError(eventId, error, 0, failed);
-          return { eventId, success: false, error };
-        } finally {
-          this.activeJobs.delete(eventId);
-          this.processingEvents.delete(eventId);
+        });
+
+        await Promise.all(chunkPromises);
+        
+        // Short delay between processing chunks to reduce rate limiting
+        if (eventChunks.length > 1) {
+          await setTimeout(100);
         }
-      });
-
-      const chunkResults = await Promise.all(eventsPromises);
-      return chunkResults;
-    });
-
-    await Promise.all(chunkPromises);
+      } catch (error) {
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(`Error processing chunk in batch ${batchId}: ${error.message}`, "error");
+        }
+      }
+    }
     
     this.releaseSemaphore();
-    
-    // Only log detailed stats for large batches
-    if (validEvents.length > 20) {
-      const successCount = results.length;
-      const failureCount = failed.length;
-      this.logWithTime(`Completed batch ${batchId}: ${successCount} successes, ${failureCount} failures`, "info");
-    }
     
     return { results, failed };
   }
