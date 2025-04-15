@@ -1015,6 +1015,21 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
     const acceptLanguages = ['en-US,en;q=0.9', 'en-GB,en;q=0.9', 'en-CA,en;q=0.9'];
     const acceptEncodings = ['gzip, deflate, br', 'gzip, deflate', 'br'];
     
+    // Generate a realistic sec-ch-ua string based on the browser
+    const browser = fingerprint.browser || { name: 'Chrome', version: '120.0.0.0' };
+    const secChUa = `"Not_A Brand";v="8", "${browser.name}";v="${browser.version.split('.')[0]}"`;
+    
+    // Generate a realistic sec-ch-ua-platform based on the platform
+    const platform = fingerprint.platform || { name: 'Windows', version: '10' };
+    const secChUaPlatform = platform.name === 'Windows' ? 'Windows' : 
+                           platform.name === 'Macintosh' ? 'macOS' : 
+                           platform.name === 'iPhone' ? 'iOS' : 
+                           platform.name === 'Android' ? 'Android' : 'Windows';
+
+    // Generate a realistic sec-ch-ua-mobile based on the device type
+    const isMobile = fingerprint.platform?.type === 'mobile' || fingerprint.platform?.type === 'tablet';
+    const secChUaMobile = isMobile ? '?1' : '?0';
+
     return {
       'User-Agent': userAgent,
       'Accept': '*/*',
@@ -1031,9 +1046,12 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
       'Cookie': cookies,
       'X-Requested-With': 'XMLHttpRequest',
       'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
-      'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"`,
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': Math.random() > 0.5 ? 'Windows' : 'macOS',
+      'sec-ch-ua': secChUa,
+      'sec-ch-ua-mobile': secChUaMobile,
+      'sec-ch-ua-platform': secChUaPlatform,
+      'DNT': Math.random() > 0.5 ? '1' : '0',
+      'Upgrade-Insecure-Requests': '1',
+      'TE': 'trailers',
     };
   } catch (error) {
     console.error('Error generating enhanced headers:', error);
