@@ -13,14 +13,23 @@ class ProxyManager {
     this.logger = logger;
     this.proxyUsage = new Map(); // Maps proxy IP to set of eventIds using it
     this.eventToProxy = new Map(); // Maps eventId to assigned proxy
-    this.MAX_EVENTS_PER_PROXY = 5; // Maximum number of events per proxy
-    this.BATCH_SIZE = 5; // Maximum events per batch
-    this.proxies = [...proxyArray.proxies]; // Copy the proxy list
-    this.lastAssignedProxyIndex = -1; // Track the last proxy we used
+    this.MAX_EVENTS_PER_PROXY = 3; // Reduced from 5 to 3 to avoid overloading
+    this.BATCH_SIZE = 3; // Reduced from 5 to 3
+    this.proxies = [...proxyArray.proxies];
+    this.lastAssignedProxyIndex = -1;
+    this.proxyHealth = new Map(); // Track proxy health status
+    this.failedProxies = new Set(); // Track failed proxies
+    this.proxyLastUsed = new Map(); // Track when proxies were last used
     
-    // Initialize usage counts for each proxy
+    // Initialize usage counts and health status
     this.proxies.forEach(proxy => {
       this.proxyUsage.set(proxy.proxy, new Set());
+      this.proxyHealth.set(proxy.proxy, { 
+        successCount: 0,
+        failureCount: 0,
+        lastCheck: 0,
+        isHealthy: true
+      });
     });
     
     this.log("ProxyManager initialized with " + this.proxies.length + " proxies");
@@ -44,89 +53,125 @@ class ProxyManager {
   }
 
   /**
-   * Get a proxy for a batch of events, ensuring different batches use different proxies
-   * @param {string[]} eventIds - Array of event IDs in this batch
-   * @returns {Object} The proxy configuration with agent
+   * Check if a proxy is healthy and available
+   * @param {Object} proxy - The proxy to check
+   * @returns {boolean} Whether the proxy is healthy
+   */
+  isProxyHealthy(proxy) {
+    const health = this.proxyHealth.get(proxy.proxy);
+    if (!health) return false;
+    
+    // If proxy has too many failures, mark as unhealthy
+    if (health.failureCount > 3 && health.successCount < health.failureCount) {
+      return false;
+    }
+    
+    // If proxy was used recently, add cooldown
+    const lastUsed = this.proxyLastUsed.get(proxy.proxy) || 0;
+    const cooldownTime = 30000; // 30 seconds cooldown
+    if (Date.now() - lastUsed < cooldownTime) {
+      return false;
+    }
+    
+    return health.isHealthy;
+  }
+
+  /**
+   * Update proxy health status
+   * @param {string} proxyString - The proxy string
+   * @param {boolean} success - Whether the request was successful
+   */
+  updateProxyHealth(proxyString, success) {
+    const health = this.proxyHealth.get(proxyString);
+    if (!health) return;
+    
+    if (success) {
+      health.successCount++;
+      health.failureCount = Math.max(0, health.failureCount - 1);
+      if (health.failureCount === 0) {
+        health.isHealthy = true;
+      }
+    } else {
+      health.failureCount++;
+      if (health.failureCount > 3) {
+        health.isHealthy = false;
+        this.failedProxies.add(proxyString);
+      }
+    }
+    
+    health.lastCheck = Date.now();
+  }
+
+  /**
+   * Get a proxy for a batch of events with improved selection logic
    */
   getProxyForBatch(eventIds) {
-    // If we have too many events for one proxy, split them up
     if (eventIds.length > this.MAX_EVENTS_PER_PROXY) {
       this.log(`Batch size ${eventIds.length} exceeds max events per proxy (${this.MAX_EVENTS_PER_PROXY})`, "warning");
-      // This method should be called with smaller batches
       eventIds = eventIds.slice(0, this.MAX_EVENTS_PER_PROXY);
     }
     
-    // Find the least loaded proxy that isn't being used by these events
-    let leastLoadedProxy = null;
-    let minEvents = Infinity;
+    // Find the healthiest available proxy
+    let bestProxy = null;
+    let bestScore = -Infinity;
     
     // Try to use a different proxy than the last one
     const startIndex = (this.lastAssignedProxyIndex + 1) % this.proxies.length;
     
-    // Cycle through proxies starting from the next available one
     for (let i = 0; i < this.proxies.length; i++) {
       const index = (startIndex + i) % this.proxies.length;
       const proxy = this.proxies[index];
-      const usageSet = this.proxyUsage.get(proxy.proxy) || new Set();
+      
+      // Skip if proxy is unhealthy or in cooldown
+      if (!this.isProxyHealthy(proxy)) {
+        continue;
+      }
       
       // Check if any events in this batch are already using this proxy
       const alreadyUsingProxy = eventIds.some(eventId => 
-        usageSet.has(eventId) || 
-        (this.eventToProxy.has(eventId) && this.eventToProxy.get(eventId) === proxy.proxy)
+        this.proxyUsage.get(proxy.proxy)?.has(eventId) || 
+        this.eventToProxy.get(eventId) === proxy.proxy
       );
       
-      // Skip this proxy if it's already being used by any event in this batch
       if (alreadyUsingProxy) {
         continue;
       }
       
-      // Check if this proxy has less load than our current minimum
-      if (usageSet.size < minEvents) {
-        minEvents = usageSet.size;
-        leastLoadedProxy = proxy;
-        this.lastAssignedProxyIndex = index;
-        
-        // If we found an unused proxy, no need to check further
-        if (minEvents === 0) {
-          break;
-        }
-      }
-    }
-    
-    // If all proxies are at capacity or being used by these events,
-    // fall back to the least loaded proxy
-    if (!leastLoadedProxy) {
-      this.log("All proxies are being used by events in this batch, finding least loaded proxy", "warning");
+      // Calculate proxy score based on health and usage
+      const health = this.proxyHealth.get(proxy.proxy);
+      const usageCount = this.proxyUsage.get(proxy.proxy)?.size || 0;
+      const lastUsed = this.proxyLastUsed.get(proxy.proxy) || 0;
+      const timeSinceLastUse = Date.now() - lastUsed;
       
-      minEvents = Infinity;
-      for (const proxy of this.proxies) {
-        const usageSet = this.proxyUsage.get(proxy.proxy) || new Set();
-        if (usageSet.size < minEvents) {
-          minEvents = usageSet.size;
-          leastLoadedProxy = proxy;
-          
-          if (minEvents === 0) break;
-        }
+      const score = 
+        (health.successCount - health.failureCount) * 10 + // Health score
+        (this.MAX_EVENTS_PER_PROXY - usageCount) * 5 + // Usage score
+        Math.min(timeSinceLastUse / 1000, 30); // Time score
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestProxy = proxy;
+        this.lastAssignedProxyIndex = index;
       }
     }
     
-    // If all proxies are at capacity, log warning
-    if (minEvents >= this.MAX_EVENTS_PER_PROXY) {
-      this.log(
-        `Warning: All proxies at capacity (${this.MAX_EVENTS_PER_PROXY}+ events). Using least loaded proxy with ${minEvents} events.`,
-        "warning"
-      );
+    if (!bestProxy) {
+      this.log("No healthy proxies available, using fallback", "warning");
+      // Fallback to least loaded proxy
+      bestProxy = this.proxies[0];
     }
     
-    // Assign this proxy to all events in the batch
+    // Assign proxy to events
     for (const eventId of eventIds) {
-      this.assignProxyToEvent(eventId, leastLoadedProxy.proxy);
+      this.assignProxyToEvent(eventId, bestProxy.proxy);
     }
     
-    // Log the batch assignment
-    this.log(`Assigned proxy ${leastLoadedProxy.proxy} to batch of ${eventIds.length} events. Usage: ${minEvents + eventIds.length}/${this.MAX_EVENTS_PER_PROXY}`);
+    // Update last used time
+    this.proxyLastUsed.set(bestProxy.proxy, Date.now());
     
-    return this.createProxyAgent(leastLoadedProxy);
+    this.log(`Assigned proxy ${bestProxy.proxy} to batch of ${eventIds.length} events`);
+    
+    return this.createProxyAgent(bestProxy);
   }
   
   /**

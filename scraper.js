@@ -33,6 +33,101 @@ let isRefreshingCookies = false;
 // Queue for pending cookie refresh requests
 let cookieRefreshQueue = [];
 
+// Enhanced cookie management
+const COOKIE_MANAGEMENT = {
+  ESSENTIAL_COOKIES: [
+    'TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit', 'CMPS', 'CMID',
+    'MUID', 'au_id', 'aud', 'tmTrackID', 'TapAd_DID', 'uid'
+  ],
+  AUTH_COOKIES: ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'],
+  MAX_COOKIE_LENGTH: 4000, // Increased from 2000
+  COOKIE_REFRESH_INTERVAL: 30 * 60 * 1000, // 30 minutes
+};
+
+// Enhanced cookie handling
+const handleCookies = {
+  // Extract and validate essential cookies
+  extractEssentialCookies: (cookies) => {
+    if (!cookies) return '';
+    
+    const cookieMap = new Map();
+    cookies.split(';').forEach(cookie => {
+      const [name, value] = cookie.trim().split('=');
+      if (name && value) {
+        cookieMap.set(name, value);
+      }
+    });
+    
+    // Prioritize auth cookies
+    const essentialCookies = [];
+    COOKIE_MANAGEMENT.AUTH_COOKIES.forEach(name => {
+      if (cookieMap.has(name)) {
+        essentialCookies.push(`${name}=${cookieMap.get(name)}`);
+        cookieMap.delete(name);
+      }
+    });
+    
+    // Add other essential cookies if we have space
+    COOKIE_MANAGEMENT.ESSENTIAL_COOKIES.forEach(name => {
+      if (cookieMap.has(name) && essentialCookies.length < 10) {
+        essentialCookies.push(`${name}=${cookieMap.get(name)}`);
+        cookieMap.delete(name);
+      }
+    });
+    
+    return essentialCookies.join('; ');
+  },
+  
+  // Validate cookie freshness
+  areCookiesFresh: (cookies) => {
+    if (!cookies) return false;
+    
+    const cookieMap = new Map();
+    cookies.split(';').forEach(cookie => {
+      const [name, value] = cookie.trim().split('=');
+      if (name && value) {
+        cookieMap.set(name, value);
+      }
+    });
+    
+    // Check for essential auth cookies
+    const hasAuthCookies = COOKIE_MANAGEMENT.AUTH_COOKIES.every(name => 
+      cookieMap.has(name) && cookieMap.get(name).length > 0
+    );
+    
+    return hasAuthCookies;
+  },
+  
+  // Merge cookies from different sources
+  mergeCookies: (existingCookies, newCookies) => {
+    if (!existingCookies) return newCookies;
+    if (!newCookies) return existingCookies;
+    
+    const cookieMap = new Map();
+    
+    // Add existing cookies first
+    existingCookies.split(';').forEach(cookie => {
+      const [name, value] = cookie.trim().split('=');
+      if (name && value) {
+        cookieMap.set(name, value);
+      }
+    });
+    
+    // Update with new cookies
+    newCookies.split(';').forEach(cookie => {
+      const [name, value] = cookie.trim().split('=');
+      if (name && value) {
+        cookieMap.set(name, value);
+      }
+    });
+    
+    // Convert back to string
+    return Array.from(cookieMap.entries())
+      .map(([name, value]) => `${name}=${value}`)
+      .join('; ');
+  }
+};
+
 function generateCorrelationId() {
   return crypto.randomUUID();
 }
@@ -217,46 +312,23 @@ async function captureCookies(page, fingerprint) {
 async function loadCookiesFromFile() {
   try {
     if (fs.existsSync(COOKIES_FILE)) {
-      // Check file size first
-      const stats = await fs.promises.stat(COOKIES_FILE);
-      const fileSize = stats.size;
+      const data = await fs.promises.readFile(COOKIES_FILE, 'utf8');
+      const cookies = JSON.parse(data);
       
-      // Verify file size meets minimum requirements
-      if (fileSize < 1000) {
-        console.error(`Cookies file is too small: ${fileSize} bytes (minimum 1000 bytes required)`);
-        // Delete the invalid file
-        await fs.promises.unlink(COOKIES_FILE);
-        console.error("Deleted invalid cookies file - will get new cookies");
-        return null;
+      // Validate cookie freshness
+      const cookieString = cookies
+        .map(cookie => `${cookie.name}=${cookie.value}`)
+        .join('; ');
+      
+      if (handleCookies.areCookiesFresh(cookieString)) {
+        return cookies;
       }
-      
-      // File size is valid, proceed with loading
-      const cookiesData = fs.readFileSync(COOKIES_FILE, "utf8");
-      const cookies = JSON.parse(cookiesData);
-      
-      // Also validate that we have cookies
-      if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
-        console.error("Cookies file exists but contains no valid cookies");
-        await fs.promises.unlink(COOKIES_FILE);
-        return null;
-      }
-      
-      console.log(`Loaded valid cookies file (${fileSize} bytes) with ${cookies.length} cookies`);
-      return cookies;
     }
+    return null;
   } catch (error) {
-    console.error("Error loading cookies from file:", error);
-    // Try to delete the file if there was an error parsing it
-    try {
-      if (fs.existsSync(COOKIES_FILE)) {
-        await fs.promises.unlink(COOKIES_FILE);
-        console.error("Deleted corrupted cookies file");
-      }
-    } catch (deleteError) {
-      console.error("Error deleting corrupted cookies file:", deleteError);
-    }
+    console.error('Error loading cookies:', error);
+    return null;
   }
-  return null;
 }
 
 async function getCapturedData(eventId, proxy, forceRefresh = false) {
@@ -656,41 +728,17 @@ async function checkForTicketmasterChallenge(page) {
 // Function to save cookies to a JSON file
 async function saveCookiesToFile(cookies) {
   try {
-    const filePath = "./cookies.json";
+    const cookieData = cookies.map(cookie => ({
+      ...cookie,
+      expires: cookie.expires || Date.now() + COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
+    }));
     
-    // Only save if we have cookies
-    if (!cookies || cookies.length === 0) {
-      console.error("No cookies to save - skipping file write");
-      return false;
-    }
-    
-    // Write cookies to file
-    await fs.promises.writeFile(filePath, JSON.stringify(cookies, null, 2));
-    console.log("Cookies saved to file:", filePath);
-    
-    // Verify file size/content meets minimum requirements
-    try {
-      const stats = await fs.promises.stat(filePath);
-      const fileSize = stats.size;
-      
-      // Check if file is too small (less than 1000 bytes)
-      if (fileSize < 1000) {
-        console.error(`Cookies file is too small: ${fileSize} bytes (minimum 1000 bytes required)`);
-        // Delete the invalid file
-        await fs.promises.unlink(filePath);
-        console.error("Deleted invalid cookies file - will try to get new cookies on next request");
-        return false;
-      }
-      
-      console.log(`Cookies file size: ${fileSize} bytes (valid size)`);
-      return true;
-    } catch (statError) {
-      console.error("Error checking cookies file size:", statError);
-      return false;
-    }
+    await fs.promises.writeFile(
+      COOKIES_FILE,
+      JSON.stringify(cookieData, null, 2)
+    );
   } catch (error) {
-    console.error("Error saving cookies to file:", error);
-    return false;
+    console.error('Error saving cookies:', error);
   }
 }
 
@@ -874,24 +922,151 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
   }
 };
 
-// Extracted API call logic to reduce duplicate code
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
-  // Maximum retries and delay configuration
-  const maxRetries = 3;
-  const baseDelayMs = 500;
-  const maxDelayMs = 2000;
-  const jitterFactor = 0.2; // 20% jitter
+// Enhanced browser fingerprinting
+const generateEnhancedFingerprint = () => {
+  const baseFingerprint = BrowserFingerprint.generate();
   
-  // Track success metrics for this call
+  // Add more realistic browser characteristics
+  return {
+    ...baseFingerprint,
+    screen: {
+      ...baseFingerprint.screen,
+      colorDepth: Math.random() > 0.5 ? 24 : 30,
+      pixelRatio: Math.random() > 0.5 ? 1 : 2,
+    },
+    language: baseFingerprint.language,
+    timezone: baseFingerprint.timezone,
+    platform: Math.random() > 0.5 ? 'Win32' : 'MacIntel',
+    deviceMemory: Math.random() > 0.5 ? 8 : 16,
+    hardwareConcurrency: Math.random() > 0.5 ? 4 : 8,
+    webglVendor: Math.random() > 0.5 ? 'Google Inc.' : 'Intel Inc.',
+    webglRenderer: Math.random() > 0.5 ? 'ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)' : 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)',
+  };
+};
+
+// Enhanced human behavior simulation
+const simulateEnhancedHumanBehavior = async (page) => {
+  try {
+    // Random delays between actions
+    const delays = [100, 200, 300, 400, 500];
+    const randomDelay = () => delays[Math.floor(Math.random() * delays.length)];
+    
+    // Random mouse movements
+    const viewportSize = page.viewportSize();
+    if (viewportSize) {
+      const steps = 5 + Math.floor(Math.random() * 5);
+      for (let i = 0; i < steps; i++) {
+        await page.mouse.move(
+          Math.floor(Math.random() * viewportSize.width),
+          Math.floor(Math.random() * viewportSize.height),
+          { steps: 3 + Math.floor(Math.random() * 3) }
+        );
+        await page.waitForTimeout(randomDelay());
+      }
+    }
+    
+    // Random scrolling
+    const scrollAmount = Math.floor(Math.random() * 500) + 100;
+    const scrollSteps = 3 + Math.floor(Math.random() * 3);
+    const stepSize = scrollAmount / scrollSteps;
+    
+    for (let i = 0; i < scrollSteps; i++) {
+      await page.mouse.wheel(0, stepSize);
+      await page.waitForTimeout(randomDelay());
+    }
+    
+    // Random keyboard activity
+    if (Math.random() > 0.7) {
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(randomDelay());
+    }
+    
+    // Random viewport resizing
+    if (Math.random() > 0.8) {
+      const newWidth = 1024 + Math.floor(Math.random() * 500);
+      const newHeight = 768 + Math.floor(Math.random() * 300);
+      await page.setViewportSize({ width: newWidth, height: newHeight });
+      await page.waitForTimeout(randomDelay());
+    }
+  } catch (error) {
+    console.error('Error in human behavior simulation:', error);
+  }
+};
+
+// Enhanced request headers
+const generateEnhancedHeaders = (fingerprint, cookies) => {
+  try {
+    // Ensure we have valid inputs
+    if (!fingerprint) {
+      console.warn('No fingerprint provided, using default values');
+      fingerprint = {
+        language: 'en-US',
+        timezone: 'America/New_York',
+        screen: { width: 1920, height: 1080 }
+      };
+    }
+
+    if (!cookies) {
+      console.warn('No cookies provided, using empty string');
+      cookies = '';
+    }
+
+    const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
+    const acceptLanguages = ['en-US,en;q=0.9', 'en-GB,en;q=0.9', 'en-CA,en;q=0.9'];
+    const acceptEncodings = ['gzip, deflate, br', 'gzip, deflate', 'br'];
+    
+    return {
+      'User-Agent': userAgent,
+      'Accept': '*/*',
+      'Accept-Language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
+      'Accept-Encoding': acceptEncodings[Math.floor(Math.random() * acceptEncodings.length)],
+      'Connection': 'keep-alive',
+      'Referer': 'https://www.ticketmaster.com/',
+      'Origin': 'https://www.ticketmaster.com',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-site',
+      'Pragma': 'no-cache',
+      'Cache-Control': 'no-cache',
+      'Cookie': cookies,
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
+      'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"`,
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': Math.random() > 0.5 ? 'Windows' : 'macOS',
+    };
+  } catch (error) {
+    console.error('Error generating enhanced headers:', error);
+    // Return a basic set of headers as fallback
+    return {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Referer': 'https://www.ticketmaster.com/',
+      'Origin': 'https://www.ticketmaster.com',
+      'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
+      'Cookie': cookies || '',
+    };
+  }
+};
+
+// Enhanced API call with better retry logic
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
+  const maxRetries = 3;
+  const baseDelayMs = 1000; // Increased base delay
+  const maxDelayMs = 5000; // Increased max delay
+  const jitterFactor = 0.3; // Increased jitter
+  
   let attempts = 0;
   let lastError = null;
   const startTime = Date.now();
   
-  // IP rotation strategies for 403s (reuse from proxy pool)
+  // Enhanced proxy rotation
   let alternativeProxies = [];
   try {
-    // Pre-select a few alternative proxies to try if we get blocked
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) { // Increased alternative proxies
       const { proxyAgent: altAgent, proxy: altProxy } = GetProxy();
       if (altAgent && altProxy) {
         alternativeProxies.push({ proxyAgent: altAgent, proxy: altProxy });
@@ -901,414 +1076,85 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     console.log(`Could not prepare alternative proxies: ${err.message}`);
   }
   
-  // Enhanced version with more effective randomization techniques for 403s
-  const generateAlternativeHeaders = () => {
-    const fp = BrowserFingerprint.generate();
-    const ua = BrowserFingerprint.generateUserAgent(fp);
-    
-    // Extract just the essential cookie values if we have them
-    let cookieParts = [];
-    if (facetHeader.Cookie) {
-      try {
-        // Try to preserve critical authentication cookies like session ID, auth tokens
-        const cookieStr = facetHeader.Cookie;
-        const cookiesSplit = cookieStr.split(';');
-        const essentialCookies = ['SESSION', 'TM_TKTS', 'TMPS', 'aud', 'TMRANDOM', 'tmTrackID', 'at'];
-        
-        cookiesSplit.forEach(cookie => {
-          const name = cookie.split('=')[0]?.trim();
-          if (essentialCookies.some(essential => name?.includes(essential))) {
-            cookieParts.push(cookie.trim());
-          }
-        });
-      } catch (error) {
-        console.log(`Error extracting cookies: ${error.message}`);
-      }
-    }
-    
-    // Add subtle timezone and language variations
-    const languages = ["en-US", "en-GB", "en-CA", "en"];
-    const timezones = ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London"];
-    
-    // Randomize accepted formats slightly
-    const accepts = [
-      "*/*",
-      "application/json, text/plain, */*",
-      "application/json, text/javascript, */*; q=0.01"
-    ];
-    
-    // Common mobile and desktop User-Agent patterns
-    const useNewUa = Math.random() > 0.5;
-    const userAgent = useNewUa ? ua : [
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-    ][Math.floor(Math.random() * 4)];
-    
-    return {
-      "User-Agent": userAgent,
-      "Accept": accepts[Math.floor(Math.random() * accepts.length)],
-      "Accept-Language": languages[Math.floor(Math.random() * languages.length)],
-      "Accept-Encoding": "gzip, deflate, br",
-      "Referer": "https://www.ticketmaster.com/",
-      "Origin": "https://www.ticketmaster.com",
-      "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
-      "x-tm-api-key": "b462oi7fic6pehcdkzony5bxhe",
-      "tmps-correlation-id": generateCorrelationId(),
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
-      "sec-ch-ua": `"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"`,
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": Math.random() > 0.2 ? "Windows" : "macOS",
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
-      "Cookie": cookieParts.length > 0 ? cookieParts.join('; ') : undefined
-    };
-  };
-  
-  // Helper to create an optimized version of the request with retries
+  // Enhanced request with better error handling
   const makeRequestWithRetry = async (url, headers, agent, attemptNum = 0, isRetryWithNewProxy = false) => {
-    // Add jitter to prevent thundering herd pattern and appear more human
     const jitter = 1 + (Math.random() * jitterFactor * 2 - jitterFactor);
     const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
     
     if (attemptNum > 0) {
-      // Wait with exponential backoff before retry
       await new Promise(resolve => setTimeout(resolve, delay));
-      console.log(`Retry attempt ${attemptNum} for ${eventId} (${url.includes('mapsapi') ? 'map' : 'facet'} API) after ${delay.toFixed(0)}ms`);
+      console.log(`Retry attempt ${attemptNum} for ${eventId} after ${delay.toFixed(0)}ms`);
     }
     
-    // Create a fresh abort controller for each attempt
-    let abortController = new AbortController();
-    const timeout = setTimeout(() => {
-      abortController.abort();
-      console.log(`Request aborted due to timeout for ${eventId}`);
-    }, CONFIG.PAGE_TIMEOUT);
-    
     try {
-      // Add slight randomization to headers to avoid fingerprinting
-      const modifiedHeaders = { ...headers };
+      // Add random delay before request
+      await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 400));
       
-      // IMPORTANT: Trim cookie length if it's too large (Ticketmaster has limits)
-      if (modifiedHeaders.Cookie && modifiedHeaders.Cookie.length > 2000) {
-        modifiedHeaders.Cookie = trimCookieHeader(modifiedHeaders.Cookie);
-        console.log(`Trimmed cookie header to ${modifiedHeaders.Cookie.length} chars for ${eventId}`);
-      }
-      
-      // Slightly randomize headers while keeping essential values
-      if (attemptNum > 0) {
-        // Add "random" parameters that won't affect functionality
-        modifiedHeaders['X-Request-ID'] = generateCorrelationId();
-        modifiedHeaders['X-Attempt-Num'] = attemptNum.toString();
-        
-        // IMPORTANT: Remove If-Modified-Since header to avoid 304 errors
-        // The server may return 304 Not Modified if we send this with a future date
-        delete modifiedHeaders['If-Modified-Since'];
-        
-        // Add subtle browser-like variations
-        if (Math.random() > 0.5) {
-          modifiedHeaders['X-Requested-With'] = 'XMLHttpRequest';
-        }
-        
-        // Add random viewport size to appear more like a real browser
-        const viewportWidth = 1200 + Math.floor(Math.random() * 400);
-        const viewportHeight = 800 + Math.floor(Math.random() * 300);
-        modifiedHeaders['X-Viewport-Size'] = `${viewportWidth}x${viewportHeight}`;
-        
-        // Mimic browser behavior by changing headers slightly based on destination
-        if (url.includes('mapsapi')) {
-          modifiedHeaders['Sec-Fetch-Site'] = 'cross-site';
-        } else {
-          modifiedHeaders['Sec-Fetch-Site'] = 'same-site';
-        }
-      }
-      
-      // Make the request using browser-like settings
       const response = await axios.get(url, {
         httpsAgent: agent,
-        headers: modifiedHeaders,
-        timeout: CONFIG.PAGE_TIMEOUT,
-        signal: abortController.signal,
-        // Update validateStatus to accept 304 Not Modified as a valid response
+        headers: {
+          ...headers,
+          'X-Request-ID': generateCorrelationId(),
+          'X-Attempt-Num': attemptNum.toString(),
+        },
+        timeout: 30000,
         validateStatus: (status) => status === 200 || status === 304,
       });
       
-      clearTimeout(timeout);
-      
-      // Handle 304 Not Modified responses
-      if (response.status === 304) {
-        console.log(`Received 304 Not Modified for ${eventId} - this is OK, using cached data`);
-        // For 304 responses, we need to get data from cache or make a fresh request
-        // without the If-Modified-Since header
-        if (attemptNum === 0) {
-          // Try again without cache validation headers
-          const cleanHeaders = { ...modifiedHeaders };
-          // Remove all cache-related headers
-          delete cleanHeaders['If-Modified-Since'];
-          delete cleanHeaders['If-None-Match'];
-          return makeRequestWithRetry(url, cleanHeaders, agent, attemptNum + 1);
-        }
-      }
-      
       return response.data;
     } catch (error) {
-      clearTimeout(timeout);
+      const is403Error = error.response?.status === 403;
+      const is429Error = error.response?.status === 429;
       
-      // Check if this is a 403 error
-      const is403Error = error.response && error.response.status === 403;
-      const is429Error = error.response && error.response.status === 429;
-      const is304Error = error.response && error.response.status === 304;
-      const is400Error = error.response && error.response.status === 400;
-      const isNetworkError = !error.response && error.code;
-      
-      // Special handling for 400 Bad Request - likely caused by malformed request
-      if (is400Error) {
-        console.log(`400 Bad Request for ${eventId} - likely invalid request format or cookie issue`);
-        
-        // Try with minimal headers and essential cookies only
-        if (attemptNum < maxRetries) {
-          // Create minimal headers with only essential cookies
-          const minimalHeaders = { 
-            "User-Agent": headers["User-Agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.ticketmaster.com/",
-            "Origin": "https://www.ticketmaster.com",
-            "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe"
-          };
-          
-          // Extract just essential cookies if we have them
-          if (headers.Cookie) {
-            const essentialCookieString = extractEssentialCookies(headers.Cookie);
-            if (essentialCookieString) {
-              minimalHeaders["Cookie"] = essentialCookieString;
-            }
-          }
-          
-          console.log(`Retrying ${eventId} with minimal headers after 400 error`);
-          return makeRequestWithRetry(url, minimalHeaders, agent, attemptNum + 1);
+      if ((is403Error || is429Error) && attemptNum < maxRetries) {
+        if (isRetryWithNewProxy && alternativeProxies.length > 0) {
+          const altProxyData = alternativeProxies.shift();
+          console.log(`Switching to alternative proxy for ${eventId} retry`);
+          return makeRequestWithRetry(url, headers, altProxyData.proxyAgent, attemptNum + 1, true);
         }
-      }
-      
-      // Special handling for 304 Not Modified errors
-      if (is304Error) {
-        console.log(`304 Not Modified for ${eventId} - trying with fresh request`);
-        // Make a new request without cache validation headers
-        const cleanHeaders = { ...headers };
-        delete cleanHeaders['If-Modified-Since'];
-        delete cleanHeaders['If-None-Match'];
-        delete cleanHeaders['If-Match'];
-        delete cleanHeaders['Cache-Control'];
-        // Add explicit cache-busting
-        cleanHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
-        cleanHeaders['Pragma'] = 'no-cache';
-        cleanHeaders['Expires'] = '0';
         
-        // Add a random query parameter to avoid cache
-        const cacheBuster = `?_=${Date.now()}`;
-        const urlWithBuster = url.includes('?') 
-          ? `${url}&_=${Date.now()}` 
-          : `${url}?_=${Date.now()}`;
-          
-        return makeRequestWithRetry(urlWithBuster, cleanHeaders, agent, attemptNum + 1);
-      }
-      
-      // On 403/429 errors, we need to try a different approach
-      if (is403Error || is429Error) {
-        console.log(`${error.response.status} error for ${eventId} (${url.includes('mapsapi') ? 'map' : 'facet'} API)`);
-        
-        if (attemptNum < maxRetries) {
-          // Try with alternative headers or proxy if available
-          if (is403Error && alternativeProxies.length > 0 && (attemptNum > 0 || isRetryWithNewProxy)) {
-            // On second+ retry with 403, try a different proxy
-            const altProxyData = alternativeProxies.shift();
-            console.log(`Switching to alternative proxy for ${eventId} retry`);
-            
-            // Try with the alternative proxy and completely fresh headers
-            const altHeaders = generateAlternativeHeaders();
-            return makeRequestWithRetry(url, altHeaders, altProxyData.proxyAgent, attemptNum + 1, true);
-          } else {
-            // Try with fresh headers but same proxy
-            const altHeaders = generateAlternativeHeaders();
-            
-            // For stubborn 403s, try completely different approach
-            if (attemptNum > 1) {
-              // Further randomize request properties on persistent 403s
-              // Add small delay to appear more human-like
-              await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-              
-              // Try a different approach to the request
-              console.log(`Using alternative request approach for persistent 403s on ${eventId}`);
-              
-              // Construct a more browser-like request to attempt to bypass protections
-              const browserLikeHeaders = {
-                ...altHeaders,
-                "Referer": `https://www.ticketmaster.com/event/${eventId}`,
-                "Host": new URL(url).hostname,
-                "Connection": "keep-alive",
-                "TE": "trailers"
-              };
-              
-              return makeRequestWithRetry(url, browserLikeHeaders, agent, attemptNum + 1);
-            }
-            
-            return makeRequestWithRetry(url, altHeaders, agent, attemptNum + 1);
-          }
-        }
-      } else if (isNetworkError && attemptNum < maxRetries) {
-        // For network errors, simply retry with the same parameters
-        console.log(`Network error for ${eventId}: ${error.message}, retrying...`);
-        return makeRequestWithRetry(url, headers, agent, attemptNum + 1);
+        // Try with fresh headers
+        const newFingerprint = generateEnhancedFingerprint();
+        const newHeaders = generateEnhancedHeaders(newFingerprint, headers.Cookie);
+        return makeRequestWithRetry(url, newHeaders, agent, attemptNum + 1);
       }
       
       throw error;
     }
   };
   
-  // Function to trim cookie header to a reasonable size
-  // This prevents 400 Bad Request errors from overly large cookies
-  function trimCookieHeader(cookieString) {
-    if (!cookieString || cookieString.length < 2000) return cookieString;
-    
-    // Most important cookies for Ticketmaster API functionality
-    const essentialCookieNames = [
-      'TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit', 'CMPS', 'CMID', 
-      'MUID', 'au_id', 'aud', 'tmTrackID', 'TapAd_DID', 'uid'
-    ];
-    
-    // Split cookie string into individual cookies
-    const cookies = cookieString.split(';').map(c => c.trim());
-    
-    // First pass: keep only essential cookies
-    let result = cookies.filter(cookie => {
-      const name = cookie.split('=')[0]?.trim();
-      return essentialCookieNames.some(essential => name === essential);
-    });
-    
-    // If we don't have enough essential cookies, add some of the first cookies
-    // to ensure we have at least a few cookies in the request
-    if (result.length < 3) {
-      // Add some of the first cookies from the original string (up to 5)
-      result = result.concat(cookies.slice(0, 5).filter(c => !result.includes(c)));
-    }
-    
-    return result.join('; ');
-  }
-  
-  // Function to extract just the essential cookies from a cookie string
-  function extractEssentialCookies(cookieString) {
-    if (!cookieString) return '';
-    
-    // Most critical cookies for authentication and functionality
-    const criticalCookies = ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'];
-    
-    // Try to extract just these cookies
-    const cookies = cookieString.split(';').map(c => c.trim());
-    const essential = cookies.filter(cookie => {
-      const name = cookie.split('=')[0]?.trim();
-      return criticalCookies.some(critical => name === critical);
-    });
-    
-    // Return minimal set of cookies
-    return essential.join('; ');
-  }
-  
   try {
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
     const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
-
-    // If mapHeader is not provided, use facetHeader with adjustments
-    const effectiveMapHeader = mapHeader || {
-      ...facetHeader,
-      Accept: "*/*",
-      "Content-Encoding": "gzip"
-    };
     
-    // Randomize request order slightly to appear more human-like
+    // Randomize request order
     const randomizeOrder = Math.random() > 0.5;
-    
-    // Stagger requests by a small random amount (20-100ms)
-    const staggerDelay = 20 + Math.floor(Math.random() * 80);
-    
-    // Sometimes add a fake visit to the event page first to establish session context
-    if (Math.random() > 0.6) {
-      try {
-        const eventPageUrl = `https://www.ticketmaster.com/event/${eventId}`;
-        console.log(`Making context-establishing request to ${eventPageUrl} for ${eventId}`);
-        
-        // Make a HEAD request to the event page to establish browser context
-        await axios({
-          method: 'head',
-          url: eventPageUrl,
-          headers: {
-            ...facetHeader,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1"
-          },
-          httpsAgent: proxyAgent,
-          timeout: 5000, // Short timeout as we don't need a full response
-        }).catch(e => {
-          // Ignore errors - this is just to establish some context
-          console.log(`Context request for ${eventId} failed (this is okay): ${e.message}`);
-        });
-        
-        // Small delay after the context request
-        await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
-      } catch (contextError) {
-        // Ignore any errors from the context-establishing request
-      }
-    }
-    
-    // Make both requests with automatic retry logic
     let DataMap, DataFacets;
     
     if (randomizeOrder) {
-      // Map API first
-      DataMap = await makeRequestWithRetry(mapUrl, effectiveMapHeader, proxyAgent);
-      
-      // Small delay between requests
-      await new Promise(resolve => setTimeout(resolve, staggerDelay));
-      
-      // Then Facet API
+      DataMap = await makeRequestWithRetry(mapUrl, mapHeader || facetHeader, proxyAgent);
+      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
       DataFacets = await makeRequestWithRetry(facetUrl, facetHeader, proxyAgent);
     } else {
-      // Facet API first
       DataFacets = await makeRequestWithRetry(facetUrl, facetHeader, proxyAgent);
-      
-      // Small delay between requests
-      await new Promise(resolve => setTimeout(resolve, staggerDelay));
-      
-      // Then Map API
-      DataMap = await makeRequestWithRetry(mapUrl, effectiveMapHeader, proxyAgent);
+      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+      DataMap = await makeRequestWithRetry(mapUrl, mapHeader || facetHeader, proxyAgent);
     }
-
+    
     if (!DataFacets || !DataMap) {
-      console.log(`Failed to get data from APIs for event ${eventId}`);
-      return false;
+      throw new Error('Failed to get data from APIs');
     }
-
+    
     console.log(`API requests completed successfully for event ${eventId} in ${Date.now() - startTime}ms`);
-    const dataGet = GenerateNanoPlaces(DataFacets?.facets);
-    const finalData = AttachRowSection(
-      dataGet,
+    return AttachRowSection(
+      GenerateNanoPlaces(DataFacets?.facets),
       DataMap,
       DataFacets?._embedded?.offer,
       { eventId, inHandDate: event?.inHandDate },
       DataFacets?._embedded?.description
     );
-
-    return finalData;
   } catch (error) {
     console.error(`API error for event ${eventId}:`, error);
-    // Track errors by type to identify patterns
-    const errorType = error.response?.status || error.code || 'unknown';
-    console.error(`Error type: ${errorType}, attempt ${attempts}/${maxRetries}`);
     return false;
   }
 }

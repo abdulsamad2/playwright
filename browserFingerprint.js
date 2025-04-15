@@ -144,82 +144,34 @@ export class BrowserFingerprint {
   }
 
   static generateUserAgent(fingerprint) {
-    const { platform, browser, mobileModel } = fingerprint;
-    const isMobile = platform.type === "mobile" || platform.type === "tablet";
+    if (!fingerprint) {
+      console.warn('No fingerprint provided, using default user agent');
+      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    }
 
-    // Mobile User Agents
-    if (isMobile) {
-      if (platform.name === "iPhone" || platform.name === "iPad") {
-        return `Mozilla/5.0 (${platform.name}; CPU ${
-          platform.name
-        } OS ${platform.version.replace(
-          /\./g,
-          "_"
-        )} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${
-          browser.version
-        } Mobile/${mobileModel} Safari/604.1`;
+    try {
+      // Handle platform object or string
+      let platformString;
+      if (typeof fingerprint.platform === 'object') {
+        // If platform is an object, construct the string from its properties
+        const { name, version, arch } = fingerprint.platform;
+        platformString = `${name} ${version}${arch ? `; ${arch}` : ''}`;
+      } else {
+        // If platform is a string, use it directly
+        platformString = fingerprint.platform || 'Windows NT 10.0';
       }
 
-      if (platform.name === "Android") {
-        if (browser.name === "Samsung Internet") {
-          return `Mozilla/5.0 (Linux; Android ${platform.version}; ${mobileModel}) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/${browser.version} Chrome/120.0.0.0 Mobile Safari/537.36`;
-        }
-        return `Mozilla/5.0 (Linux; Android ${platform.version}; ${mobileModel}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version} Mobile Safari/537.36`;
-      }
-    }
+      const webkitVersion = '537.36';
+      const chromeVersion = '120.0.0.0';
+      const safariVersion = '537.36';
 
-    // Desktop User Agents
-    if (browser.name === "Chrome") {
-      return `Mozilla/5.0 (${
-        platform.name === "Windows"
-          ? `Windows NT ${
-              platform.version === "11" ? "11.0" : "10.0"
-            }; Win64; x64`
-          : platform.name === "Macintosh"
-          ? `Macintosh; ${platform.arch} Mac OS X ${platform.version.replace(
-              /\./g,
-              "_"
-            )}`
-          : "X11; Linux x86_64"
-      }) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${
-        browser.version
-      } Safari/537.36`;
+      // Ensure platform string is properly formatted
+      const formattedPlatform = platformString.replace(/\s+/g, ' ').trim();
+      
+      return `Mozilla/5.0 (${formattedPlatform}) AppleWebKit/${webkitVersion} (KHTML, like Gecko) Chrome/${chromeVersion} Safari/${safariVersion}`;
+    } catch (error) {
+      console.error('Error generating user agent:', error);
+      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     }
-
-    if (browser.name === "Firefox") {
-      return `Mozilla/5.0 (${
-        platform.name === "Windows"
-          ? "Windows NT 10.0; Win64; x64"
-          : platform.name === "Macintosh"
-          ? `Macintosh; ${platform.arch} Mac OS X ${platform.version.replace(
-              /\./g,
-              "_"
-            )}`
-          : "X11; Linux x86_64"
-      }; rv:109.0) Gecko/20100101 Firefox/${browser.version}`;
-    }
-
-    if (browser.name === "Safari") {
-      return `Mozilla/5.0 (Macintosh; ${
-        platform.arch
-      } Mac OS X ${platform.version.replace(
-        /\./g,
-        "_"
-      )}) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${
-        browser.version
-      } Safari/605.1.15`;
-    }
-
-    if (browser.name === "Edge") {
-      return `Mozilla/5.0 (${
-        platform.name === "Windows"
-          ? "Windows NT 10.0; Win64; x64"
-          : "X11; Linux x86_64"
-      }) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${
-        browser.version
-      } Safari/537.36 Edg/${browser.version}`;
-    }
-
-    return "Unknown User Agent";
   }
 }
