@@ -12,15 +12,18 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 const MAX_UPDATE_INTERVAL = 110000; // Strict 110-second update requirement (buffer for 2-minute rule)
 const CONCURRENT_LIMIT = Math.max(50, Math.floor(cpus().length * 4)); // Scale to 4x CPU cores for 32GB system
 const MAX_RETRIES = 3; // Reduced to 3 for faster failure detection
-const SCRAPE_TIMEOUT = 25000; // Reduced timeout to 25 seconds
+const SCRAPE_TIMEOUT = 50000; // Reduced timeout to 25 seconds
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 4, 60); // Larger batches for high-memory systems
 const RETRY_BACKOFF_MS = 2000; // Reduced base backoff time for faster retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 60000; // Minimum 1 minute between scrapes
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 80000; // Minimum 1 minute between scrapes
 const URGENT_THRESHOLD = 100000; // Events needing update within 20 seconds of deadline (tighter window)
 
 // New cooldown settings - shorter cooldowns
 const SHORT_COOLDOWNS = [2000, 4000, 8000]; // 2s, 4s, 8s - faster recovery
 const LONG_COOLDOWN_MINUTES = 5; // Reduced to 5 minutes for persistently failing events
+
+// Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
+const LOG_LEVEL = 2; // Default to warnings and errors only
 
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
@@ -72,26 +75,38 @@ class ScraperManager {
   }
 
   logWithTime(message, type = "info") {
+    // Map log levels to numeric values
+    const logLevels = {
+      error: 0,
+      warning: 1,
+      info: 2,
+      success: 2,
+      debug: 3
+    };
+
+    // Skip logging if level is higher than configured LOG_LEVEL
+    if (logLevels[type] > LOG_LEVEL) {
+      return;
+    }
+
     const now = moment();
-    const runningTime = moment.duration(now.diff(this.startTime));
     const formattedTime = now.format("YYYY-MM-DD HH:mm:ss");
 
-    const statusEmoji =
-      {
-        success: "✅",
-        error: "❌",
-        warning: "⚠️",
-        info: "ℹ️",
-      }[type] || "📝";
+    const statusEmoji = {
+      success: "✅",
+      error: "❌",
+      warning: "⚠️",
+      info: "ℹ️",
+      debug: "🔍"
+    }[type] || "📝";
 
-    // Only log detailed stats in info, success, or error messages to reduce noise
-    if (["info", "success", "error"].includes(type)) {
+    // Only include detailed stats for errors or if we're at the highest verbosity
+    if (type === "error" || LOG_LEVEL >= 3) {
+      const runningTime = moment.duration(now.diff(this.startTime));
       console.log(
         `${statusEmoji} [${formattedTime}] ${message}\n` +
-          `   Runtime: ${Math.floor(
-            runningTime.asHours()
-          )}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
-          `   Active: ${this.activeJobs.size}/${CONCURRENT_LIMIT}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}, Retry Queue: ${this.retryQueue.length}`
+        `   Runtime: ${Math.floor(runningTime.asHours())}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
+        `   Active: ${this.activeJobs.size}/${CONCURRENT_LIMIT}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}, Retry Queue: ${this.retryQueue.length}`
       );
     } else {
       console.log(`${statusEmoji} [${formattedTime}] ${message}`);
@@ -151,13 +166,16 @@ class ScraperManager {
     if (this.cooldownEvents.has(eventId)) {
       const cooldownUntil = this.cooldownEvents.get(eventId);
       if (moment().isBefore(cooldownUntil)) {
-        const timeLeft = moment
-          .duration(cooldownUntil.diff(moment()))
-          .asSeconds();
-        this.logWithTime(
-          `Skipping ${eventId}: In cooldown for ${timeLeft.toFixed(1)}s more`,
-          "warning"
-        );
+        // Only log at higher verbosity levels
+        if (LOG_LEVEL >= 2) {
+          const timeLeft = moment
+            .duration(cooldownUntil.diff(moment()))
+            .asSeconds();
+          this.logWithTime(
+            `Skipping ${eventId}: In cooldown for ${timeLeft.toFixed(1)}s more`,
+            "debug"
+          );
+        }
         return true;
       } else {
         this.cooldownEvents.delete(eventId);
@@ -166,7 +184,10 @@ class ScraperManager {
 
     // Check if event is already being processed
     if (this.processingEvents.has(eventId)) {
-      this.logWithTime(`Skipping ${eventId}: Already processing`, "warning");
+      // Only log at higher verbosity levels
+      if (LOG_LEVEL >= 3) {
+        this.logWithTime(`Skipping ${eventId}: Already processing`, "debug");
+      }
       return true;
     }
 
@@ -176,12 +197,15 @@ class ScraperManager {
       lastUpdate &&
       moment().diff(lastUpdate) < MIN_TIME_BETWEEN_EVENT_SCRAPES
     ) {
-      this.logWithTime(
-        `Skipping ${eventId}: Too soon since last scrape (${moment().diff(
-          lastUpdate
-        )}ms)`,
-        "warning"
-      );
+      // Only log at higher verbosity levels
+      if (LOG_LEVEL >= 3) {
+        this.logWithTime(
+          `Skipping ${eventId}: Too soon since last scrape (${moment().diff(
+            lastUpdate
+          )}ms)`,
+          "debug"
+        );
+      }
       return true;
     }
 
@@ -193,7 +217,10 @@ class ScraperManager {
     // Only refresh headers if they haven't been refreshed in last 5 minutes
     if (!lastRefresh || moment().diff(lastRefresh) > 300000) {
       try {
-        this.logWithTime(`Refreshing headers for ${eventId}`);
+        // Only log at higher verbosity levels
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Refreshing headers for ${eventId}`, "debug");
+        }
         
         // New: Check if we have successful headers in the rotation pool first
         if (this.headerRotationPool.length > 0) {
@@ -241,7 +268,9 @@ class ScraperManager {
               fingerprint: capturedState.fingerprint
             };
           } else {
-            this.logWithTime(`No valid headers found for ${eventId}`, "warning");
+            if (LOG_LEVEL >= 1) {
+              this.logWithTime(`No valid headers found for ${eventId}`, "warning");
+            }
             return null;
           }
           
@@ -276,10 +305,12 @@ class ScraperManager {
     // Avoid resetting cookies too frequently (at most once per hour)
     const now = moment();
     if (this.lastCookieReset && now.diff(this.lastCookieReset) < 60 * 60 * 1000) {
-      this.logWithTime(
-        `Skipping cookie reset - last reset was ${moment.duration(now.diff(this.lastCookieReset)).humanize()} ago`,
-        "warning"
-      );
+      if (LOG_LEVEL >= 1) {
+        this.logWithTime(
+          `Skipping cookie reset - last reset was ${moment.duration(now.diff(this.lastCookieReset)).humanize()} ago`,
+          "warning"
+        );
+      }
       return;
     }
     
@@ -292,10 +323,14 @@ class ScraperManager {
         
         // Delete cookies.json
         await fs.unlink(this.cookiesPath);
-        this.logWithTime("Deleted cookies.json", "info");
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime("Deleted cookies.json", "info");
+        }
       } catch (e) {
         // File doesn't exist, that's fine
-        this.logWithTime("No cookies.json file found to delete", "info");
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime("No cookies.json file found to delete", "info");
+        }
       }
       
       // Clear all cached headers
@@ -392,7 +427,10 @@ class ScraperManager {
             [...newSeatsHash].some((s) => !currentSeatsHash.has(s));
 
           if (hasChanges) {
-            this.logWithTime(`Seat changes detected for event ${eventId}, updating database`, "info");
+            // Only log at appropriate log level
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(`Seat changes detected for event ${eventId}, updating database`, "info");
+            }
             
             // Bulk delete and insert for better performance
             await ConsecutiveGroup.deleteMany({ eventId }).session(session);
@@ -452,9 +490,13 @@ class ScraperManager {
               await ConsecutiveGroup.insertMany(chunk, { session });
             }
             
-            this.logWithTime(`Updated ${groupsToInsert.length} consecutive groups for event ${eventId}`, "success");
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(`Updated ${groupsToInsert.length} consecutive groups for event ${eventId}`, "success");
+            }
           } else {
-            this.logWithTime(`No seat changes detected for event ${eventId}`, "info");
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(`No seat changes detected for event ${eventId}`, "debug");
+            }
           }
         }
 
@@ -467,12 +509,15 @@ class ScraperManager {
 
       // Update the event's update schedule for next update
       this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
-      this.logWithTime(
-        `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
-          2
-        )}ms, next update by ${this.eventUpdateSchedule.get(eventId).format('HH:mm:ss')}`,
-        "success"
-      );
+      
+      if (LOG_LEVEL >= 2) {
+        this.logWithTime(
+          `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
+            2
+          )}ms, next update by ${this.eventUpdateSchedule.get(eventId).format('HH:mm:ss')}`,
+          "success"
+        );
+      }
     } catch (error) {
       await this.logError(eventId, "DATABASE_ERROR", error);
       throw error;
@@ -494,7 +539,9 @@ class ScraperManager {
       
       // Only process critical events when circuit breaker is tripped
       if (timeSinceUpdate < MAX_UPDATE_INTERVAL - 20000) {
-        this.logWithTime(`Skipping ${eventId} temporarily: Circuit breaker tripped`, "warning");
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Skipping ${eventId} temporarily: Circuit breaker tripped`, "info");
+        }
         return false;
       }
     }
@@ -504,7 +551,10 @@ class ScraperManager {
     this.activeJobs.set(eventId, moment());
 
     try {
-      this.logWithTime(`Scraping ${eventId} (Attempt ${retryCount + 1})`);
+      // Only log at higher verbosity levels
+      if (LOG_LEVEL >= 2) {
+        this.logWithTime(`Scraping ${eventId} (Attempt ${retryCount + 1})`, "info");
+      }
 
       // Use passed proxy if available, otherwise get a new one
       let proxyToUse = proxy;
@@ -529,7 +579,9 @@ class ScraperManager {
       }
 
       if (event.Skip_Scraping) {
-        this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
+        }
         // Still update the schedule for next time
         this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
         return true;
@@ -540,20 +592,23 @@ class ScraperManager {
       const lastUpdate = this.eventUpdateTimestamps.get(eventId);
       const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
       
-      // Use cache for non-critical updates to reduce API load
-      if (cachedResponse && timeSinceUpdate < MAX_UPDATE_INTERVAL - 30000) {
-        // Cache is recent enough for non-critical updates
-        await this.updateEventMetadata(eventId, cachedResponse);
-        
-        this.successCount++;
-        this.lastSuccessTime = moment();
-        this.eventUpdateTimestamps.set(eventId, moment());
-        this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
-        
-        // Log as cache hit
-        this.logWithTime(`Using cached data for ${eventId} (non-critical update)`, "success");
-        return true;
-      }
+      // DISABLED CACHING: Always fetch fresh data to ensure we have the latest information
+      // Previously, the code used cache for non-critical updates to reduce API load
+      // if (cachedResponse && timeSinceUpdate < MAX_UPDATE_INTERVAL - 30000) {
+      //   // Cache is recent enough for non-critical updates
+      //   await this.updateEventMetadata(eventId, cachedResponse);
+      //   
+      //   this.successCount++;
+      //   this.lastSuccessTime = moment();
+      //   this.eventUpdateTimestamps.set(eventId, moment());
+      //   this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
+      //   
+      //   // Log as cache hit
+      //   if (LOG_LEVEL >= 2) {
+      //     this.logWithTime(`Using cached data for ${eventId} (non-critical update)`, "success");
+      //   }
+      //   return true;
+      // }
 
       // Refresh headers with backoff/caching strategy
       const headers = await this.refreshEventHeaders(eventId);
@@ -573,7 +628,8 @@ class ScraperManager {
         throw new Error("Empty or invalid scrape result");
       }
       
-      // Update the response cache with successful result
+      // We're still storing in the cache for metrics/monitoring purposes
+      // but we'll never use the cached results for returning to the client
       this.responseCache.set(eventId, result);
       
       // Mark this header as successful
@@ -675,10 +731,13 @@ class ScraperManager {
         // Use the short, progressive cooldowns for initial retries
         backoffTime = SHORT_COOLDOWNS[retryCount];
         
-        this.logWithTime(
-          `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
-          "warning"
-        );
+        // Log only at appropriate levels
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
+            "warning"
+          );
+        }
       } else {
         // For persistent failures, use a longer cooldown and mark as stopped
         backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // Convert minutes to ms
@@ -729,7 +788,9 @@ class ScraperManager {
               } 
             }
           );
-          this.logWithTime(`Marked event ${eventId} as stopped in database`, "warning");
+          if (LOG_LEVEL >= 1) {
+            this.logWithTime(`Marked event ${eventId} as stopped in database`, "warning");
+          }
         } catch (err) {
           console.error(`Failed to update status for event ${eventId}:`, err);
         }
@@ -744,12 +805,15 @@ class ScraperManager {
           retryCount: retryCount + 1,
           retryAfter: cooldownUntil,
         });
-        this.logWithTime(
-          `Queued for retry: ${eventId} (after ${
-            backoffTime / 1000
-          }s cooldown)`,
-          "warning"
-        );
+        
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(
+            `Queued for retry: ${eventId} (after ${
+              backoffTime / 1000
+            }s cooldown)`,
+            "info"
+          );
+        }
       } else {
         this.logWithTime(`Max retries exceeded for ${eventId}`, "error");
       }
@@ -811,7 +875,9 @@ class ScraperManager {
         // Store the proxy assignment for this batch
         this.batchProxies.set(batchId, { proxy, chunk });
         
-        this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`);
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
+        }
 
         // Process the entire chunk efficiently as a batch
         await this.processBatchEfficiently(chunk, batchId, proxyAgent, proxy);
@@ -1116,10 +1182,13 @@ class ScraperManager {
       // Use the short, progressive cooldowns for initial retries
       backoffTime = SHORT_COOLDOWNS[retryCount];
       
-      this.logWithTime(
-        `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
-        "warning"
-      );
+      // Log only at appropriate levels
+      if (LOG_LEVEL >= 1) {
+        this.logWithTime(
+          `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
+          "warning"
+        );
+      }
     } else {
       // For persistent failures, use a longer cooldown and mark as stopped
       backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // Convert minutes to ms
@@ -1170,7 +1239,9 @@ class ScraperManager {
             } 
           }
         );
-        this.logWithTime(`Marked event ${eventId} as stopped in database`, "warning");
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(`Marked event ${eventId} as stopped in database`, "warning");
+        }
       } catch (err) {
         console.error(`Failed to update status for event ${eventId}:`, err);
       }
@@ -1185,12 +1256,15 @@ class ScraperManager {
         retryCount: retryCount + 1,
         retryAfter: cooldownUntil,
       });
-      this.logWithTime(
-        `Queued for retry: ${eventId} (after ${
-          backoffTime / 1000
-        }s cooldown)`,
-        "warning"
-      );
+      
+      if (LOG_LEVEL >= 2) {
+        this.logWithTime(
+          `Queued for retry: ${eventId} (after ${
+            backoffTime / 1000
+          }s cooldown)`,
+          "info"
+        );
+      }
     } else {
       this.logWithTime(`Max retries exceeded for ${eventId}`, "error");
     }
@@ -1231,7 +1305,9 @@ class ScraperManager {
     for (const [retryCount, eventIds] of prioritizedGroups) {
       if (!this.isRunning) break;
       
-      this.logWithTime(`Processing batch of ${eventIds.length} retries (attempt ${parseInt(retryCount) + 1})`, "info");
+      if (LOG_LEVEL >= 2) {
+        this.logWithTime(`Processing batch of ${eventIds.length} retries (attempt ${parseInt(retryCount) + 1})`, "info");
+      }
       
       // Determine optimal batch size based on system resources
       const batchSize = Math.min(eventIds.length, Math.max(10, Math.ceil(CONCURRENT_LIMIT / 3)));
@@ -1383,15 +1459,18 @@ class ScraperManager {
       // Limit to the maximum batch size but make sure we don't exceed our processing capacity
       const finalEventsList = optimizedEventList.slice(0, dynamicBatchSize);
       
-      // Log stats about the events we're processing
-      const criticalCount = criticalEvents.length;
-      const oldestEvent = prioritizedEvents[0];
-      if (oldestEvent) {
-        const ageInSeconds = oldestEvent.timeSinceLastUpdate / 1000;
-        this.logWithTime(
-          `Processing ${finalEventsList.length} events. Oldest event is ${ageInSeconds.toFixed(1)}s old. ` +
-          `${criticalCount} critical events approaching deadline.`
-        );
+      // Log stats about the events we're processing - only at appropriate log level
+      if (LOG_LEVEL >= 2) {
+        const criticalCount = criticalEvents.length;
+        const oldestEvent = prioritizedEvents[0];
+        if (oldestEvent) {
+          const ageInSeconds = oldestEvent.timeSinceLastUpdate / 1000;
+          this.logWithTime(
+            `Processing ${finalEventsList.length} events. Oldest event is ${ageInSeconds.toFixed(1)}s old. ` +
+            `${criticalCount} critical events approaching deadline.`,
+            "info"
+          );
+        }
       }
       
       return finalEventsList;
@@ -1495,12 +1574,14 @@ class ScraperManager {
 
     for (const [eventId, startTime] of this.activeJobs.entries()) {
       if (now.diff(startTime) > staleTimeLimit) {
-        this.logWithTime(
-          `Cleaning up stale job for ${eventId} (started ${
-            now.diff(startTime) / 1000
-          }s ago)`,
-          "warning"
-        );
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `Cleaning up stale job for ${eventId} (started ${
+              now.diff(startTime) / 1000
+            }s ago)`,
+            "warning"
+          );
+        }
         this.activeJobs.delete(eventId);
         this.processingEvents.delete(eventId);
         // Release a semaphore for this stale job
@@ -1540,15 +1621,17 @@ class ScraperManager {
           }
         }
         
-        // Log system health status
-        this.logWithTime(
-          `System status: ${this.successCount} successful scrapes, ` +
-          `${this.activeJobs.size}/${CONCURRENT_LIMIT} active, ` +
-          `${this.failedEvents.size} failed, ${this.retryQueue.length} in retry queue, ` +
-          `${this.eventUpdateSchedule.size} total tracked events` +
-          (this.globalConsecutiveErrors > 0 ? `, consecutive errors: ${this.globalConsecutiveErrors}` : ""),
-          "info"
-        );
+        // Log system health status - only log at appropriate levels
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `System status: ${this.successCount} successful scrapes, ` +
+            `${this.activeJobs.size}/${CONCURRENT_LIMIT} active, ` +
+            `${this.failedEvents.size} failed, ${this.retryQueue.length} in retry queue, ` +
+            `${this.eventUpdateSchedule.size} total tracked events` +
+            (this.globalConsecutiveErrors > 0 ? `, consecutive errors: ${this.globalConsecutiveErrors}` : ""),
+            "info"
+          );
+        }
         
         // Clear old cooldowns and failure records
         const expiredCooldowns = [];
@@ -1642,7 +1725,9 @@ class ScraperManager {
       
       // Try rotating proxy and headers for this event
       if (this.proxyManager.getAvailableProxyCount() > 1) {
-        this.logWithTime(`Rotating proxy for event ${eventId} due to ${is403Error ? '403' : '429'} error`, "info");
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Rotating proxy for event ${eventId} due to ${is403Error ? '403' : '429'} error`, "info");
+        }
         this.proxyManager.blacklistCurrentProxy(eventId);
         return true; // Error handled by proxy rotation
       }
@@ -1667,7 +1752,9 @@ class ScraperManager {
       return;
     }
     
-    this.logWithTime(`Processing ${this.failedEvents.size} failed events in batches`, "info");
+    if (LOG_LEVEL >= 2) {
+      this.logWithTime(`Processing ${this.failedEvents.size} failed events in batches`, "info");
+    }
     
     // Group failed events by error types and failure count
     const failureGroups = new Map();
@@ -1722,7 +1809,9 @@ class ScraperManager {
         batches.push(eventIds.slice(i, i + batchSize));
       }
       
-      this.logWithTime(`Processing ${eventIds.length} events with ${failureCount} failure(s) in ${batches.length} batches`, "info");
+      if (LOG_LEVEL >= 2) {
+        this.logWithTime(`Processing ${eventIds.length} events with ${failureCount} failure(s) in ${batches.length} batches`, "info");
+      }
       
       // Process each batch
       for (const batch of batches) {

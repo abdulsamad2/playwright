@@ -15,7 +15,7 @@ const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
   PAGE_TIMEOUT: 30000,
-  MAX_RETRIES: 3,
+  MAX_RETRIES: 5,
   RETRY_DELAY: 30000,
   CHALLENGE_TIMEOUT: 10000,
 };
@@ -45,7 +45,7 @@ const COOKIE_MANAGEMENT = {
   MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
   COOKIE_ROTATION: {
     ENABLED: true,
-    MAX_STORED_COOKIES: 5, // Keep multiple cookie sets
+    MAX_STORED_COOKIES: 100, // Keep multiple cookie sets
     ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours between rotations
     LAST_ROTATION: Date.now()
   }
