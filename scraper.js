@@ -40,8 +40,15 @@ const COOKIE_MANAGEMENT = {
     'MUID', 'au_id', 'aud', 'tmTrackID', 'TapAd_DID', 'uid'
   ],
   AUTH_COOKIES: ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'],
-  MAX_COOKIE_LENGTH: 4000, // Increased from 2000
-  COOKIE_REFRESH_INTERVAL: 30 * 60 * 1000, // 30 minutes
+  MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
+  COOKIE_REFRESH_INTERVAL: 12 * 60 * 60 * 1000, // 12 hours (more conservative refresh)
+  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
+  COOKIE_ROTATION: {
+    ENABLED: true,
+    MAX_STORED_COOKIES: 5, // Keep multiple cookie sets
+    ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours between rotations
+    LAST_ROTATION: Date.now()
+  }
 };
 
 // Enhanced cookie handling
@@ -69,16 +76,26 @@ const handleCookies = {
     
     // Add other essential cookies if we have space
     COOKIE_MANAGEMENT.ESSENTIAL_COOKIES.forEach(name => {
-      if (cookieMap.has(name) && essentialCookies.length < 10) {
+      if (cookieMap.has(name) && essentialCookies.length < 20) { // Increased from 10
         essentialCookies.push(`${name}=${cookieMap.get(name)}`);
         cookieMap.delete(name);
       }
     });
+
+    // Add any remaining cookies if they fit
+    if (essentialCookies.join('; ').length < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH) {
+      for (const [name, value] of cookieMap.entries()) {
+        const potentialCookie = `${name}=${value}`;
+        if (essentialCookies.join('; ').length + potentialCookie.length + 2 < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH) {
+          essentialCookies.push(potentialCookie);
+        }
+      }
+    }
     
     return essentialCookies.join('; ');
   },
   
-  // Validate cookie freshness
+  // Validate cookie freshness with improved logic
   areCookiesFresh: (cookies) => {
     if (!cookies) return false;
     
@@ -90,12 +107,12 @@ const handleCookies = {
       }
     });
     
-    // Check for essential auth cookies
-    const hasAuthCookies = COOKIE_MANAGEMENT.AUTH_COOKIES.every(name => 
+    // More lenient check: require at least 3 auth cookies
+    const authCookiesPresent = COOKIE_MANAGEMENT.AUTH_COOKIES.filter(name => 
       cookieMap.has(name) && cookieMap.get(name).length > 0
     );
     
-    return hasAuthCookies;
+    return authCookiesPresent.length >= 3; // Need at least 3 auth cookies
   },
   
   // Merge cookies from different sources
@@ -313,15 +330,42 @@ async function loadCookiesFromFile() {
   try {
     if (fs.existsSync(COOKIES_FILE)) {
       const data = await fs.promises.readFile(COOKIES_FILE, 'utf8');
-      const cookies = JSON.parse(data);
+      const parsedData = JSON.parse(data);
       
-      // Validate cookie freshness
-      const cookieString = cookies
-        .map(cookie => `${cookie.name}=${cookie.value}`)
-        .join('; ');
-      
-      if (handleCookies.areCookiesFresh(cookieString)) {
-        return cookies;
+      // Check if we're using the new format with cookie rotation
+      if (parsedData.cookieSets && Array.isArray(parsedData.cookieSets)) {
+        // Sort sets by timestamp (newest first)
+        const sortedSets = parsedData.cookieSets.sort((a, b) => b.timestamp - a.timestamp);
+        
+        // Try each cookie set until we find a usable one
+        for (const set of sortedSets) {
+          const cookies = set.cookies;
+          if (cookies && cookies.length > 0) {
+            // Validate cookie freshness
+            const cookieString = cookies
+              .map(cookie => `${cookie.name}=${cookie.value}`)
+              .join('; ');
+            
+            if (handleCookies.areCookiesFresh(cookieString)) {
+              console.log('Using cookie set from', new Date(set.timestamp).toISOString());
+              return cookies;
+            }
+          }
+        }
+        return null; // No valid cookie sets found
+      } 
+      else if (Array.isArray(parsedData)) {
+        // Legacy format - single cookie array
+        const cookies = parsedData;
+        
+        // Validate cookie freshness
+        const cookieString = cookies
+          .map(cookie => `${cookie.name}=${cookie.value}`)
+          .join('; ');
+        
+        if (handleCookies.areCookiesFresh(cookieString)) {
+          return cookies;
+        }
       }
     }
     return null;
@@ -338,10 +382,16 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
   if (!capturedState.cookies) {
     const cookiesFromFile = await loadCookiesFromFile();
     if (cookiesFromFile) {
-      const lastRefresh = cookiesFromFile[0]?.expires * 1000 || 0;
-      if (currentTime - lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL) {
+      // For more reliable cookie freshness, we now depend on explicit expiry
+      // rather than just checking when they were last refreshed
+      const cookieAge = cookiesFromFile[0]?.expiry ? 
+                       (cookiesFromFile[0].expiry * 1000 - currentTime) : 
+                       COOKIE_MANAGEMENT.MAX_COOKIE_AGE;
+      
+      // If cookies are still valid (not expired and not too old)
+      if (cookieAge > 0 && cookieAge < COOKIE_MANAGEMENT.MAX_COOKIE_AGE) {
         capturedState.cookies = cookiesFromFile;
-        capturedState.lastRefresh = lastRefresh;
+        capturedState.lastRefresh = currentTime - (COOKIE_MANAGEMENT.MAX_COOKIE_AGE - cookieAge);
         if (!capturedState.fingerprint) {
           capturedState.fingerprint = BrowserFingerprint.generate();
         }
@@ -358,12 +408,27 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
     !capturedState.fingerprint ||
     !capturedState.lastRefresh ||
     !capturedState.proxy ||
-    currentTime - capturedState.lastRefresh > CONFIG.COOKIE_REFRESH_INTERVAL ||
+    currentTime - capturedState.lastRefresh > COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL ||
     forceRefresh;
 
   if (needsRefresh) {
-    // Use the refreshHeaders function with locking mechanism
-    return await refreshHeaders(eventId, proxy);
+    // Add jitter to prevent all refreshes happening at the same time
+    const jitter = Math.random() * 600000 - 300000; // ±5 minutes
+    const effectiveInterval = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL + jitter;
+    
+    // Check again with jitter applied
+    const needsRefreshWithJitter = 
+      !capturedState.cookies ||
+      !capturedState.fingerprint ||
+      !capturedState.lastRefresh ||
+      !capturedState.proxy ||
+      currentTime - capturedState.lastRefresh > effectiveInterval ||
+      forceRefresh;
+    
+    if (needsRefreshWithJitter) {
+      console.log(`Refreshing cookies with jitter of ${Math.round(jitter/60000)}min for event ${eventId}`);
+      return await refreshHeaders(eventId, proxy);
+    }
   }
 
   return capturedState;
@@ -444,7 +509,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     if (
       capturedState.cookies?.length &&
       capturedState.lastRefresh &&
-      Date.now() - capturedState.lastRefresh <= CONFIG.COOKIE_REFRESH_INTERVAL
+      Date.now() - capturedState.lastRefresh <= COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
     ) {
       console.log("Using existing cookies from memory");
       clearTimeout(globalTimeoutId);
@@ -728,15 +793,94 @@ async function checkForTicketmasterChallenge(page) {
 // Function to save cookies to a JSON file
 async function saveCookiesToFile(cookies) {
   try {
+    // Get current cookies from file if they exist
+    let existingCookieSets = [];
+    try {
+      if (fs.existsSync(COOKIES_FILE)) {
+        const fileContent = await fs.promises.readFile(COOKIES_FILE, 'utf8');
+        const fileData = JSON.parse(fileContent);
+        if (Array.isArray(fileData)) {
+          existingCookieSets = fileData;
+        } else if (Array.isArray(fileData.cookieSets)) {
+          existingCookieSets = fileData.cookieSets;
+        }
+      }
+    } catch (err) {
+      console.error('Error reading existing cookies:', err);
+    }
+
+    // Format the new cookies with updated expiration
     const cookieData = cookies.map(cookie => ({
       ...cookie,
-      expires: cookie.expires || Date.now() + COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
+      expires: cookie.expires || Date.now() + COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL,
+      expiry: cookie.expiry || Date.now() + COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
     }));
-    
-    await fs.promises.writeFile(
-      COOKIES_FILE,
-      JSON.stringify(cookieData, null, 2)
-    );
+
+    // If cookie rotation is enabled
+    if (COOKIE_MANAGEMENT.COOKIE_ROTATION.ENABLED) {
+      // Check if enough time has passed since last rotation
+      const shouldRotate = Date.now() - COOKIE_MANAGEMENT.COOKIE_ROTATION.LAST_ROTATION > 
+                          COOKIE_MANAGEMENT.COOKIE_ROTATION.ROTATION_INTERVAL;
+      
+      if (shouldRotate) {
+        // Add current cookies as a new set with timestamp
+        const newCookieSet = {
+          timestamp: Date.now(),
+          cookies: cookieData
+        };
+        
+        // Add new set to existing sets
+        existingCookieSets.push(newCookieSet);
+        
+        // Keep only the newest sets up to MAX_STORED_COOKIES
+        existingCookieSets.sort((a, b) => b.timestamp - a.timestamp);
+        existingCookieSets = existingCookieSets.slice(0, COOKIE_MANAGEMENT.COOKIE_ROTATION.MAX_STORED_COOKIES);
+        
+        // Update last rotation time
+        COOKIE_MANAGEMENT.COOKIE_ROTATION.LAST_ROTATION = Date.now();
+        
+        // Save all sets to file
+        await fs.promises.writeFile(
+          COOKIES_FILE,
+          JSON.stringify({
+            lastUpdated: Date.now(),
+            cookieSets: existingCookieSets
+          }, null, 2)
+        );
+      } else {
+        // Just update the most recent set
+        if (existingCookieSets.length > 0) {
+          existingCookieSets[0].cookies = cookieData;
+          existingCookieSets[0].timestamp = Date.now();
+          
+          await fs.promises.writeFile(
+            COOKIES_FILE,
+            JSON.stringify({
+              lastUpdated: Date.now(),
+              cookieSets: existingCookieSets
+            }, null, 2)
+          );
+        } else {
+          // No existing sets, create first one
+          await fs.promises.writeFile(
+            COOKIES_FILE,
+            JSON.stringify({
+              lastUpdated: Date.now(),
+              cookieSets: [{
+                timestamp: Date.now(),
+                cookies: cookieData
+              }]
+            }, null, 2)
+          );
+        }
+      }
+    } else {
+      // Simple cookie storage without rotation
+      await fs.promises.writeFile(
+        COOKIES_FILE,
+        JSON.stringify(cookieData, null, 2)
+      );
+    }
   } catch (error) {
     console.error('Error saving cookies:', error);
   }
@@ -804,23 +948,131 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
   try {
     // Determine event ID from either object or simple ID
     const eventId = event?.eventId || event;
+    const startTime = Date.now();
+    const correlationId = generateCorrelationId();
+    
+    // Ensure we have a valid event ID
+    if (!eventId) {
+      console.error("Missing event ID in ScrapeEvent call");
+      return false;
+    }
+    
+    console.log(`Starting event ${eventId} processing with correlation ID: ${correlationId}`);
+    
+    // Initialize static tracking variables if needed
+    if (!ScrapeEvent.rateLimits) {
+      ScrapeEvent.rateLimits = {
+        hourlyCount: 0,
+        lastHour: new Date().getHours(),
+        maxPerHour: 1000,
+        recentEvents: new Set(),
+        blockedUntil: 0
+      };
+    }
+    
+    if (!ScrapeEvent.headerCache) {
+      ScrapeEvent.headerCache = new Map();
+    }
+    
+    if (!ScrapeEvent.resultCache) {
+      ScrapeEvent.resultCache = new Map();
+      // Set up automatic cache cleanup
+      setInterval(() => {
+        const now = Date.now();
+        // Keep results for up to 30 minutes
+        const maxAge = 30 * 60 * 1000;
+        
+        for (const [key, value] of ScrapeEvent.resultCache.entries()) {
+          if (now - value.timestamp > maxAge) {
+            ScrapeEvent.resultCache.delete(key);
+          }
+        }
+      }, 5 * 60 * 1000); // Run cleanup every 5 minutes
+    }
+    
+    // Check result cache first (if this exact event was processed recently)
+    const resultCacheKey = `result_${eventId}`;
+    if (ScrapeEvent.resultCache.has(resultCacheKey)) {
+      const cachedResult = ScrapeEvent.resultCache.get(resultCacheKey);
+      if (cachedResult && cachedResult.data && Date.now() - cachedResult.timestamp < 5 * 60 * 1000) { // 5 min cache
+        console.log(`Using cached result for event ${eventId} from ${new Date(cachedResult.timestamp).toISOString()}`);
+        return cachedResult.data;
+      }
+    }
+    
+    // Check if we're currently rate limited
+    if (Date.now() < ScrapeEvent.rateLimits.blockedUntil) {
+      const waitTime = Math.ceil((ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000);
+      console.log(`Rate limit cooldown period active. Waiting ${waitTime}s before processing event ${eventId}`);
+      await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+    }
+    
+    // Reset hourly counter if hour has changed
+    const currentHour = new Date().getHours();
+    if (currentHour !== ScrapeEvent.rateLimits.lastHour) {
+      ScrapeEvent.rateLimits.hourlyCount = 0;
+      ScrapeEvent.rateLimits.lastHour = currentHour;
+      ScrapeEvent.rateLimits.recentEvents.clear();
+    }
+    
+    // Check if we've recently processed this event (within 10 minutes)
+    // This prevents redundant processing of the same event 
+    if (ScrapeEvent.rateLimits.recentEvents.has(eventId)) {
+      console.log(`Event ${eventId} was recently processed, using cached headers if available`);
+    } else {
+      // Add to recently processed events
+      ScrapeEvent.rateLimits.recentEvents.add(eventId);
+      
+      // Implement automatic cleanup of the recent events set
+      setTimeout(() => {
+        ScrapeEvent.rateLimits.recentEvents.delete(eventId);
+      }, 10 * 60 * 1000); // Remove after 10 minutes
+    }
+    
+    // Increment hourly counter
+    ScrapeEvent.rateLimits.hourlyCount++;
+    
+    // Check if we're approaching rate limits
+    if (ScrapeEvent.rateLimits.hourlyCount > ScrapeEvent.rateLimits.maxPerHour * 0.9) {
+      console.warn(`Approaching hourly rate limit (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour}), adding delay for event ${eventId}`);
+      // Add progressive delay based on how close we are to the limit
+      const delayFactor = ScrapeEvent.rateLimits.hourlyCount / ScrapeEvent.rateLimits.maxPerHour;
+      const delay = Math.floor(delayFactor * 10000); // Up to 10 seconds delay
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
     
     // Use provided proxy if available, otherwise get a new one
     let proxyAgent, proxy;
     if (externalProxyAgent && externalProxy) {
-      console.log(`Using provided proxy ${externalProxy.proxy} for event ${eventId}`);
+      console.log(`Using provided proxy ${externalProxy.proxy || 'unknown'} for event ${eventId}`);
       proxyAgent = externalProxyAgent;
       proxy = externalProxy;
     } else {
-      const proxyData = GetProxy();
-      proxyAgent = proxyData.proxyAgent;
-      proxy = proxyData.proxy;
+      try {
+        const proxyData = GetProxy();
+        proxyAgent = proxyData.proxyAgent;
+        proxy = proxyData.proxy;
+      } catch (proxyError) {
+        console.error(`Proxy error for event ${eventId}:`, proxyError.message);
+        // Try again with a different proxy selection mechanism
+        console.log(`Attempting alternative proxy selection for event ${eventId}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const proxyData = GetProxy();
+        proxyAgent = proxyData.proxyAgent;
+        proxy = proxyData.proxy;
+      }
+    }
+    
+    // Log memory usage as needed
+    const memUsage = process.memoryUsage();
+    if (memUsage.heapUsed > 1024 * 1024 * 1024) { // Over 1GB
+      console.warn(`High memory usage (${Math.round(memUsage.heapUsed / 1024 / 1024)}MB) during event ${eventId} processing`);
     }
     
     // If headers are provided (for batch processing), use them directly
     let cookieString, userAgent, fingerprint;
-    
     let useProvidedHeaders = false;
+    
     if (event?.headers) {
       console.log(`Processing headers for event ${eventId} (batch processing)`);
       
@@ -862,65 +1114,411 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
     
     if (!useProvidedHeaders) {
       // Standard flow - get cookies and headers
-      const correlationId = generateCorrelationId();
-      const capturedData = await getCapturedData(eventId, proxy);
-
-      if (!capturedData) {
-        throw new Error("Failed to get captured data");
+      // Use memory cache for frequently used events to optimize performance
+      const cacheKey = `header_${eventId}_${proxy?.proxy || 'default'}`;
+      if (ScrapeEvent.headerCache.has(cacheKey)) {
+        const cachedHeaders = ScrapeEvent.headerCache.get(cacheKey);
+        if (cachedHeaders && Date.now() - cachedHeaders.timestamp < 60 * 60 * 1000) { // 1 hour cache
+          console.log(`Using cached headers for event ${eventId}`);
+          cookieString = cachedHeaders.cookieString;
+          userAgent = cachedHeaders.userAgent;
+          fingerprint = cachedHeaders.fingerprint;
+        } else {
+          ScrapeEvent.headerCache.delete(cacheKey); // Remove expired cache entry
+        }
       }
       
-      // Use headers from capturedData if available (fallback mechanism)
-      if (capturedData.headers && !capturedData.cookies) {
-        console.log(`Using fallback headers for event ${eventId}`);
-        return callTicketmasterAPI(capturedData.headers, proxyAgent, eventId, event);
+      if (!cookieString) {
+        try {
+          const capturedData = await getCapturedData(eventId, proxy);
+
+          if (!capturedData) {
+            throw new Error("Failed to get captured data");
+          }
+          
+          // Use headers from capturedData if available (fallback mechanism)
+          if (capturedData.headers && !capturedData.cookies) {
+            console.log(`Using fallback headers for event ${eventId}`);
+            return callTicketmasterAPI(capturedData.headers, proxyAgent, eventId, event);
+          }
+
+          if (!capturedData?.cookies?.length) {
+            throw new Error("Failed to capture cookies");
+          }
+
+          cookieString = capturedData.cookies
+            .map((cookie) => `${cookie.name}=${cookie.value}`)
+            .join("; ");
+
+          userAgent = BrowserFingerprint.generateUserAgent(
+            capturedData.fingerprint
+          );
+          
+          fingerprint = capturedData.fingerprint;
+          
+          // Store in memory cache
+          ScrapeEvent.headerCache.set(cacheKey, {
+            cookieString,
+            userAgent,
+            fingerprint,
+            timestamp: Date.now()
+          });
+        } catch (error) {
+          console.error(`Error getting cookies for event ${eventId}:`, error.message);
+          // Use fallback headers if available
+          const fallbackHeaders = generateFallbackHeaders();
+          if (fallbackHeaders) {
+            console.log(`Using fallback headers for event ${eventId} after error`);
+            return callTicketmasterAPI(fallbackHeaders, proxyAgent, eventId, event);
+          }
+          throw error;
+        }
       }
-
-      if (!capturedData?.cookies?.length) {
-        throw new Error("Failed to capture cookies");
-      }
-
-      cookieString = capturedData.cookies
-        .map((cookie) => `${cookie.name}=${cookie.value}`)
-        .join("; ");
-
-      userAgent = BrowserFingerprint.generateUserAgent(
-        capturedData.fingerprint
-      );
-      
-      fingerprint = capturedData.fingerprint;
     }
 
+    // Generate headers with enhanced request ID for tracing
+    const traceId = generateCorrelationId() + `-${Date.now()}`;
+    
+    // Create safe header objects with no references to other objects to prevent circular JSON issues
     const MapHeader = {
       "User-Agent": userAgent,
-      Accept: "*/*",
-      Origin: "https://www.ticketmaster.com",
-      Referer: "https://www.ticketmaster.com/",
+      "Accept": "*/*",
+      "Origin": "https://www.ticketmaster.com",
+      "Referer": "https://www.ticketmaster.com/",
       "Content-Encoding": "gzip",
-      Cookie: cookieString,
+      "Cookie": cookieString,
+      "X-Request-ID": traceId,
+      "X-Correlation-ID": correlationId
     };
 
     const FacetHeader = {
-      Accept: "*/*",
+      "Accept": "*/*",
       "Accept-Language": fingerprint?.language || "en-US",
       "Accept-Encoding": "gzip, deflate, br, zstd",
       "User-Agent": userAgent,
-      Referer: "https://www.ticketmaster.com/",
-      Origin: "https://www.ticketmaster.com",
-      Cookie: cookieString,
-      "tmps-correlation-id": generateCorrelationId(),
+      "Referer": "https://www.ticketmaster.com/",
+      "Origin": "https://www.ticketmaster.com",
+      "Cookie": cookieString,
+      "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
+      "X-Request-ID": traceId,
+      "X-Correlation-ID": correlationId
     };
 
     console.log(`Starting event scraping for ${eventId} with${event?.headers ? " shared" : ""} cookies...`);
 
-    return callTicketmasterAPI(FacetHeader, proxyAgent, eventId, event, MapHeader);
+    // Measure API call time for performance monitoring
+    const apiStartTime = Date.now();
+    const result = await callTicketmasterAPI(FacetHeader, proxyAgent, eventId, event, MapHeader);
+    const apiDuration = Date.now() - apiStartTime;
+    
+    console.log(`Event ${eventId} processing completed in ${Date.now() - startTime}ms (API: ${apiDuration}ms)`);
+    
+    // Store successful result in cache
+    if (result) {
+      ScrapeEvent.resultCache.set(resultCacheKey, {
+        data: result,
+        timestamp: Date.now()
+      });
+    }
+    
+    // If API call was too fast, it might be suspicious (rate limited or blocked)
+    if (apiDuration < 100 && !result) {
+      console.warn(`Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting detected.`);
+      // Implement a temporary rate limiting backoff (1 minute)
+      ScrapeEvent.rateLimits.blockedUntil = Date.now() + 60 * 1000;
+    }
+    
+    return result;
   } catch (error) {
-    console.error(`Scraping error for event ${event?.eventId || event}:`, error);
+    console.error(`Scraping error for event ${event?.eventId || event}:`, error.message);
+    
+    // Implement automatic retry mechanism for recoverable errors
+    const recoverable = error.message && (
+      error.message.includes("proxy") || 
+      error.message.includes("timeout") || 
+      error.message.includes("network") ||
+      error.message.includes("ECONNRESET") ||
+      error.message.includes("ETIMEDOUT") ||
+      error.message.includes("circular") ||
+      error.message.includes("JSON")
+    );
+    
+    if (recoverable) {
+      // Track failed attempts to prevent infinite retries
+      if (!ScrapeEvent.failedAttempts) {
+        ScrapeEvent.failedAttempts = new Map();
+      }
+      
+      const eventId = event?.eventId || event;
+      const attempts = (ScrapeEvent.failedAttempts.get(eventId) || 0) + 1;
+      ScrapeEvent.failedAttempts.set(eventId, attempts);
+      
+      // Only retry if we haven't exceeded max attempts
+      if (attempts <= 2) { // Max 3 total attempts (1 original + 2 retries)
+        console.log(`Retrying event ${eventId} after recoverable error (attempt ${attempts})`);
+        // Add exponential backoff
+        const backoff = Math.pow(2, attempts) * 1000 + Math.random() * 1000;
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        
+        // Try with a fresh proxy
+        const { proxyAgent: newProxyAgent, proxy: newProxy } = GetProxy();
+        
+        // Force cookie refresh on second retry
+        if (attempts === 2) {
+          // Reset cookies to force refresh
+          capturedState.cookies = null;
+        }
+        
+        return ScrapeEvent(event, newProxyAgent, newProxy);
+      } else {
+        // Clean up failed attempts tracking after some time
+        setTimeout(() => {
+          ScrapeEvent.failedAttempts.delete(eventId);
+        }, 10 * 60 * 1000); // 10 minutes
+      }
+    }
+    
     return false;
   } finally {
-    await cleanup(browser, context);
+    await cleanup(browser, context).catch(err => {
+      console.warn("Error during cleanup:", err.message);
+    });
   }
 };
+
+// Enhanced API call with better retry logic
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
+  const maxRetries = 3;
+  const baseDelayMs = 1000; // Increased base delay
+  const maxDelayMs = 5000; // Increased max delay
+  const jitterFactor = 0.3; // Increased jitter
+  
+  let attempts = 0;
+  let lastError = null;
+  const startTime = Date.now();
+  
+  // Enhanced proxy rotation with better error tracking
+  let alternativeProxies = [];
+  let proxyErrors = new Map();
+  
+  try {
+    for (let i = 0; i < 3; i++) { // Increased alternative proxies
+      try {
+        const { proxyAgent: altAgent, proxy: altProxy } = GetProxy();
+        if (altAgent && altProxy) {
+          alternativeProxies.push({ proxyAgent: altAgent, proxy: altProxy });
+        }
+      } catch (proxyError) {
+        console.error(`Error getting alternative proxy ${i}:`, proxyError.message);
+      }
+    }
+  } catch (err) {
+    console.log(`Could not prepare alternative proxies: ${err.message}`);
+  }
+  
+  // Track API rate limits globally
+  if (!callTicketmasterAPI.rateLimits) {
+    callTicketmasterAPI.rateLimits = {
+      window: 60 * 1000, // 1 minute window
+      maxPerWindow: 120, // Maximum 120 requests per minute
+      requests: [], // Array to track request timestamps
+      lastWarning: 0
+    };
+  }
+  
+  // Add current request to tracking
+  callTicketmasterAPI.rateLimits.requests.push(Date.now());
+  
+  // Remove requests older than the window
+  const windowStart = Date.now() - callTicketmasterAPI.rateLimits.window;
+  callTicketmasterAPI.rateLimits.requests = callTicketmasterAPI.rateLimits.requests.filter(
+    timestamp => timestamp >= windowStart
+  );
+  
+  // Check if we're approaching rate limits
+  const requestCount = callTicketmasterAPI.rateLimits.requests.length;
+  const limitPercentage = requestCount / callTicketmasterAPI.rateLimits.maxPerWindow;
+  
+  if (limitPercentage > 0.8 && Date.now() - callTicketmasterAPI.rateLimits.lastWarning > 30000) {
+    console.warn(`API rate limit threshold approaching: ${requestCount}/${callTicketmasterAPI.rateLimits.maxPerWindow} requests (${Math.round(limitPercentage * 100)}%)`);
+    callTicketmasterAPI.rateLimits.lastWarning = Date.now();
+  }
+  
+  // Add dynamic delay based on current rate limit usage
+  if (limitPercentage > 0.5) {
+    const dynamicDelay = Math.floor(limitPercentage * 2000); // up to 2 seconds delay at high usage
+    await new Promise(resolve => setTimeout(resolve, dynamicDelay));
+  }
+  
+  // Enhanced request with better error handling
+  const makeRequestWithRetry = async (url, headers, agent, attemptNum = 0, isRetryWithNewProxy = false) => {
+    const jitter = 1 + (Math.random() * jitterFactor * 2 - jitterFactor);
+    const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
+    
+    if (attemptNum > 0) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      console.log(`Retry attempt ${attemptNum} for ${eventId} after ${delay.toFixed(0)}ms`);
+    }
+    
+    try {
+      // Add random delay before request
+      await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 400));
+      
+      // Construct a safe copy of headers without any possible circular references
+      const safeHeaders = {};
+      for (const [key, value] of Object.entries(headers)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          safeHeaders[key] = value;
+        }
+      }
+      
+      const response = await axios.get(url, {
+        httpsAgent: agent,
+        headers: safeHeaders,
+        timeout: 30000,
+        validateStatus: (status) => status === 200 || status === 304,
+      });
+      
+      return response.data;
+    } catch (error) {
+      const is403Error = error.response?.status === 403;
+      const is429Error = error.response?.status === 429;
+      const is500Error = error.response?.status >= 500 && error.response?.status < 600;
+      
+      // Track proxy errors
+      if (agent && (is403Error || is429Error)) {
+        // Create a non-circular key for the proxy without JSON.stringify
+        const proxyKey = agent.proxy?.host || 'unknown-proxy';
+        proxyErrors.set(proxyKey, (proxyErrors.get(proxyKey) || 0) + 1);
+      }
+      
+      if ((is403Error || is429Error || is500Error) && attemptNum < maxRetries) {
+        // On 429 (rate limit) errors, add longer backoff
+        if (is429Error) {
+          const retryAfter = error.response.headers['retry-after'];
+          let waitTime = 5000; // Default 5 seconds
+          
+          if (retryAfter) {
+            waitTime = parseInt(retryAfter, 10) * 1000;
+          }
+          
+          console.log(`Rate limit hit for ${eventId}. Waiting ${waitTime/1000}s before retry.`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+        
+        if (isRetryWithNewProxy && alternativeProxies.length > 0) {
+          const altProxyData = alternativeProxies.shift();
+          console.log(`Switching to alternative proxy for ${eventId} retry`);
+          return makeRequestWithRetry(url, headers, altProxyData.proxyAgent, attemptNum + 1, true);
+        }
+        
+        // Try with fresh headers
+        const newFingerprint = generateEnhancedFingerprint();
+        const newHeaders = generateEnhancedHeaders(newFingerprint, headers.Cookie);
+        return makeRequestWithRetry(url, newHeaders, agent, attemptNum + 1);
+      }
+      
+      throw error;
+    }
+  };
+  
+  try {
+    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+    
+    // Ensure no circular references in headers by creating new objects with primitive values only
+    let safeMapHeader = null;
+    if (mapHeader) {
+      safeMapHeader = {};
+      for (const [key, value] of Object.entries(mapHeader)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          safeMapHeader[key] = value;
+        }
+      }
+    }
+    
+    let safeFacetHeader = {};
+    for (const [key, value] of Object.entries(facetHeader)) {
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        safeFacetHeader[key] = value;
+      }
+    }
+    
+    // Randomize request order to be less predictable
+    const randomizeOrder = Math.random() > 0.5;
+    let DataMap, DataFacets;
+    
+    // Wrap each API call in a try-catch to handle them independently
+    if (randomizeOrder) {
+      try {
+        DataMap = await makeRequestWithRetry(mapUrl, safeMapHeader || safeFacetHeader, proxyAgent);
+      } catch (mapError) {
+        console.error(`Map API error for event ${eventId}:`, mapError.message);
+        DataMap = null;
+      }
+      
+      // Add variable delay between requests to appear more human-like
+      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 2000));
+      
+      try {
+        DataFacets = await makeRequestWithRetry(facetUrl, safeFacetHeader, proxyAgent);
+      } catch (facetError) {
+        console.error(`Facet API error for event ${eventId}:`, facetError.message);
+        DataFacets = null;
+      }
+    } else {
+      try {
+        DataFacets = await makeRequestWithRetry(facetUrl, safeFacetHeader, proxyAgent);
+      } catch (facetError) {
+        console.error(`Facet API error for event ${eventId}:`, facetError.message);
+        DataFacets = null;
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 2000));
+      
+      try {
+        DataMap = await makeRequestWithRetry(mapUrl, safeMapHeader || safeFacetHeader, proxyAgent);
+      } catch (mapError) {
+        console.error(`Map API error for event ${eventId}:`, mapError.message);
+        DataMap = null;
+      }
+    }
+    
+    if (!DataFacets && !DataMap) {
+      throw new Error('Both API calls failed - no data available');
+    }
+    
+    // Allow processing to continue even if one API call failed
+    if (!DataFacets) {
+      console.warn(`Proceeding with event ${eventId} using only map data`);
+    }
+    
+    if (!DataMap) {
+      console.warn(`Proceeding with event ${eventId} using only facet data`);
+    }
+    
+    console.log(`API requests completed for event ${eventId} in ${Date.now() - startTime}ms`);
+    
+    // Handle the case where we have partial data
+    try {
+      return AttachRowSection(
+        DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [],
+        DataMap || {},
+        DataFacets?._embedded?.offer || [],
+        { eventId, inHandDate: event?.inHandDate },
+        DataFacets?._embedded?.description || {}
+      );
+    } catch (processError) {
+      console.error(`Error processing API response for event ${eventId}:`, processError.message);
+      // If we can't process the data, return null so calling function knows to handle it
+      return null;
+    }
+  } catch (error) {
+    console.error(`API error for event ${eventId}:`, error.message);
+    return null;
+  }
+}
 
 // Enhanced browser fingerprinting
 const generateEnhancedFingerprint = () => {
@@ -1069,113 +1667,6 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
     };
   }
 };
-
-// Enhanced API call with better retry logic
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
-  const maxRetries = 3;
-  const baseDelayMs = 1000; // Increased base delay
-  const maxDelayMs = 5000; // Increased max delay
-  const jitterFactor = 0.3; // Increased jitter
-  
-  let attempts = 0;
-  let lastError = null;
-  const startTime = Date.now();
-  
-  // Enhanced proxy rotation
-  let alternativeProxies = [];
-  try {
-    for (let i = 0; i < 3; i++) { // Increased alternative proxies
-      const { proxyAgent: altAgent, proxy: altProxy } = GetProxy();
-      if (altAgent && altProxy) {
-        alternativeProxies.push({ proxyAgent: altAgent, proxy: altProxy });
-      }
-    }
-  } catch (err) {
-    console.log(`Could not prepare alternative proxies: ${err.message}`);
-  }
-  
-  // Enhanced request with better error handling
-  const makeRequestWithRetry = async (url, headers, agent, attemptNum = 0, isRetryWithNewProxy = false) => {
-    const jitter = 1 + (Math.random() * jitterFactor * 2 - jitterFactor);
-    const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
-    
-    if (attemptNum > 0) {
-      await new Promise(resolve => setTimeout(resolve, delay));
-      console.log(`Retry attempt ${attemptNum} for ${eventId} after ${delay.toFixed(0)}ms`);
-    }
-    
-    try {
-      // Add random delay before request
-      await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 400));
-      
-      const response = await axios.get(url, {
-        httpsAgent: agent,
-        headers: {
-          ...headers,
-          'X-Request-ID': generateCorrelationId(),
-          'X-Attempt-Num': attemptNum.toString(),
-        },
-        timeout: 30000,
-        validateStatus: (status) => status === 200 || status === 304,
-      });
-      
-      return response.data;
-    } catch (error) {
-      const is403Error = error.response?.status === 403;
-      const is429Error = error.response?.status === 429;
-      
-      if ((is403Error || is429Error) && attemptNum < maxRetries) {
-        if (isRetryWithNewProxy && alternativeProxies.length > 0) {
-          const altProxyData = alternativeProxies.shift();
-          console.log(`Switching to alternative proxy for ${eventId} retry`);
-          return makeRequestWithRetry(url, headers, altProxyData.proxyAgent, attemptNum + 1, true);
-        }
-        
-        // Try with fresh headers
-        const newFingerprint = generateEnhancedFingerprint();
-        const newHeaders = generateEnhancedHeaders(newFingerprint, headers.Cookie);
-        return makeRequestWithRetry(url, newHeaders, agent, attemptNum + 1);
-      }
-      
-      throw error;
-    }
-  };
-  
-  try {
-    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
-    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
-    
-    // Randomize request order
-    const randomizeOrder = Math.random() > 0.5;
-    let DataMap, DataFacets;
-    
-    if (randomizeOrder) {
-      DataMap = await makeRequestWithRetry(mapUrl, mapHeader || facetHeader, proxyAgent);
-      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-      DataFacets = await makeRequestWithRetry(facetUrl, facetHeader, proxyAgent);
-    } else {
-      DataFacets = await makeRequestWithRetry(facetUrl, facetHeader, proxyAgent);
-      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-      DataMap = await makeRequestWithRetry(mapUrl, mapHeader || facetHeader, proxyAgent);
-    }
-    
-    if (!DataFacets || !DataMap) {
-      throw new Error('Failed to get data from APIs');
-    }
-    
-    console.log(`API requests completed successfully for event ${eventId} in ${Date.now() - startTime}ms`);
-    return AttachRowSection(
-      GenerateNanoPlaces(DataFacets?.facets),
-      DataMap,
-      DataFacets?._embedded?.offer,
-      { eventId, inHandDate: event?.inHandDate },
-      DataFacets?._embedded?.description
-    );
-  } catch (error) {
-    console.error(`API error for event ${eventId}:`, error);
-    return false;
-  }
-}
 
 async function cleanup(browser, context) {
   try {
