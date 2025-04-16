@@ -965,6 +965,8 @@ class ScraperManager {
   async processBatchEfficiently(eventIds, batchId, proxyAgent, proxy) {
     const results = [];
     const failed = [];
+    // Define sharedHeaders at the top level of the function
+    let sharedHeaders = null;
 
     // Skip excessive logging for small batches to reduce log noise
     const shouldLogDetails = LOG_LEVEL >= 2 && eventIds.length > 5;
@@ -1041,28 +1043,27 @@ class ScraperManager {
       this.activeJobs.set(eventId, moment());
     });
 
+    // Helper function to validate headers are complete
+    const validateHeaders = (headers) => {
+      if (!headers) return false;
+      
+      // Check for required fields
+      const hasHeaders = headers.headers && typeof headers.headers === 'object';
+      if (!hasHeaders) return false;
+      
+      // Check for required header fields
+      const hasCookie = headers.headers.Cookie || headers.headers.cookie;
+      const hasUserAgent = headers.headers["User-Agent"] || headers.headers["user-agent"];
+      
+      return hasCookie && hasUserAgent;
+    };
+    
+    // Implement header caching strategy for better efficiency
+    let headerAttempts = 0;
+    const maxHeaderAttempts = Math.min(validEvents.length, 3);
+    
     try {
       await this.acquireSemaphore();
-      
-      // Helper function to validate headers are complete
-      const validateHeaders = (headers) => {
-        if (!headers) return false;
-        
-        // Check for required fields
-        const hasHeaders = headers.headers && typeof headers.headers === 'object';
-        if (!hasHeaders) return false;
-        
-        // Check for required header fields
-        const hasCookie = headers.headers.Cookie || headers.headers.cookie;
-        const hasUserAgent = headers.headers["User-Agent"] || headers.headers["user-agent"];
-        
-        return hasCookie && hasUserAgent;
-      };
-      
-      // Implement header caching strategy for better efficiency
-      let sharedHeaders = null;
-      let headerAttempts = 0;
-      const maxHeaderAttempts = Math.min(validEvents.length, 3);
       
       // First check if we have recent valid headers for any event in the batch
       for (const { eventId } of validEvents) {
