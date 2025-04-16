@@ -9,14 +9,15 @@ import ProxyManager from "./helpers/ProxyManager.js";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 
 // Updated constants for stricter update intervals and high performance on 32GB system
-const MAX_UPDATE_INTERVAL = 110000; // Strict 110-second update requirement (buffer for 2-minute rule)
+const MAX_UPDATE_INTERVAL = 160000; // Strict 2-minute update requirement
 const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 3)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
 const MAX_RETRIES = 3; // Reduced to 3 for faster failure detection
 const SCRAPE_TIMEOUT = 35000; // Reduced timeout to 35 seconds for faster failure detection
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 45); // Smaller batches for better control with limited proxies
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 80000; // Minimum 1.33 minutes between scrapes
-const URGENT_THRESHOLD = 100000; // Events needing update within 20 seconds of deadline (tighter window)
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 120000; // Minimum 1 minute between scrapes (allowing for 2-minute updates)
+const URGENT_THRESHOLD = 30000; // Events needing update within 30 seconds of deadline (tighter window)
+const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 
 // New cooldown settings - shorter cooldowns
 const SHORT_COOLDOWNS = [1500, 3000, 6000]; // Even shorter cooldowns: 1.5s, 3s, 6s for faster recovery
@@ -191,12 +192,25 @@ class ScraperManager {
       return true;
     }
 
-    // Check if minimum time between scrapes has elapsed
+    // Check if minimum time between scrapes has elapsed (unless approaching max allowed time)
     const lastUpdate = this.eventUpdateTimestamps.get(eventId);
     if (
       lastUpdate &&
       moment().diff(lastUpdate) < MIN_TIME_BETWEEN_EVENT_SCRAPES
     ) {
+      // Check if approaching 3-minute maximum threshold - override minimum time check
+      const timeSinceLastUpdate = moment().diff(lastUpdate);
+      if (timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000) {
+        // Approaching max allowed time, don't skip
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(
+            `Processing ${eventId} despite minimum time restriction: Approaching max allowed time (${timeSinceLastUpdate / 1000}s since last update)`,
+            "warning"
+          );
+        }
+        return false;
+      }
+      
       // Only log at higher verbosity levels
       if (LOG_LEVEL >= 3) {
         this.logWithTime(
@@ -537,12 +551,20 @@ class ScraperManager {
       const lastUpdate = this.eventUpdateTimestamps.get(eventId);
       const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
       
-      // Only process critical events when circuit breaker is tripped
-      if (timeSinceUpdate < MAX_UPDATE_INTERVAL - 20000) {
+      // Allow processing of critical events approaching 3-minute maximum, or events approaching 2-minute target
+      if (timeSinceUpdate < MAX_UPDATE_INTERVAL - 20000 && timeSinceUpdate < MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
         if (LOG_LEVEL >= 2) {
           this.logWithTime(`Skipping ${eventId} temporarily: Circuit breaker tripped`, "info");
         }
         return false;
+      } else if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
+        // Log urgent processing despite circuit breaker
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `Processing ${eventId} despite circuit breaker: Approaching maximum allowed time (${timeSinceUpdate / 1000}s since last update)`,
+            "warning"
+          );
+        }
       }
     }
 
@@ -1436,7 +1458,7 @@ class ScraperManager {
       const twoMinutesFromNow = now.clone().add(2, 'minutes').toDate();
       
       // Prioritize events needing update soon
-      // Find all active events due for update within the next 2 minutes
+      // Find all active events due for update
       const urgentEvents = await Event.find({
         Skip_Scraping: { $ne: true },
         $or: [
@@ -1466,8 +1488,12 @@ class ScraperManager {
         // Give more weight to events that haven't been updated in a long time
         let priorityScore = timeSinceLastUpdate / 1000; // Convert to seconds
         
+        // CRITICAL - Events approaching 3-minute maximum threshold (absolute deadline)
+        if (timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 10000) { // Within 10 seconds of 3-minute max
+          priorityScore = priorityScore * 20; // 20x priority boost for events approaching max allowed time
+        }
         // Critical priority for events approaching 2-minute deadline
-        if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 10000) { // Within 10 seconds of deadline
+        else if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 10000) { // Within 10 seconds of 2-minute deadline
           priorityScore = priorityScore * 10; // 10x priority boost for critical events
         }
         // High priority for events approaching deadline
@@ -1521,16 +1547,27 @@ class ScraperManager {
       // Reassemble prioritized list, keeping domain groups together but prioritizing critical events
       const optimizedEventList = [];
       
-      // First add all critical events (approaching 2-minute deadline) regardless of domain
-      const criticalEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 10000);
+      // First add all near-maximum events (approaching 3-minute deadline)
+      const nearMaxEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 10000);
+      nearMaxEvents.forEach(event => {
+        optimizedEventList.push(event.eventId);
+      });
+      
+      // Then add critical events (approaching 2-minute deadline)
+      const criticalEvents = prioritizedEvents.filter(event => 
+        event.timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 10000 && 
+        event.timeSinceLastUpdate <= MAX_ALLOWED_UPDATE_INTERVAL - 10000 &&
+        !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId)
+      );
       criticalEvents.forEach(event => {
         optimizedEventList.push(event.eventId);
       });
       
       // Then add remaining events grouped by domain
       for (const domainEvents of domains.values()) {
-        // Skip critical events already added
+        // Skip events already added
         const remainingEvents = domainEvents.filter(event => 
+          !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId) &&
           !criticalEvents.some(criticalEvent => criticalEvent.eventId === event.eventId)
         );
         
@@ -1551,13 +1588,14 @@ class ScraperManager {
       
       // Log stats about the events we're processing - only at appropriate log level
       if (LOG_LEVEL >= 2) {
+        const nearMaxCount = nearMaxEvents.length;
         const criticalCount = criticalEvents.length;
         const oldestEvent = prioritizedEvents[0];
         if (oldestEvent) {
           const ageInSeconds = oldestEvent.timeSinceLastUpdate / 1000;
           this.logWithTime(
             `Processing ${finalEventsList.length} events. Oldest event is ${ageInSeconds.toFixed(1)}s old. ` +
-            `${criticalCount} critical events approaching deadline.`,
+            `${nearMaxCount} events near 3min max, ${criticalCount} events near 2min deadline.`,
             "info"
           );
         }
@@ -1577,7 +1615,30 @@ class ScraperManager {
     
     while (this.isRunning) {
       try {
-        // Process retry queue first (process more at once for high volume)
+        // First, check for any events approaching the 3-minute maximum deadline
+        const now = moment();
+        const criticalEvents = [];
+        
+        for (const [eventId, lastUpdateTime] of this.eventUpdateTimestamps.entries()) {
+          const timeSinceUpdate = now.diff(lastUpdateTime);
+          
+          // If event is approaching 3-minute maximum, add to critical list
+          if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000 && !this.processingEvents.has(eventId)) {
+            criticalEvents.push(eventId);
+          }
+        }
+        
+        // Process critical events immediately if any exist
+        if (criticalEvents.length > 0) {
+          if (LOG_LEVEL >= 1) {
+            this.logWithTime(`Processing ${criticalEvents.length} critical events approaching 3-minute maximum`, "warning");
+          }
+          
+          // Process critical events with higher concurrency
+          await this.processBatch(criticalEvents);
+        }
+        
+        // Process retry queue next (process more at once for high volume)
         await this.processRetryQueue();
         
         // New: Process batches of failed events by error type
@@ -1688,17 +1749,41 @@ class ScraperManager {
         // Check for events that missed their deadlines
         const now = moment();
         let missedDeadlines = 0;
+        let criticalMissedDeadlines = 0;
         
-        for (const [eventId, deadline] of this.eventUpdateSchedule.entries()) {
-          if (now.isAfter(deadline) && !this.processingEvents.has(eventId)) {
+        for (const [eventId, lastUpdateTime] of this.eventUpdateTimestamps.entries()) {
+          // Check if event has exceeded the 2-minute target
+          const timeSinceUpdate = now.diff(lastUpdateTime);
+          
+          // First check for events exceeding maximum allowed time (3 minutes)
+          if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL && !this.processingEvents.has(eventId)) {
+            criticalMissedDeadlines++;
+            
+            // Force immediate processing of events exceeding max time
+            this.priorityQueue.add(eventId);
+            
+            if (LOG_LEVEL >= 1) {
+              this.logWithTime(
+                `CRITICAL: Event ${eventId} has exceeded maximum allowed update time! (${timeSinceUpdate / 1000}s since last update)`,
+                "error"
+              );
+            }
+          }
+          // Then check for events missing 2-minute target
+          else if (timeSinceUpdate > MAX_UPDATE_INTERVAL && !this.processingEvents.has(eventId)) {
             missedDeadlines++;
-            // Force immediate processing of missed events
+            
+            // Force processing of missed events
             this.priorityQueue.add(eventId);
           }
         }
         
+        if (criticalMissedDeadlines > 0) {
+          this.logWithTime(`CRITICAL WARNING: ${criticalMissedDeadlines} events exceeded the 3-minute maximum update deadline!`, "error");
+        }
+        
         if (missedDeadlines > 0) {
-          this.logWithTime(`WARNING: ${missedDeadlines} events missed their 2-minute update deadline`, "error");
+          this.logWithTime(`WARNING: ${missedDeadlines} events missed their 2-minute update target`, "warning");
         }
         
         // Check if all recent attempts failed, which might indicate an API issue
@@ -1746,8 +1831,8 @@ class ScraperManager {
         console.error("Error in monitoring task:", error);
       }
       
-      // Run monitoring every 30 seconds
-      await setTimeout(30 * 1000);
+      // Run monitoring every 15 seconds for more responsive monitoring
+      await setTimeout(15 * 1000);
     }
   }
 
