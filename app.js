@@ -11,7 +11,13 @@ import eventRoutes from "./routes/eventRoutes.js";
 import statsRoutes from "./routes/statsRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 
+// Import global setup
+import setupGlobals from "./setup.js";
+
 dotenv.config();
+
+// Initialize global components (including ProxyManager)
+setupGlobals();
 
 const app = express();
 const port = process.env.PORT || 3000;
