@@ -923,24 +923,42 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
 };
 
 const GetProxy = () => {
-  let _proxy = [...proxyArray?.proxies];
-  const randomProxy = Math.floor(Math.random() * _proxy.length);
-  _proxy = _proxy[randomProxy];
-
-  if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
-    throw new Error("Invalid proxy configuration");
-  }
-
   try {
-    const proxyUrl = new URL(`http://${_proxy.proxy}`);
-    const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
+    // Use ProxyManager global instance if available
+    if (global.proxyManager) {
+      return global.proxyManager.getProxyForEvent('random');
+    }
+    
+    // Fallback to old method
+    let _proxy = [...proxyArray?.proxies];
+    const randomProxy = Math.floor(Math.random() * _proxy.length);
+    _proxy = _proxy[randomProxy];
+
+    if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
+      throw new Error("Invalid proxy configuration");
+    }
+
+    try {
+      const proxyUrl = new URL(`http://${_proxy.proxy}`);
+      const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
+        proxyUrl.hostname
+      }:${proxyUrl.port || 80}`;
+      const proxyAgent = new HttpsProxyAgent(proxyURl);
+      return { proxyAgent, proxy: _proxy };
+    } catch (error) {
+      console.error("Invalid proxy URL format:", error);
+      throw new Error("Invalid proxy URL format");
+    }
+  } catch (error) {
+    console.error("Error getting proxy:", error);
+    // Last resort fallback if everything fails
+    const fallbackProxy = proxyArray.proxies[0];
+    const proxyUrl = new URL(`http://${fallbackProxy.proxy}`);
+    const proxyURl = `http://${fallbackProxy.username}:${fallbackProxy.password}@${
       proxyUrl.hostname
     }:${proxyUrl.port || 80}`;
     const proxyAgent = new HttpsProxyAgent(proxyURl);
-    return { proxyAgent, proxy: _proxy };
-  } catch (error) {
-    console.error("Invalid proxy URL format:", error);
-    throw new Error("Invalid proxy URL format");
+    return { proxyAgent, proxy: fallbackProxy };
   }
 };
 
@@ -950,6 +968,8 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
     const eventId = event?.eventId || event;
     const startTime = Date.now();
     const correlationId = generateCorrelationId();
+    let proxyAgent = externalProxyAgent;
+    let proxy = externalProxy;
     
     // Ensure we have a valid event ID
     if (!eventId) {
@@ -1000,67 +1020,102 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
       }
     }
     
-    // Check if we're currently rate limited
-    if (Date.now() < ScrapeEvent.rateLimits.blockedUntil) {
-      const waitTime = Math.ceil((ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000);
-      console.log(`Rate limit cooldown period active. Waiting ${waitTime}s before processing event ${eventId}`);
-      await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
-    }
-    
-    // Reset hourly counter if hour has changed
+    // Check rate limits to avoid overwhelming external services
     const currentHour = new Date().getHours();
     if (currentHour !== ScrapeEvent.rateLimits.lastHour) {
       ScrapeEvent.rateLimits.hourlyCount = 0;
       ScrapeEvent.rateLimits.lastHour = currentHour;
-      ScrapeEvent.rateLimits.recentEvents.clear();
     }
     
-    // Check if we've recently processed this event (within 10 minutes)
-    // This prevents redundant processing of the same event 
+    if (ScrapeEvent.rateLimits.hourlyCount >= ScrapeEvent.rateLimits.maxPerHour) {
+      console.warn(`Hourly rate limit reached (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour})`);
+      throw new Error("Rate limit exceeded");
+    }
+    
+    // Check global block (if we've detected we're being blocked by the server)
+    if (ScrapeEvent.rateLimits.blockedUntil > Date.now()) {
+      const waitTime = Math.ceil((ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000);
+      console.warn(`Global block in effect for ${waitTime} more seconds`);
+      throw new Error(`Service temporarily unavailable for ${waitTime} seconds`);
+    }
+    
+    // Check if this specific event was processed recently to avoid duplicates
     if (ScrapeEvent.rateLimits.recentEvents.has(eventId)) {
-      console.log(`Event ${eventId} was recently processed, using cached headers if available`);
-    } else {
-      // Add to recently processed events
-      ScrapeEvent.rateLimits.recentEvents.add(eventId);
+      console.log(`Event ${eventId} was processed recently, skipping duplicated request`);
       
-      // Implement automatic cleanup of the recent events set
-      setTimeout(() => {
-        ScrapeEvent.rateLimits.recentEvents.delete(eventId);
-      }, 10 * 60 * 1000); // Remove after 10 minutes
+      // Wait for a cached result if one is being processed
+      if (ScrapeEvent.pendingEvents && ScrapeEvent.pendingEvents.has(eventId)) {
+        console.log(`Waiting for pending result of event ${eventId}`);
+        try {
+          // Wait up to 10 seconds for the result
+          const waitStart = Date.now();
+          while (Date.now() - waitStart < 10000) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            if (ScrapeEvent.resultCache.has(resultCacheKey)) {
+              const result = ScrapeEvent.resultCache.get(resultCacheKey);
+              if (result && result.data) {
+                console.log(`Got pending result for event ${eventId}`);
+                return result.data;
+              }
+            }
+            if (!ScrapeEvent.pendingEvents.has(eventId)) {
+              console.log(`Event ${eventId} is no longer pending`);
+              break;
+            }
+          }
+        } catch (error) {
+          console.error(`Error waiting for pending event ${eventId}:`, error.message);
+        }
+      }
     }
     
-    // Increment hourly counter
-    ScrapeEvent.rateLimits.hourlyCount++;
+    // Track this event as recently processed
+    ScrapeEvent.rateLimits.recentEvents.add(eventId);
+    // Auto-clear events after 30 seconds to allow reprocessing
+    setTimeout(() => {
+      ScrapeEvent.rateLimits.recentEvents.delete(eventId);
+    }, 30 * 1000);
     
-    // Check if we're approaching rate limits
-    if (ScrapeEvent.rateLimits.hourlyCount > ScrapeEvent.rateLimits.maxPerHour * 0.9) {
-      console.warn(`Approaching hourly rate limit (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour}), adding delay for event ${eventId}`);
-      // Add progressive delay based on how close we are to the limit
-      const delayFactor = ScrapeEvent.rateLimits.hourlyCount / ScrapeEvent.rateLimits.maxPerHour;
-      const delay = Math.floor(delayFactor * 10000); // Up to 10 seconds delay
-      await new Promise(resolve => setTimeout(resolve, delay));
+    // Track as pending for deduplication
+    if (!ScrapeEvent.pendingEvents) {
+      ScrapeEvent.pendingEvents = new Set();
     }
+    ScrapeEvent.pendingEvents.add(eventId);
     
     // Use provided proxy if available, otherwise get a new one
-    let proxyAgent, proxy;
-    if (externalProxyAgent && externalProxy) {
-      console.log(`Using provided proxy ${externalProxy.proxy || 'unknown'} for event ${eventId}`);
-      proxyAgent = externalProxyAgent;
-      proxy = externalProxy;
-    } else {
-      try {
-        const proxyData = GetProxy();
-        proxyAgent = proxyData.proxyAgent;
-        proxy = proxyData.proxy;
-      } catch (proxyError) {
-        console.error(`Proxy error for event ${eventId}:`, proxyError.message);
-        // Try again with a different proxy selection mechanism
-        console.log(`Attempting alternative proxy selection for event ${eventId}`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const proxyData = GetProxy();
-        proxyAgent = proxyData.proxyAgent;
-        proxy = proxyData.proxy;
+    try {
+      if (proxyAgent && proxy) {
+        console.log(`Using provided proxy ${proxy.proxy || 'unknown'} for event ${eventId}`);
+      } else {
+        // If we have a ProxyManager instance, use it to get an event-specific proxy
+        if (global.proxyManager) {
+          const proxyData = global.proxyManager.getProxyForEvent(eventId);
+          if (proxyData) {
+            const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
+            proxyAgent = proxyAgentData.proxyAgent;
+            proxy = proxyData;
+            console.log(`Using dedicated proxy ${proxy.proxy} for event ${eventId} from ProxyManager`);
+          } else {
+            // Fallback to random proxy selection
+            const proxyData = GetProxy();
+            proxyAgent = proxyData.proxyAgent;
+            proxy = proxyData.proxy;
+          }
+        } else {
+          // Fallback to old method if no proxy manager is available
+          const proxyData = GetProxy();
+          proxyAgent = proxyData.proxyAgent;
+          proxy = proxyData.proxy;
+        }
       }
+    } catch (proxyError) {
+      console.error(`Proxy error for event ${eventId}:`, proxyError.message);
+      // Try again with a different proxy selection mechanism
+      console.log(`Attempting alternative proxy selection for event ${eventId}`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const proxyData = GetProxy();
+      proxyAgent = proxyData.proxyAgent;
+      proxy = proxyData.proxy;
     }
     
     // Log memory usage as needed
@@ -1233,6 +1288,12 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
   } catch (error) {
     console.error(`Scraping error for event ${event?.eventId || event}:`, error.message);
     
+    // Clear pending status
+    const eventId = event?.eventId || event;
+    if (ScrapeEvent.pendingEvents) {
+      ScrapeEvent.pendingEvents.delete(eventId);
+    }
+    
     // Implement automatic retry mechanism for recoverable errors
     const recoverable = error.message && (
       error.message.includes("proxy") || 
@@ -1241,7 +1302,8 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
       error.message.includes("ECONNRESET") ||
       error.message.includes("ETIMEDOUT") ||
       error.message.includes("circular") ||
-      error.message.includes("JSON")
+      error.message.includes("JSON") ||
+      error.message.includes("403") // Also retry 403 errors with a new proxy
     );
     
     if (recoverable) {
@@ -1255,19 +1317,47 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
       ScrapeEvent.failedAttempts.set(eventId, attempts);
       
       // Only retry if we haven't exceeded max attempts
-      if (attempts <= 2) { // Max 3 total attempts (1 original + 2 retries)
+      if (attempts <= 3) { // Max 4 total attempts (1 original + 3 retries)
         console.log(`Retrying event ${eventId} after recoverable error (attempt ${attempts})`);
         // Add exponential backoff
-        const backoff = Math.pow(2, attempts) * 1000 + Math.random() * 1000;
+        const backoff = Math.pow(2, attempts) * 2000 + Math.random() * 1000;
         await new Promise(resolve => setTimeout(resolve, backoff));
         
-        // Try with a fresh proxy
-        const { proxyAgent: newProxyAgent, proxy: newProxy } = GetProxy();
+        // Try with a fresh proxy - ensure we get a different one than before
+        let newProxy, newProxyAgent;
+        
+        if (global.proxyManager) {
+          // Release the old proxy with error
+          if (externalProxy && externalProxy.proxy) {
+            global.proxyManager.releaseProxy(eventId, false, error);
+          }
+          
+          // Get a fresh proxy from ProxyManager
+          const proxyData = global.proxyManager.getProxyForEvent(eventId);
+          if (proxyData) {
+            const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
+            newProxyAgent = proxyAgentData.proxyAgent;
+            newProxy = proxyData;
+          } else {
+            // Fallback
+            const proxyData = GetProxy();
+            newProxyAgent = proxyData.proxyAgent;
+            newProxy = proxyData.proxy;
+          }
+        } else {
+          // Fallback to old method
+          const proxyData = GetProxy();
+          newProxyAgent = proxyData.proxyAgent;
+          newProxy = proxyData.proxy;
+        }
         
         // Force cookie refresh on second retry
-        if (attempts === 2) {
-          // Reset cookies to force refresh
-          capturedState.cookies = null;
+        if (attempts >= 2) {
+          // Force refresh by clearing header cache
+          const cacheKey = `header_${eventId}_${newProxy?.proxy || 'default'}`;
+          if (ScrapeEvent.headerCache) {
+            ScrapeEvent.headerCache.delete(cacheKey);
+          }
         }
         
         return ScrapeEvent(event, newProxyAgent, newProxy);
@@ -1276,19 +1366,23 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
         setTimeout(() => {
           ScrapeEvent.failedAttempts.delete(eventId);
         }, 10 * 60 * 1000); // 10 minutes
+        
+        // Log final failure
+        console.error(`Exhausted all retry attempts for event ${eventId}`);
       }
     }
     
+    // Release proxy with error if we have a proxy manager
+    if (global.proxyManager && externalProxy && externalProxy.proxy) {
+      global.proxyManager.releaseProxy(event?.eventId || event, false, error);
+    }
+    
     return false;
-  } finally {
-    await cleanup(browser, context).catch(err => {
-      console.warn("Error during cleanup:", err.message);
-    });
   }
 };
 
 // Enhanced API call with better retry logic
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null) {
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0) {
   const maxRetries = 3;
   const baseDelayMs = 1000; // Increased base delay
   const maxDelayMs = 5000; // Increased max delay
@@ -1296,7 +1390,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   
   let attempts = 0;
   let lastError = null;
-  const startTime = Date.now();
+  let result = null;
   
   // Enhanced proxy rotation with better error tracking
   let alternativeProxies = [];
@@ -1358,7 +1452,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     
     if (attemptNum > 0) {
       await new Promise(resolve => setTimeout(resolve, delay));
-      console.log(`Retry attempt ${attemptNum} for ${eventId} after ${delay.toFixed(0)}ms`);
+      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delay.toFixed(0)}ms`);
     }
     
     try {
@@ -1370,6 +1464,25 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       for (const [key, value] of Object.entries(headers)) {
         if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
           safeHeaders[key] = value;
+        }
+      }
+      
+      // Add jitter to user agent to reduce fingerprinting
+      if (safeHeaders['User-Agent'] && Math.random() > 0.7) {
+        // Slightly modify user agent string to reduce tracking
+        const ua = safeHeaders['User-Agent'];
+        if (ua.includes('Chrome/')) {
+          const parts = ua.split('Chrome/');
+          const version = parts[1].split(' ')[0];
+          const versionParts = version.split('.');
+          if (versionParts.length > 2) {
+            // Slightly adjust patch version
+            const patchVersion = parseInt(versionParts[2], 10);
+            const newPatch = Math.max(0, patchVersion + Math.floor(Math.random() * 5) - 2);
+            versionParts[2] = newPatch.toString();
+            const newVersion = versionParts.join('.');
+            safeHeaders['User-Agent'] = parts[0] + 'Chrome/' + newVersion + ' ' + parts[1].split(' ').slice(1).join(' ');
+          }
         }
       }
       
@@ -1393,32 +1506,56 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         proxyErrors.set(proxyKey, (proxyErrors.get(proxyKey) || 0) + 1);
       }
       
-      if ((is403Error || is429Error || is500Error) && attemptNum < maxRetries) {
-        // On 429 (rate limit) errors, add longer backoff
-        if (is429Error) {
-          const retryAfter = error.response.headers['retry-after'];
-          let waitTime = 5000; // Default 5 seconds
-          
-          if (retryAfter) {
-            waitTime = parseInt(retryAfter, 10) * 1000;
-          }
-          
-          console.log(`Rate limit hit for ${eventId}. Waiting ${waitTime/1000}s before retry.`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-        }
-        
-        if (isRetryWithNewProxy && alternativeProxies.length > 0) {
-          const altProxyData = alternativeProxies.shift();
-          console.log(`Switching to alternative proxy for ${eventId} retry`);
-          return makeRequestWithRetry(url, headers, altProxyData.proxyAgent, attemptNum + 1, true);
-        }
-        
-        // Try with fresh headers
-        const newFingerprint = generateEnhancedFingerprint();
-        const newHeaders = generateEnhancedHeaders(newFingerprint, headers.Cookie);
-        return makeRequestWithRetry(url, newHeaders, agent, attemptNum + 1);
+      // If we've hit a rate limit, throw immediately
+      if (is429Error) {
+        throw error;
       }
       
+      // For 403 errors, we should try with a new proxy before giving up
+      if (is403Error && !isRetryWithNewProxy && attemptNum < 2) {
+        console.log(`403 error with proxy ${agent.proxy?.host || 'unknown'}, retrying with new proxy`);
+        
+        try {
+          // Get a new proxy
+          let newAgent;
+          
+          if (global.proxyManager) {
+            const proxyData = global.proxyManager.getProxyForEvent(eventId);
+            if (proxyData) {
+              const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
+              newAgent = proxyAgentData.proxyAgent;
+            } else {
+              const proxyData = GetProxy();
+              newAgent = proxyData.proxyAgent;
+            }
+          } else {
+            const proxyData = GetProxy();
+            newAgent = proxyData.proxyAgent;
+          }
+          
+          // Wait before retry
+          await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+          
+          // Try again with new proxy
+          return makeRequestWithRetry(url, headers, newAgent, attemptNum + 1, true);
+        } catch (proxyError) {
+          console.error(`Failed to get new proxy for 403 retry: ${proxyError.message}`);
+          throw error; // Rethrow original error if we can't get a new proxy
+        }
+      }
+      
+      // For network errors or server errors, retry a few times
+      if ((error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || is500Error) && attemptNum < 2) {
+        console.log(`Network/server error (${error.message}), retrying request (${attemptNum + 1})`);
+        
+        // Add back-off delay
+        const delay = 1000 * Math.pow(2, attemptNum) + Math.random() * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        
+        return makeRequestWithRetry(url, headers, agent, attemptNum + 1, isRetryWithNewProxy);
+      }
+      
+      // Otherwise, rethrow
       throw error;
     }
   };
