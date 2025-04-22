@@ -233,6 +233,27 @@ class ProxyManager {
   }
 
   /**
+   * Update the health status of a proxy based on successful or failed usage
+   * @param {string} proxyString - The proxy string
+   * @param {boolean} isHealthy - Whether the proxy is healthy or not
+   */
+  updateProxyHealth(proxyString, isHealthy) {
+    if (isHealthy) {
+      this.recordProxySuccess(proxyString);
+    } else {
+      this.recordProxyFailure(proxyString, new Error("Proxy marked unhealthy"));
+    }
+    
+    // Update the health status directly
+    const health = this.proxyHealth.get(proxyString);
+    if (health) {
+      health.isHealthy = isHealthy;
+      health.lastCheck = Date.now();
+      this.log(`Proxy ${proxyString} health status updated to ${isHealthy ? 'healthy' : 'unhealthy'}`);
+    }
+  }
+
+  /**
    * Get a proxy for a batch of events with improved selection logic
    */
   getProxyForBatch(eventIds) {
@@ -243,24 +264,39 @@ class ProxyManager {
       eventIds = eventIds.slice(0, this.MAX_EVENTS_PER_PROXY * this.getAvailableProxyCount());
     }
     
-    // Get first event from batch to determine requirements
+    // Select a proxy for the first event to return (for compatibility with existing code)
     const firstEventId = eventIds[0];
+    let firstProxy = null;
+    let firstProxyAgent = null;
     
-    // Find the healthiest available proxy for the first event
-    const proxy = this.getProxyForEvent(firstEventId);
+    // Assign separate proxy for each event in the batch
+    for (const eventId of eventIds) {
+      // Find a healthy available proxy for this specific event
+      const proxy = this.getProxyForEvent(eventId);
+      
+      if (!proxy) {
+        this.log(`No healthy proxy available for event ${eventId} in batch`, "warning");
+        continue; // Skip this event if no proxy available
+      }
+      
+      // Mark this proxy as used by this event
+      this.assignProxyToEvent(eventId, proxy.proxy);
+      this.proxyLastUsed.set(proxy.proxy, Date.now());
+      
+      // Save the first event's proxy for return value
+      if (eventId === firstEventId) {
+        firstProxy = proxy;
+        firstProxyAgent = this.createProxyAgent(proxy);
+      }
+    }
     
-    if (!proxy) {
+    // If we couldn't get a proxy for the first event, throw an error
+    if (!firstProxy) {
       this.log(`No healthy proxy available for batch with event ${firstEventId}`, "error");
       throw new Error(`No healthy proxy available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
     }
     
-    // Mark this proxy as used by this event
-    this.assignProxyToEvent(firstEventId, proxy.proxy);
-    this.proxyLastUsed.set(proxy.proxy, Date.now());
-    
-    const proxyAgent = this.createProxyAgent(proxy);
-    
-    return { ...proxyAgent, firstEventId };
+    return { ...firstProxyAgent, firstEventId };
   }
 
   /**

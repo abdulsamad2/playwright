@@ -15,6 +15,7 @@ const errorLogSchema = new mongoose.Schema(
         "PARSE_ERROR",
         "DATABASE_ERROR",
         "VALIDATION_ERROR",
+        "LONG_COOLDOWN",
       ],
     },
     message: {

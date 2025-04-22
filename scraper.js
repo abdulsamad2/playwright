@@ -1,6 +1,6 @@
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const axios = require("axios");
+import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
 import { firefox } from "playwright";
@@ -10,6 +10,10 @@ import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
+import pThrottle from 'p-throttle';
+import randomUseragent from 'random-useragent';
+import delay from 'delay-async';
+import pRetry from 'p-retry';
 
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
@@ -886,6 +890,20 @@ async function saveCookiesToFile(cookies) {
   }
 }
 
+// New throttled request function to limit API calls (max 5 requests per 10 seconds)
+const throttle = pThrottle({
+  limit: 5,
+  interval: 10000
+});
+
+const throttledRequest = throttle(async (options) => {
+  // Add random delay to make requests look more human
+  const humanDelay = Math.floor(Math.random() * 1000) + 500;
+  await delay(humanDelay);
+  return got(options);
+});
+
+// Replace the GetData function with this improved version
 const GetData = async (headers, proxyAgent, url, eventId) => {
   let abortController = new AbortController();
 
@@ -897,20 +915,62 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
     }, CONFIG.PAGE_TIMEOUT);
 
     try {
-      const response = await axios.get(url, {
-        httpsAgent: proxyAgent,
-        headers: {
-          ...headers,
-          "Accept-Encoding": "gzip, deflate, br",
-          Connection: "keep-alive",
+      // Add subtle variations to headers to look more human
+      const modifiedHeaders = { ...headers };
+      
+      // Occasionally modify accept-language with slight variations
+      if (Math.random() > 0.7 && modifiedHeaders['Accept-Language']) {
+        const languages = ['en-US', 'en-GB', 'en-CA', 'en'];
+        const weights = [0.8, 0.9, 0.7, 0.6];
+        const baseLanguage = languages[Math.floor(Math.random() * languages.length)];
+        const weight = weights[Math.floor(Math.random() * weights.length)];
+        modifiedHeaders['Accept-Language'] = `${baseLanguage},en;q=${weight}`;
+      }
+      
+      // Use an unpredictable order for cache directives
+      if (Math.random() > 0.5) {
+        modifiedHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      } else {
+        modifiedHeaders['Cache-Control'] = 'no-store, no-cache, must-revalidate';
+      }
+      
+      // Randomly adjust connection setting
+      modifiedHeaders['Connection'] = Math.random() > 0.3 ? 'keep-alive' : 'close';
+      
+      const response = await pRetry(() => throttledRequest({
+        url,
+        agent: {
+          https: proxyAgent
         },
-        timeout: CONFIG.PAGE_TIMEOUT,
-        signal: abortController.signal,
-        validateStatus: (status) => status === 200,
+        headers: modifiedHeaders,
+        timeout: {
+          request: CONFIG.PAGE_TIMEOUT
+        },
+        retry: {
+          limit: 2,
+          methods: ['GET'],
+          statusCodes: [408, 413, 429, 500, 502, 503, 504],
+          errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'ENETUNREACH', 'EAI_AGAIN']
+        },
+        throwHttpErrors: false,
+        signal: abortController.signal
+      }), {
+        retries: 3,
+        onFailedAttempt: error => {
+          console.log(`Request attempt ${error.attemptNumber} failed for ${eventId}. ${error.retriesLeft} retries left.`);
+          // Longer delays between retries
+          return delay(error.attemptNumber * 2000 + Math.random() * 1000);
+        }
       });
 
       clearTimeout(timeout);
-      return response.data;
+      
+      if (response.statusCode !== 200) {
+        console.log(`Request failed with status code ${response.statusCode} for ${eventId}`);
+        return false;
+      }
+      
+      return JSON.parse(response.body);
     } catch (error) {
       clearTimeout(timeout);
       console.log(`Request failed: ${error.message}`);
@@ -1157,11 +1217,7 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
         console.log(`Reusing existing headers for batch processing of event ${eventId}`);
         useProvidedHeaders = true;
         // Initialize fingerprint with at least basic properties
-        fingerprint = event.headers.fingerprint || { 
-          language: "en-US",
-          timezone: "America/New_York",
-          screen: { width: 1920, height: 1080 }
-        };
+        fingerprint = event.headers.fingerprint || generateEnhancedFingerprint();
       } else {
         console.log(`Incomplete headers for event ${eventId}, falling back to standard flow`);
       }
@@ -1194,7 +1250,7 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
           // Use headers from capturedData if available (fallback mechanism)
           if (capturedData.headers && !capturedData.cookies) {
             console.log(`Using fallback headers for event ${eventId}`);
-            return callTicketmasterAPI(capturedData.headers, proxyAgent, eventId, event);
+            return callTicketmasterAPI(capturedData.headers, proxyAgent, eventId, event, 0, startTime);
           }
 
           if (!capturedData?.cookies?.length) {
@@ -1205,11 +1261,11 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
             .map((cookie) => `${cookie.name}=${cookie.value}`)
             .join("; ");
 
-          userAgent = BrowserFingerprint.generateUserAgent(
-            capturedData.fingerprint
-          );
-          
-          fingerprint = capturedData.fingerprint;
+          // Generate enhanced fingerprint instead of the basic one
+          fingerprint = generateEnhancedFingerprint();
+          userAgent = fingerprint.browser?.userAgent || 
+                      randomUseragent.getRandom(ua => ua.browserName === fingerprint.browser?.name) ||
+                      BrowserFingerprint.generateUserAgent(fingerprint);
           
           // Store in memory cache
           ScrapeEvent.headerCache.set(cacheKey, {
@@ -1224,47 +1280,36 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
           const fallbackHeaders = generateFallbackHeaders();
           if (fallbackHeaders) {
             console.log(`Using fallback headers for event ${eventId} after error`);
-            return callTicketmasterAPI(fallbackHeaders, proxyAgent, eventId, event);
+            return callTicketmasterAPI(fallbackHeaders, proxyAgent, eventId, event, 0, startTime);
           }
           throw error;
         }
       }
     }
 
-    // Generate headers with enhanced request ID for tracing
-    const traceId = generateCorrelationId() + `-${Date.now()}`;
+    // Generate enhanced headers using our improved function
+    const enhancedHeaders = generateEnhancedHeaders(fingerprint, cookieString);
     
-    // Create safe header objects with no references to other objects to prevent circular JSON issues
+    // Create safe header objects that match the expected format
     const MapHeader = {
-      "User-Agent": userAgent,
-      "Accept": "*/*",
-      "Origin": "https://www.ticketmaster.com",
-      "Referer": "https://www.ticketmaster.com/",
-      "Content-Encoding": "gzip",
-      "Cookie": cookieString,
-      "X-Request-ID": traceId,
+      ...enhancedHeaders,
+      "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
       "X-Correlation-ID": correlationId
     };
 
     const FacetHeader = {
-      "Accept": "*/*",
-      "Accept-Language": fingerprint?.language || "en-US",
-      "Accept-Encoding": "gzip, deflate, br, zstd",
-      "User-Agent": userAgent,
-      "Referer": "https://www.ticketmaster.com/",
-      "Origin": "https://www.ticketmaster.com",
-      "Cookie": cookieString,
+      ...enhancedHeaders,
       "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
-      "X-Request-ID": traceId,
+      "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
       "X-Correlation-ID": correlationId
     };
 
-    console.log(`Starting event scraping for ${eventId} with${event?.headers ? " shared" : ""} cookies...`);
+    console.log(`Starting event scraping for ${eventId} with${event?.headers ? " shared" : ""} cookies and enhanced headers...`);
 
     // Measure API call time for performance monitoring
     const apiStartTime = Date.now();
-    const result = await callTicketmasterAPI(FacetHeader, proxyAgent, eventId, event, MapHeader);
+    const result = await callTicketmasterAPI(FacetHeader, proxyAgent, eventId, event, MapHeader, 0, startTime);
     const apiDuration = Date.now() - apiStartTime;
     
     console.log(`Event ${eventId} processing completed in ${Date.now() - startTime}ms (API: ${apiDuration}ms)`);
@@ -1382,7 +1427,10 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 };
 
 // Enhanced API call with better retry logic
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0) {
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0, startTime) {
+  // Add a fallback for startTime if not provided
+  startTime = startTime || Date.now();
+  
   const maxRetries = 3;
   const baseDelayMs = 1000; // Increased base delay
   const maxDelayMs = 5000; // Increased max delay
@@ -1442,22 +1490,22 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   // Add dynamic delay based on current rate limit usage
   if (limitPercentage > 0.5) {
     const dynamicDelay = Math.floor(limitPercentage * 2000); // up to 2 seconds delay at high usage
-    await new Promise(resolve => setTimeout(resolve, dynamicDelay));
+    await delay(dynamicDelay);
   }
   
   // Enhanced request with better error handling
   const makeRequestWithRetry = async (url, headers, agent, attemptNum = 0, isRetryWithNewProxy = false) => {
     const jitter = 1 + (Math.random() * jitterFactor * 2 - jitterFactor);
-    const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
+    const delayMs = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
     
     if (attemptNum > 0) {
-      await new Promise(resolve => setTimeout(resolve, delay));
-      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delay.toFixed(0)}ms`);
+      await delay(delayMs);
+      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delayMs.toFixed(0)}ms`);
     }
     
     try {
-      // Add random delay before request
-      await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 400));
+      // Add random delay before request to mimic human behavior
+      await delay(100 + Math.random() * 400);
       
       // Construct a safe copy of headers without any possible circular references
       const safeHeaders = {};
@@ -1467,37 +1515,76 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         }
       }
       
-      // Add jitter to user agent to reduce fingerprinting
-      if (safeHeaders['User-Agent'] && Math.random() > 0.7) {
-        // Slightly modify user agent string to reduce tracking
-        const ua = safeHeaders['User-Agent'];
-        if (ua.includes('Chrome/')) {
-          const parts = ua.split('Chrome/');
-          const version = parts[1].split(' ')[0];
-          const versionParts = version.split('.');
-          if (versionParts.length > 2) {
-            // Slightly adjust patch version
-            const patchVersion = parseInt(versionParts[2], 10);
-            const newPatch = Math.max(0, patchVersion + Math.floor(Math.random() * 5) - 2);
-            versionParts[2] = newPatch.toString();
-            const newVersion = versionParts.join('.');
-            safeHeaders['User-Agent'] = parts[0] + 'Chrome/' + newVersion + ' ' + parts[1].split(' ').slice(1).join(' ');
-          }
+      // Randomly modify browser fingerprint on retries to avoid detection
+      if (attemptNum > 0) {
+        // Generate a new random user agent
+        const randomUA = randomUseragent.getRandom(function(ua) {
+          return ua.browserName === 'Chrome' || ua.browserName === 'Firefox';
+        });
+        
+        if (randomUA) {
+          safeHeaders['User-Agent'] = randomUA;
         }
+        
+        // Add realistic browser-specific headers
+        const browserSpecificHeaders = Math.random() > 0.5 ? {
+          'sec-ch-ua': '"Chromium";v="116", "Google Chrome";v="116", "Not=A?Brand";v="99"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"'
+        } : {
+          'sec-ch-ua': '"Firefox";v="115", "Gecko";v="115"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"'
+        };
+        
+        Object.assign(safeHeaders, browserSpecificHeaders);
+        
+        // Add small variations in Accept headers to make it look more natural
+        const acceptVariations = [
+          '*/*',
+          'application/json, text/plain, */*',
+          'application/json, text/javascript, */*; q=0.01'
+        ];
+        safeHeaders['Accept'] = acceptVariations[Math.floor(Math.random() * acceptVariations.length)];
+        
+        // Vary the order of common headers to avoid fingerprinting
+        const headerOrder = {};
+        const commonHeaderKeys = ['Accept', 'Accept-Language', 'Accept-Encoding', 'User-Agent', 'Referer', 'Origin', 'X-Api-Key'];
+        const shuffledKeys = commonHeaderKeys.sort(() => Math.random() - 0.5);
+        
+        shuffledKeys.forEach(key => {
+          if (safeHeaders[key]) {
+            headerOrder[key] = safeHeaders[key];
+            delete safeHeaders[key];
+          }
+        });
+        
+        // Re-add the headers in a random order
+        Object.assign(safeHeaders, headerOrder);
       }
       
-      const response = await axios.get(url, {
-        httpsAgent: agent,
+      // Use throttled request to make calls look more natural
+      return await throttledRequest({
+        url,
+        agent: {
+          https: agent
+        },
         headers: safeHeaders,
-        timeout: 30000,
-        validateStatus: (status) => status === 200 || status === 304,
+        timeout: {
+          request: 30000
+        },
+        responseType: 'json',
+        retry: {
+          limit: 1, // We handle retries ourselves
+          methods: ['GET'],
+          statusCodes: [408, 413, 429, 500, 502, 503, 504],
+          errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND']
+        }
       });
-      
-      return response.data;
     } catch (error) {
-      const is403Error = error.response?.status === 403;
-      const is429Error = error.response?.status === 429;
-      const is500Error = error.response?.status >= 500 && error.response?.status < 600;
+      const is403Error = error.response?.statusCode === 403;
+      const is429Error = error.response?.statusCode === 429;
+      const is500Error = error.response?.statusCode >= 500 && error.response?.statusCode < 600;
       
       // Track proxy errors
       if (agent && (is403Error || is429Error)) {
@@ -1506,9 +1593,12 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         proxyErrors.set(proxyKey, (proxyErrors.get(proxyKey) || 0) + 1);
       }
       
-      // If we've hit a rate limit, throw immediately
+      // If we've hit a rate limit, wait longer before retrying
       if (is429Error) {
-        throw error;
+        const retryAfter = error.response?.headers?.['retry-after'] || 30; 
+        const waitTime = parseInt(retryAfter, 10) * 1000 || 30000;
+        console.log(`Rate limited (429) for event ${eventId}, waiting ${waitTime/1000}s before retry`);
+        await delay(waitTime);
       }
       
       // For 403 errors, we should try with a new proxy before giving up
@@ -1533,8 +1623,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
             newAgent = proxyData.proxyAgent;
           }
           
-          // Wait before retry
-          await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+          // Wait before retry with increasing backoff
+          await delay(2000 + Math.random() * 2000 + attemptNum * 1000);
           
           // Try again with new proxy
           return makeRequestWithRetry(url, headers, newAgent, attemptNum + 1, true);
@@ -1564,6 +1654,14 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
     const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
     
+    // Add unique query parameters to bust cache and appear more like a browser
+    const cacheBuster = Date.now();
+    const randomId = Math.floor(Math.random() * 1000000);
+    
+    // Append cache busting differently for each URL
+    const mapUrlWithParams = `${mapUrl}${mapUrl.includes('?') ? '&' : '?'}_=${cacheBuster}`;
+    const facetUrlWithParams = `${facetUrl}${facetUrl.includes('?') ? '&' : '?'}_=${cacheBuster+1}&t=${randomId}`;
+    
     // Ensure no circular references in headers by creating new objects with primitive values only
     let safeMapHeader = null;
     if (mapHeader) {
@@ -1589,33 +1687,37 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     // Wrap each API call in a try-catch to handle them independently
     if (randomizeOrder) {
       try {
-        DataMap = await makeRequestWithRetry(mapUrl, safeMapHeader || safeFacetHeader, proxyAgent);
+        const mapResponse = await makeRequestWithRetry(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent);
+        DataMap = mapResponse.body || mapResponse;
       } catch (mapError) {
         console.error(`Map API error for event ${eventId}:`, mapError.message);
         DataMap = null;
       }
       
       // Add variable delay between requests to appear more human-like
-      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 2000));
+      await delay(500 + Math.random() * 2000);
       
       try {
-        DataFacets = await makeRequestWithRetry(facetUrl, safeFacetHeader, proxyAgent);
+        const facetResponse = await makeRequestWithRetry(facetUrlWithParams, safeFacetHeader, proxyAgent);
+        DataFacets = facetResponse.body || facetResponse;
       } catch (facetError) {
         console.error(`Facet API error for event ${eventId}:`, facetError.message);
         DataFacets = null;
       }
     } else {
       try {
-        DataFacets = await makeRequestWithRetry(facetUrl, safeFacetHeader, proxyAgent);
+        const facetResponse = await makeRequestWithRetry(facetUrlWithParams, safeFacetHeader, proxyAgent);
+        DataFacets = facetResponse.body || facetResponse;
       } catch (facetError) {
         console.error(`Facet API error for event ${eventId}:`, facetError.message);
         DataFacets = null;
       }
       
-      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 2000));
+      await delay(500 + Math.random() * 2000);
       
       try {
-        DataMap = await makeRequestWithRetry(mapUrl, safeMapHeader || safeFacetHeader, proxyAgent);
+        const mapResponse = await makeRequestWithRetry(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent);
+        DataMap = mapResponse.body || mapResponse;
       } catch (mapError) {
         console.error(`Map API error for event ${eventId}:`, mapError.message);
         DataMap = null;
@@ -1661,48 +1763,188 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
 const generateEnhancedFingerprint = () => {
   const baseFingerprint = BrowserFingerprint.generate();
   
-  // Add more realistic browser characteristics
-  return {
-    ...baseFingerprint,
-    screen: {
-      ...baseFingerprint.screen,
-      colorDepth: Math.random() > 0.5 ? 24 : 30,
-      pixelRatio: Math.random() > 0.5 ? 1 : 2,
+  // Device types for realistic fingerprinting
+  const devices = [
+    // Windows devices
+    {
+      platform: 'Win32',
+      os: 'Windows',
+      osVersion: ['10.0', '11.0'],
+      browserNames: ['Chrome', 'Firefox', 'Edge'],
+      screenResolutions: [
+        {width: 1920, height: 1080},
+        {width: 1366, height: 768},
+        {width: 2560, height: 1440},
+        {width: 1280, height: 720}
+      ],
+      languages: ['en-US', 'en-GB', 'en'],
+      timezones: ['America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London'],
+      colorDepths: [24, 30],
+      pixelRatios: [1, 1.25, 1.5, 2],
+      vendors: ['Google Inc.', 'Microsoft Corporation', 'Intel Inc.'],
+      renderers: [
+        'ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+      ]
     },
-    language: baseFingerprint.language,
-    timezone: baseFingerprint.timezone,
-    platform: Math.random() > 0.5 ? 'Win32' : 'MacIntel',
-    deviceMemory: Math.random() > 0.5 ? 8 : 16,
-    hardwareConcurrency: Math.random() > 0.5 ? 4 : 8,
-    webglVendor: Math.random() > 0.5 ? 'Google Inc.' : 'Intel Inc.',
-    webglRenderer: Math.random() > 0.5 ? 'ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)' : 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)',
+    // Mac devices
+    {
+      platform: 'MacIntel',
+      os: 'Mac OS X',
+      osVersion: ['10.15.7', '11.6.8', '12.5.1', '13.4.1'],
+      browserNames: ['Chrome', 'Firefox', 'Safari'],
+      screenResolutions: [
+        {width: 1440, height: 900},
+        {width: 2560, height: 1600},
+        {width: 2880, height: 1800},
+        {width: 1280, height: 800}
+      ],
+      languages: ['en-US', 'en-GB', 'en-CA', 'en'],
+      timezones: ['America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London'],
+      colorDepths: [24, 30],
+      pixelRatios: [1, 2],
+      vendors: ['Apple Inc.', 'Google Inc.', 'Intel Inc.'],
+      renderers: [
+        'Apple GPU',
+        'Intel(R) Iris(TM) Plus Graphics',
+        'AMD Radeon Pro 5500M OpenGL Engine'
+      ]
+    }
+  ];
+  
+  // Get random values for consistency across the fingerprint
+  const randomIndex = Math.floor(Math.random() * devices.length);
+  const device = devices[randomIndex];
+  
+  // Choose a browser
+  const browserIndex = Math.floor(Math.random() * device.browserNames.length);
+  const browserName = device.browserNames[browserIndex];
+  
+  // Choose random values for other properties
+  const screenRes = device.screenResolutions[Math.floor(Math.random() * device.screenResolutions.length)];
+  const language = device.languages[Math.floor(Math.random() * device.languages.length)];
+  const timezone = device.timezones[Math.floor(Math.random() * device.timezones.length)];
+  const colorDepth = device.colorDepths[Math.floor(Math.random() * device.colorDepths.length)];
+  const pixelRatio = device.pixelRatios[Math.floor(Math.random() * device.pixelRatios.length)];
+  const vendor = device.vendors[Math.floor(Math.random() * device.vendors.length)];
+  const renderer = device.renderers[Math.floor(Math.random() * device.renderers.length)];
+  const osVersion = device.osVersion[Math.floor(Math.random() * device.osVersion.length)];
+  
+  // Random hardware values that make sense for the device
+  const memoryOptions = [4, 8, 16, 32];
+  const cpuOptions = [2, 4, 6, 8, 10, 12];
+  const memory = memoryOptions[Math.floor(Math.random() * memoryOptions.length)];
+  const cpuCount = cpuOptions[Math.floor(Math.random() * cpuOptions.length)];
+  
+  // Generate a realistic timestamp for browser cookies
+  const browserCookieCreated = Date.now() - Math.floor(Math.random() * 30 * 24 * 60 * 60 * 1000); // 0-30 days ago
+  
+  // Random browser capabilities - not all browsers support all features
+  const supportsSpeechSynthesis = browserName !== 'Safari' && Math.random() > 0.1;
+  const supportsPaymentRequest = browserName === 'Chrome' || (browserName === 'Edge' && Math.random() > 0.3);
+  const supportsWebGL2 = browserName !== 'Safari' || Math.random() > 0.4;
+  
+  // Enhanced fingerprint object
+  return {
+    ...baseFingerprint, // Keep base fingerprint as fallback
+    // Browser identification
+    browser: {
+      name: browserName,
+      version: getRandomBrowserVersion(browserName),
+      userAgent: randomUseragent.getRandom(ua => ua.browserName === browserName) || baseFingerprint.userAgent,
+      language: language,
+      cookies: true,
+      localStorage: true,
+      sessionStorage: true,
+      cookiesCreatedAt: browserCookieCreated,
+    },
+    // Operating system
+    platform: {
+      name: device.os,
+      version: osVersion,
+      type: 'desktop',
+      architecture: Math.random() > 0.5 ? 'x86_64' : 'arm64', 
+    },
+    // Screen and display
+    screen: {
+      width: screenRes.width,
+      height: screenRes.height,
+      colorDepth: colorDepth,
+      pixelRatio: pixelRatio,
+      orientation: 'landscape'
+    },
+    // Connection info
+    connection: {
+      type: Math.random() > 0.3 ? 'wifi' : 'ethernet',
+      downlink: 5 + Math.floor(Math.random() * 95), // 5-100 Mbps
+      rtt: 5 + Math.floor(Math.random() * 95), // 5-100ms
+    },
+    // Hardware
+    hardware: {
+      deviceMemory: memory,
+      hardwareConcurrency: cpuCount,
+    },
+    // Graphics
+    graphics: {
+      vendor: vendor,
+      renderer: renderer,
+      webGLVendor: vendor,
+      webGLRenderer: renderer,
+      supportsWebGL: true,
+      supportsWebGL2: supportsWebGL2,
+    },
+    // Capabilities
+    capabilities: {
+      audio: true,
+      video: true,
+      webRTC: Math.random() > 0.2,
+      geolocation: Math.random() > 0.4,
+      speechSynthesis: supportsSpeechSynthesis,
+      paymentRequest: supportsPaymentRequest,
+    },
+    language: language,
+    timezone: timezone,
   };
 };
+
+// Helper function to generate realistic browser versions
+function getRandomBrowserVersion(browserName) {
+  const browserVersions = {
+    'Chrome': ['111.0.5563.111', '112.0.5615.50', '113.0.5672.92', '114.0.5735.106', '115.0.5790.98', '116.0.5845.97'],
+    'Firefox': ['111.0', '112.0.2', '113.0.1', '114.0.2', '115.0', '116.0'],
+    'Edge': ['111.0.1661.51', '112.0.1722.48', '113.0.1774.42', '114.0.1823.51', '115.0.1901.183', '116.0.1938.62'],
+    'Safari': ['16.3', '16.4', '16.5', '16.6', '17.0']
+  };
+  
+  const versions = browserVersions[browserName] || browserVersions['Chrome'];
+  return versions[Math.floor(Math.random() * versions.length)];
+}
 
 // Enhanced human behavior simulation
 const simulateEnhancedHumanBehavior = async (page) => {
   try {
     // Random delays between actions
-    const delays = [100, 200, 300, 400, 500];
-    const randomDelay = () => delays[Math.floor(Math.random() * delays.length)];
+    const delayOptions = [100, 200, 300, 400, 500];
+    const randomDelay = () => delayOptions[Math.floor(Math.random() * delayOptions.length)];
     
     // Random mouse movements
     const viewportSize = page.viewportSize();
     if (viewportSize) {
-      const steps = 5 + Math.floor(Math.random() * 5);
+      const steps = 3 + Math.floor(Math.random() * 3);
       for (let i = 0; i < steps; i++) {
         await page.mouse.move(
           Math.floor(Math.random() * viewportSize.width),
           Math.floor(Math.random() * viewportSize.height),
-          { steps: 3 + Math.floor(Math.random() * 3) }
+          { steps: 4 + Math.floor(Math.random() * 3) }
         );
         await page.waitForTimeout(randomDelay());
       }
     }
     
     // Random scrolling
-    const scrollAmount = Math.floor(Math.random() * 500) + 100;
-    const scrollSteps = 3 + Math.floor(Math.random() * 3);
+    const scrollAmount = Math.floor(Math.random() * 500) + 200;
+    const scrollSteps = 3 + Math.floor(Math.random() * 2);
     const stepSize = scrollAmount / scrollSteps;
     
     for (let i = 0; i < scrollSteps; i++) {
@@ -1711,15 +1953,15 @@ const simulateEnhancedHumanBehavior = async (page) => {
     }
     
     // Random keyboard activity
-    if (Math.random() > 0.7) {
+    if (Math.random() > 0.6) {
       await page.keyboard.press('Tab');
       await page.waitForTimeout(randomDelay());
     }
     
     // Random viewport resizing
-    if (Math.random() > 0.8) {
-      const newWidth = 1024 + Math.floor(Math.random() * 500);
-      const newHeight = 768 + Math.floor(Math.random() * 300);
+    if (Math.random() > 0.7 && viewportSize) {
+      const newWidth = Math.max(800, viewportSize.width + Math.floor(Math.random() * 100) - 50);
+      const newHeight = Math.max(600, viewportSize.height + Math.floor(Math.random() * 100) - 50);
       await page.setViewportSize({ width: newWidth, height: newHeight });
       await page.waitForTimeout(randomDelay());
     }
@@ -1733,61 +1975,97 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
   try {
     // Ensure we have valid inputs
     if (!fingerprint) {
-      console.warn('No fingerprint provided, using default values');
-      fingerprint = {
-        language: 'en-US',
-        timezone: 'America/New_York',
-        screen: { width: 1920, height: 1080 }
-      };
+      fingerprint = generateEnhancedFingerprint();
     }
 
     if (!cookies) {
-      console.warn('No cookies provided, using empty string');
       cookies = '';
     }
 
-    const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
-    const acceptLanguages = ['en-US,en;q=0.9', 'en-GB,en;q=0.9', 'en-CA,en;q=0.9'];
-    const acceptEncodings = ['gzip, deflate, br', 'gzip, deflate', 'br'];
-    
-    // Generate a realistic sec-ch-ua string based on the browser
-    const browser = fingerprint.browser || { name: 'Chrome', version: '120.0.0.0' };
-    const secChUa = `"Not_A Brand";v="8", "${browser.name}";v="${browser.version.split('.')[0]}"`;
-    
-    // Generate a realistic sec-ch-ua-platform based on the platform
-    const platform = fingerprint.platform || { name: 'Windows', version: '10' };
-    const secChUaPlatform = platform.name === 'Windows' ? 'Windows' : 
-                           platform.name === 'Macintosh' ? 'macOS' : 
-                           platform.name === 'iPhone' ? 'iOS' : 
-                           platform.name === 'Android' ? 'Android' : 'Windows';
+    // Get appropriate user agent - either from fingerprint or generate new one
+    let userAgent;
+    if (fingerprint.browser?.userAgent) {
+      userAgent = fingerprint.browser.userAgent;
+    } else if (fingerprint.browser?.name) {
+      userAgent = randomUseragent.getRandom(ua => ua.browserName === fingerprint.browser.name);
+    } else {
+      userAgent = randomUseragent.getRandom(ua => ua.browserName === 'Chrome');
+    }
 
-    // Generate a realistic sec-ch-ua-mobile based on the device type
-    const isMobile = fingerprint.platform?.type === 'mobile' || fingerprint.platform?.type === 'tablet';
+    const browserName = fingerprint.browser?.name || 'Chrome';
+    const browserVersion = fingerprint.browser?.version || '116.0.0.0';
+    const platformName = fingerprint.platform?.name || 'Windows';
+    
+    // Generate appropriate sec-ch-ua headers based on browser
+    let secChUa;
+    if (browserName === 'Chrome') {
+      secChUa = `"Not A(Brand";v="99", "Google Chrome";v="${browserVersion.split('.')[0]}", "Chromium";v="${browserVersion.split('.')[0]}"`;
+    } else if (browserName === 'Firefox') {
+      secChUa = `"Firefox";v="${browserVersion.split('.')[0]}"`;
+    } else if (browserName === 'Edge') {
+      secChUa = `"Microsoft Edge";v="${browserVersion.split('.')[0]}", "Chromium";v="${browserVersion.split('.')[0]}"`;
+    } else if (browserName === 'Safari') {
+      secChUa = `"Safari";v="${browserVersion.split('.')[0]}"`;
+    } else {
+      secChUa = `"Not_A Brand";v="8", "${browserName}";v="${browserVersion.split('.')[0]}"`;
+    }
+    
+    // Generate platform string
+    const secChUaPlatform = platformName === 'Windows' ? 'Windows' : 
+                           platformName === 'Mac OS X' ? 'macOS' : 
+                           platformName === 'iPhone' ? 'iOS' : 
+                           platformName === 'Android' ? 'Android' : 'Windows';
+
+    // Mobile detection
+    const isMobile = fingerprint.platform?.type === 'mobile' || false;
     const secChUaMobile = isMobile ? '?1' : '?0';
 
-    return {
+    // Preferred language
+    const language = fingerprint.language || 'en-US';
+    
+    // Choose varied accept language formats
+    let acceptLanguage;
+    if (language === 'en-US') {
+      acceptLanguage = Math.random() > 0.5 ? 'en-US,en;q=0.9' : 'en-US,en;q=0.9,en-GB;q=0.8';
+    } else if (language === 'en-GB') {
+      acceptLanguage = Math.random() > 0.5 ? 'en-GB,en;q=0.9' : 'en-GB,en;q=0.9,en-US;q=0.8';
+    } else {
+      acceptLanguage = `${language},en;q=0.9`;
+    }
+
+    // Randomize accept encoding based on browser
+    let acceptEncoding;
+    if (browserName === 'Firefox') {
+      acceptEncoding = 'gzip, deflate, br';
+    } else if (browserName === 'Safari') {
+      acceptEncoding = 'gzip, deflate';
+    } else {
+      acceptEncoding = 'gzip, deflate, br';
+    }
+
+    const headers = {
       'User-Agent': userAgent,
-      'Accept': '*/*',
-      'Accept-Language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
-      'Accept-Encoding': acceptEncodings[Math.floor(Math.random() * acceptEncodings.length)],
-      'Connection': 'keep-alive',
+      'Accept': ['*/*', 'application/json, text/plain, */*', 'application/json, text/javascript, */*; q=0.01'][Math.floor(Math.random() * 3)],
+      'Accept-Language': acceptLanguage,
+      'Accept-Encoding': acceptEncoding,
+      'Connection': Math.random() > 0.3 ? 'keep-alive' : 'close',
       'Referer': 'https://www.ticketmaster.com/',
       'Origin': 'https://www.ticketmaster.com',
+      'sec-ch-ua': secChUa,
+      'sec-ch-ua-mobile': secChUaMobile,
+      'sec-ch-ua-platform': `"${secChUaPlatform}"`,
       'Sec-Fetch-Dest': 'empty',
       'Sec-Fetch-Mode': 'cors',
       'Sec-Fetch-Site': 'same-site',
       'Pragma': 'no-cache',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': Math.random() > 0.5 ? 'no-cache, no-store, must-revalidate' : 'no-store, max-age=0',
       'Cookie': cookies,
       'X-Requested-With': 'XMLHttpRequest',
       'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
-      'sec-ch-ua': secChUa,
-      'sec-ch-ua-mobile': secChUaMobile,
-      'sec-ch-ua-platform': secChUaPlatform,
-      'DNT': Math.random() > 0.5 ? '1' : '0',
-      'Upgrade-Insecure-Requests': '1',
-      'TE': 'trailers',
+      'DNT': Math.random() > 0.7 ? '1' : '0',
     };
+    
+    return headers;
   } catch (error) {
     console.error('Error generating enhanced headers:', error);
     // Return a basic set of headers as fallback

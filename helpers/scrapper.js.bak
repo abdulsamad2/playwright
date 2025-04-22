@@ -98,7 +98,7 @@ async function initBrowser(proxy) {
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
     browser = await firefox.launch({
-      headless: true,
+      headless: false,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
@@ -129,23 +129,177 @@ async function captureApiHeaders(page, eventId, fingerprint) {
   return new Promise((resolve, reject) => {
     const apiPattern = new RegExp(`/api/ismds/event/${eventId}/facets.*`);
     let captured = false;
-
+    let requestTimeout;
+    
+    // Set a timeout for the API request capture
+    const setRequestTimeout = () => {
+      clearTimeout(requestTimeout);
+      requestTimeout = setTimeout(() => {
+        if (!captured) {
+          console.log("Timeout waiting for API request, attempting to trigger it manually...");
+          triggerApiRequest();
+        }
+      }, 15000); // 15 seconds timeout
+    };
+    
+    // Try to manually trigger the API request
+    const triggerApiRequest = async () => {
+      try {
+        console.log("Attempting to trigger API request manually...");
+        
+        // Scroll to trigger lazy loading
+        await page.evaluate(() => {
+          window.scrollTo(0, document.body.scrollHeight / 2);
+          setTimeout(() => window.scrollTo(0, document.body.scrollHeight), 500);
+        });
+        
+        // Try clicking on elements that might trigger the request
+        await page.evaluate(() => {
+          // Try to click on seating chart elements
+          const seatingSections = document.querySelectorAll('[data-bdd="seating-chart"], .seating-map, .event-map');
+          if (seatingSections.length > 0) {
+            seatingSections[0].click();
+          }
+          
+          // Try to click on ticket selection elements
+          const ticketElements = document.querySelectorAll('[data-bdd="tickets-button"], .tickets-button, .find-tickets');
+          if (ticketElements.length > 0) {
+            ticketElements[0].click();
+          }
+        });
+        
+        // Set a new timeout
+        setRequestTimeout();
+      } catch (error) {
+        console.error("Error trying to trigger API request:", error);
+      }
+    };
+    
+    // Initial timeout setup
+    setRequestTimeout();
+    
+    // Listen for API requests
     page.on("request", async (request) => {
       const url = request.url();
       if (apiPattern.test(url) && !captured) {
         captured = true;
+        clearTimeout(requestTimeout);
+        
+        // Wait a bit to ensure all cookies are properly set
+        await page.waitForTimeout(500);
+        
+        // Capture the request headers and cookies
         const headers = request.headers();
         const cookies = await context.cookies();
-        resolve({ headers, cookies, fingerprint });
+        
+        // Verify cookies domain to ensure they're from ticketmaster.com
+        const validCookies = cookies.filter(cookie => 
+          cookie.domain.includes('ticketmaster.com') || 
+          cookie.domain.includes('tmol.io') ||
+          cookie.domain.includes('.ticketmaster.') ||
+          cookie.domain === ''
+        );
+        
+        console.log(`Captured ${validCookies.length} valid cookies`);
+        
+        resolve({ 
+          headers, 
+          cookies: validCookies, 
+          fingerprint,
+          url: request.url() // Include the actual URL for debugging
+        });
       }
     });
-
+    
+    // Set overall timeout
     setTimeout(() => {
       if (!captured) {
+        clearTimeout(requestTimeout);
         reject(new Error("Timeout waiting for API request"));
       }
-    }, 600000);
+    }, 120000); // 2 minutes overall timeout
   });
+}
+
+async function handleChallengePage(page, eventId) {
+  console.log("Checking for challenge page...");
+  
+  // Check if we're on a challenge page
+  const isChallengePage = await page.evaluate(() => {
+    return document.querySelector('#challenge-form') !== null || 
+           document.querySelector('.challenge-container') !== null ||
+           document.querySelector('#captcha') !== null ||
+           document.querySelector('[data-ray]') !== null ||
+           document.querySelector('iframe[src*="captcha"]') !== null;
+  });
+  
+  if (isChallengePage) {
+    console.log("Challenge page detected, waiting for it to resolve...");
+    
+    // Sometimes challenges resolve automatically, wait for navigation
+    try {
+      // Click any "I am human" or verification buttons if they exist
+      await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const verifyButtons = buttons.filter(button => 
+          button.textContent.toLowerCase().includes('verify') || 
+          button.textContent.toLowerCase().includes('human') ||
+          button.textContent.toLowerCase().includes('continue')
+        );
+        if (verifyButtons.length > 0) {
+          verifyButtons[0].click();
+        }
+      });
+      
+      // Wait for navigation away from challenge page
+      await page.waitForNavigation({ timeout: 90000 });
+      
+      // Check if we resolved the challenge
+      const stillOnChallenge = await page.evaluate(() => {
+        return document.querySelector('#challenge-form') !== null || 
+               document.querySelector('.challenge-container') !== null ||
+               document.querySelector('#captcha') !== null;
+      });
+      
+      if (stillOnChallenge) {
+        throw new Error("Failed to automatically resolve challenge page");
+      }
+      
+      console.log("Challenge page resolved");
+      return true;
+    } catch (error) {
+      console.error("Error handling challenge page:", error);
+      throw new Error("Failed to handle challenge page");
+    }
+  }
+  
+  return false;
+}
+
+async function verifyEventPage(page, eventId) {
+  return await page.evaluate((eventId) => {
+    // Check if the URL contains the event ID
+    const eventIdInUrl = window.location.href.includes(eventId);
+    
+    // Check for elements that indicate we're on an event page
+    const hasEventDetails = 
+      document.querySelector('.event-header') !== null || 
+      document.querySelector('[data-bdd="event-title"]') !== null ||
+      document.querySelector('.event-details') !== null ||
+      document.querySelector('.event-info') !== null;
+    
+    // Check for elements that indicate we're NOT on the event page
+    const hasChallenge = 
+      document.querySelector('#challenge-form') !== null ||
+      document.querySelector('.challenge-container') !== null ||
+      document.querySelector('#captcha') !== null;
+    
+    // Success if we have the event ID in URL, event details, and no challenge
+    return {
+      isEventPage: eventIdInUrl && hasEventDetails && !hasChallenge,
+      hasChallenge
+    };
+  }, eventId);
 }
 
 async function getCapturedData(eventId, proxy) {
@@ -168,8 +322,55 @@ async function getCapturedData(eventId, proxy) {
 
     const page = await context.newPage();
     const url = `https://www.ticketmaster.com/event/${eventId}`;
-
-    await page.goto(url, { waitUntil: "networkidle" });
+    
+    // Navigate to the event page
+    console.log(`Navigating to ${url}...`);
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    
+    // Allow time for any redirects or challenges to appear
+    await page.waitForTimeout(3000);
+    
+    // Handle challenge pages if present
+    await handleChallengePage(page, eventId);
+    
+    // Wait for network activity to settle
+    await page.waitForLoadState("networkidle");
+    
+    // Verify we're on the actual event page
+    const { isEventPage, hasChallenge } = await verifyEventPage(page, eventId);
+    
+    if (hasChallenge) {
+      // Try again to handle the challenge
+      await handleChallengePage(page, eventId);
+      
+      // Re-verify after handling
+      const verificationResult = await verifyEventPage(page, eventId);
+      if (!verificationResult.isEventPage) {
+        throw new Error("Still not on event page after handling challenges");
+      }
+    } else if (!isEventPage) {
+      console.log("Not on event page, waiting for navigation...");
+      
+      // Wait a bit longer and check again
+      await page.waitForTimeout(5000);
+      const finalCheck = await verifyEventPage(page, eventId);
+      
+      if (!finalCheck.isEventPage) {
+        throw new Error("Failed to reach event page");
+      }
+    }
+    
+    console.log("Successfully on event page, capturing headers...");
+    
+    // Ensure the page has loaded enough to trigger API requests
+    await page.evaluate(() => {
+      // Scroll down to trigger lazy loading and API calls
+      window.scrollBy(0, 300);
+    });
+    
+    // Wait a moment for API calls to trigger
+    await page.waitForTimeout(2000);
+    
     const data = await captureApiHeaders(page, eventId, fingerprint);
     await page.close();
 
@@ -449,4 +650,4 @@ async function main() {
   }
 }
 
-main();
+main(); 

@@ -646,8 +646,16 @@ class ScraperManager {
         }),
       ]);
 
-      if (!result || !Array.isArray(result) || result.length === 0) {
-        throw new Error("Empty or invalid scrape result");
+      if (!result) {
+        throw new Error("Empty scrape result: null or undefined returned");
+      }
+      
+      if (!Array.isArray(result)) {
+        throw new Error(`Invalid scrape result: expected array but got ${typeof result}`);
+      }
+      
+      if (result.length === 0) {
+        throw new Error("Empty scrape result: array is empty");
       }
       
       // We're still storing in the cache for metrics/monitoring purposes
@@ -1191,10 +1199,18 @@ class ScraperManager {
               }),
             ]);
 
-            if (!result || !Array.isArray(result) || result.length === 0) {
-              throw new Error("Empty or invalid scrape result");
+            if (!result) {
+              throw new Error("Empty scrape result: null or undefined returned");
             }
-
+            
+            if (!Array.isArray(result)) {
+              throw new Error(`Invalid scrape result: expected array but got ${typeof result}`);
+            }
+            
+            if (result.length === 0) {
+              throw new Error("Empty scrape result: array is empty");
+            }
+            
             // We're still storing in the cache for metrics/monitoring purposes
             // but we'll never use the cached results for returning to the client
             this.responseCache.set(eventId, result);
