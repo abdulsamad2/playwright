@@ -25,6 +25,7 @@ class ProxyManager {
     this.proxy403Count = new Map(); // Specifically track 403 errors per proxy
     this.proxySuccessRate = new Map(); // Track success rate per proxy
     this.bannedProxies = new Set(); // Completely banned proxies that consistently get 403s
+    this.proxyFailureSequences = new Map(); // Track how many times a proxy has been marked unhealthy
     
     // Initialize usage counts and health status
     this.proxies.forEach(proxy => {
@@ -39,6 +40,7 @@ class ProxyManager {
       this.proxyRetryTime.set(proxy.proxy, 0);
       this.proxy403Count.set(proxy.proxy, 0);
       this.proxySuccessRate.set(proxy.proxy, 1.0); // Start with perfect score
+      this.proxyFailureSequences.set(proxy.proxy, 0); // Initialize failure sequence counter
     });
     
     // Set up periodic health reset to prevent permanently marking proxies as unhealthy
@@ -68,27 +70,12 @@ class ProxyManager {
         }
       }
       
-      // Gradually restore health for all proxies
-      if (health.failureCount > 0) {
-        health.failureCount = Math.max(0, health.failureCount - 1);
-      }
-      
-      // Mark as healthy again if it was unhealthy
-      if (!health.isHealthy) {
-        // Only restore health if not completely banned
-        if (!this.bannedProxies.has(proxyString)) {
-          health.isHealthy = true;
-          this.log(`Restored health for proxy ${proxyString}`);
-        }
-      }
+      // We don't automatically reset failure count anymore,
+      // as it's managed by the new proxy health lifecycle
     }
     
-    // Clear the failed proxies set (except banned ones)
-    for (const proxy of this.failedProxies) {
-      if (!this.bannedProxies.has(proxy)) {
-        this.failedProxies.delete(proxy);
-      }
-    }
+    // Only handle retrying of proxies in the retryTime logic
+    // The failed proxies set is checked before each use
   }
 
   /**
@@ -134,8 +121,8 @@ class ProxyManager {
       return false;
     }
     
-    // If proxy has too many failures, mark as unhealthy
-    if (health.failureCount > 3 && health.successCount < health.failureCount) {
+    // If proxy has 3 or more failures, mark as unhealthy
+    if (health.failureCount >= 3) {
       return false;
     }
     
@@ -172,6 +159,11 @@ class ProxyManager {
     if (health) {
       health.successCount++;
       health.lastCheck = Date.now();
+      
+      // Reset failure count on continuous success
+      if (health.successCount >= 3 && health.failureCount > 0) {
+        health.failureCount = Math.max(0, health.failureCount - 1);
+      }
       
       // Improve success rate
       const currentRate = this.proxySuccessRate.get(proxyString) || 0;
@@ -218,17 +210,41 @@ class ProxyManager {
         }
       }
       
-      // Calculate retry time with exponential backoff
-      const retryDelayBase = is403 ? 5 * 60 * 1000 : 30 * 1000; // 5 minutes for 403s, 30 seconds for others
-      const jitter = Math.random() * 10000; // Add up to 10 seconds of jitter
-      const retryTime = Date.now() + retryDelayBase * Math.pow(2, health.failureCount - 1) + jitter;
-      
-      this.proxyRetryTime.set(proxyString, retryTime);
-      
-      // Add to failed proxies set
-      this.failedProxies.add(proxyString);
-      
-      this.log(`Proxy ${proxyString} failure recorded. Retry after ${new Date(retryTime).toLocaleTimeString()}`, "warning");
+      // If 3 failures, mark proxy as unhealthy and set retry time based on failure sequence
+      if (health.failureCount >= 3) {
+        health.isHealthy = false;
+        
+        // Track failure sequence and set appropriate retry time
+        const failureSequence = (this.proxyFailureSequences.get(proxyString) || 0) + 1;
+        this.proxyFailureSequences.set(proxyString, failureSequence);
+        
+        let retryDelay;
+        if (failureSequence === 1) {
+          // First failure sequence: 5 minutes cool down
+          retryDelay = 5 * 60 * 1000;
+          this.log(`Proxy ${proxyString} marked unhealthy (first time). Will retry after 5 minutes.`, "warning");
+        } else if (failureSequence === 2) {
+          // Second failure sequence: 1 hour cool down
+          retryDelay = 60 * 60 * 1000;
+          this.log(`Proxy ${proxyString} marked unhealthy (second time). Will retry after 1 hour.`, "warning");
+        } else {
+          // Third or more failure sequence: ban permanently
+          this.bannedProxies.add(proxyString);
+          retryDelay = Number.MAX_SAFE_INTEGER; // Never retry
+          this.log(`Proxy ${proxyString} failed too many times and is now permanently banned.`, "error");
+        }
+        
+        const jitter = Math.random() * 10000; // Add up to 10 seconds of jitter
+        const retryTime = Date.now() + retryDelay + jitter;
+        this.proxyRetryTime.set(proxyString, retryTime);
+        
+        // Add to failed proxies set
+        this.failedProxies.add(proxyString);
+        
+        if (!this.bannedProxies.has(proxyString)) {
+          this.log(`Proxy ${proxyString} will be retried after ${new Date(retryTime).toLocaleTimeString()}`, "warning");
+        }
+      }
     }
   }
 
@@ -383,12 +399,16 @@ class ProxyManager {
           // This proxy has waited long enough, give it another chance
           const health = this.proxyHealth.get(proxy.proxy);
           if (health) {
-            health.failureCount = Math.max(0, health.failureCount - 1);
+            // Reset the failure count since we're giving it another chance
+            health.failureCount = 0;
             health.isHealthy = true;
             this.failedProxies.delete(proxy.proxy);
             bestProxy = proxy;
             this.lastAssignedProxyIndex = this.proxies.indexOf(proxy);
-            this.log(`Giving proxy ${proxy.proxy} another chance after timeout for event ${eventId}`, "info");
+            
+            // Log with appropriate retry attempt message
+            const failureSequence = this.proxyFailureSequences.get(proxy.proxy) || 0;
+            this.log(`Giving proxy ${proxy.proxy} another chance after cooldown (attempt ${failureSequence + 1}) for event ${eventId}`, "info");
             break;
           }
         }
@@ -510,6 +530,8 @@ class ProxyManager {
       const health = this.proxyHealth.get(proxyString);
       const count403 = this.proxy403Count.get(proxyString) || 0;
       const successRate = this.proxySuccessRate.get(proxyString) || 0;
+      const failureSequence = this.proxyFailureSequences.get(proxyString) || 0;
+      const retryTime = this.proxyRetryTime.get(proxyString) || 0;
       
       stats.proxyDetails.push({
         proxy: proxyString,
@@ -518,7 +540,9 @@ class ProxyManager {
           success: health.successCount,
           failures: health.failureCount,
           last403: health.last403Time ? new Date(health.last403Time).toISOString() : null,
-          isHealthy: health.isHealthy
+          isHealthy: health.isHealthy,
+          failureSequence,
+          nextRetry: retryTime > Date.now() ? new Date(retryTime).toISOString() : null
         } : null,
         count403,
         successRate: successRate.toFixed(2),
