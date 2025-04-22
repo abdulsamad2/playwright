@@ -567,6 +567,19 @@ class ScraperManager {
       this.logWithTime(`Skipping event ${eventId} due to skip configuration`);
       return false;
     }
+<<<<<<< HEAD
+
+    // If circuit breaker is tripped, delay non-critical events
+    if (this.apiCircuitBreaker.tripped) {
+      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
+      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
+      
+      // Allow processing of critical events approaching 3-minute maximum, or events approaching 2-minute target
+      if (timeSinceUpdate < MAX_UPDATE_INTERVAL - 20000 && timeSinceUpdate < MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Skipping ${eventId} temporarily: Circuit breaker tripped`, "info");
+        }
+=======
     
     // Skip if in cooldown
     if (this.cooldownEvents.has(eventId)) {
@@ -577,7 +590,16 @@ class ScraperManager {
           `Event ${eventId} is in cooldown for ${remainingSeconds} more seconds`,
           "info"
         );
+>>>>>>> master
         return false;
+      } else if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
+        // Log urgent processing despite circuit breaker
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `Processing ${eventId} despite circuit breaker: Approaching maximum allowed time (${timeSinceUpdate / 1000}s since last update)`,
+            "warning"
+          );
+        }
       }
       this.cooldownEvents.delete(eventId);
     }
@@ -675,9 +697,23 @@ class ScraperManager {
           throw new Error("Scrape timed out");
         }),
       ]);
+<<<<<<< HEAD
+
+      if (!result) {
+        throw new Error("Empty scrape result: null or undefined returned");
+      }
+      
+      if (!Array.isArray(result)) {
+        throw new Error(`Invalid scrape result: expected array but got ${typeof result}`);
+      }
+      
+      if (result.length === 0) {
+        throw new Error("Empty scrape result: array is empty");
+=======
       
       if (!result || !Array.isArray(result) || result.length === 0) {
         throw new Error("Empty or invalid scrape result");
+>>>>>>> master
       }
       
       // Success! Record proxy success
@@ -1214,10 +1250,18 @@ class ScraperManager {
               }),
             ]);
 
-            if (!result || !Array.isArray(result) || result.length === 0) {
-              throw new Error("Empty or invalid scrape result");
+            if (!result) {
+              throw new Error("Empty scrape result: null or undefined returned");
             }
-
+            
+            if (!Array.isArray(result)) {
+              throw new Error(`Invalid scrape result: expected array but got ${typeof result}`);
+            }
+            
+            if (result.length === 0) {
+              throw new Error("Empty scrape result: array is empty");
+            }
+            
             // We're still storing in the cache for metrics/monitoring purposes
             // but we'll never use the cached results for returning to the client
             this.responseCache.set(eventId, result);
@@ -1661,9 +1705,12 @@ class ScraperManager {
           // If event is approaching 3-minute maximum, add to critical list
           if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000 && !this.processingEvents.has(eventId)) {
             criticalEvents.push(eventId);
+<<<<<<< HEAD
+=======
             
             // Remove from failed list if present
             this.failedEvents.delete(eventId);
+>>>>>>> master
           }
         }
         
@@ -1804,9 +1851,12 @@ class ScraperManager {
             // Force immediate processing of events exceeding max time
             this.priorityQueue.add(eventId);
             
+<<<<<<< HEAD
+=======
             // Remove from failed list if it's there
             this.failedEvents.delete(eventId);
             
+>>>>>>> master
             if (LOG_LEVEL >= 1) {
               this.logWithTime(
                 `CRITICAL: Event ${eventId} has exceeded maximum allowed update time! (${timeSinceUpdate / 1000}s since last update)`,
@@ -1825,6 +1875,13 @@ class ScraperManager {
         
         if (criticalMissedDeadlines > 0) {
           this.logWithTime(`CRITICAL WARNING: ${criticalMissedDeadlines} events exceeded the 3-minute maximum update deadline!`, "error");
+<<<<<<< HEAD
+        }
+        
+        if (missedDeadlines > 0) {
+          this.logWithTime(`WARNING: ${missedDeadlines} events missed their 2-minute update target`, "warning");
+=======
+>>>>>>> master
         }
         
         if (missedDeadlines > 0) {

@@ -179,6 +179,7 @@ class ProxyManager {
       this.proxySuccessRate.set(proxyString, newRate);
       
       this.log(`Proxy ${proxyString} success rate: ${newRate.toFixed(2)}`);
+<<<<<<< HEAD
     }
   }
   
@@ -229,6 +230,78 @@ class ProxyManager {
       this.failedProxies.add(proxyString);
       
       this.log(`Proxy ${proxyString} failure recorded. Retry after ${new Date(retryTime).toLocaleTimeString()}`, "warning");
+=======
+>>>>>>> master
+    }
+  }
+  
+  /**
+<<<<<<< HEAD
+   * Update the health status of a proxy based on successful or failed usage
+   * @param {string} proxyString - The proxy string
+   * @param {boolean} isHealthy - Whether the proxy is healthy or not
+   */
+  updateProxyHealth(proxyString, isHealthy) {
+    if (isHealthy) {
+      this.recordProxySuccess(proxyString);
+    } else {
+      this.recordProxyFailure(proxyString, new Error("Proxy marked unhealthy"));
+    }
+    
+    // Update the health status directly
+    const health = this.proxyHealth.get(proxyString);
+    if (health) {
+      health.isHealthy = isHealthy;
+      health.lastCheck = Date.now();
+      this.log(`Proxy ${proxyString} health status updated to ${isHealthy ? 'healthy' : 'unhealthy'}`);
+=======
+   * Record a failed proxy usage
+   * @param {string} proxyString - The proxy string 
+   * @param {Object} error - The error object
+   */
+  recordProxyFailure(proxyString, error) {
+    const health = this.proxyHealth.get(proxyString);
+    if (health) {
+      health.failureCount++;
+      health.lastCheck = Date.now();
+      
+      // Reduce success rate
+      const currentRate = this.proxySuccessRate.get(proxyString) || 1.0;
+      const newRate = currentRate * 0.8; // Significant decrease in success rate
+      this.proxySuccessRate.set(proxyString, newRate);
+      
+      // If error is a 403, specially track it
+      const is403 = error && (
+        (error.response && error.response.status === 403) ||
+        (error.message && error.message.includes("403"))
+      );
+      
+      if (is403) {
+        const current403Count = this.proxy403Count.get(proxyString) || 0;
+        this.proxy403Count.set(proxyString, current403Count + 1);
+        health.last403Time = Date.now();
+        
+        this.log(`Proxy ${proxyString} received 403 error (count: ${current403Count + 1})`, "warning");
+        
+        // If too many 403s, ban this proxy
+        if (current403Count + 1 >= 5) {
+          this.bannedProxies.add(proxyString);
+          this.log(`Proxy ${proxyString} BANNED due to excessive 403 errors`, "error");
+        }
+      }
+      
+      // Calculate retry time with exponential backoff
+      const retryDelayBase = is403 ? 5 * 60 * 1000 : 30 * 1000; // 5 minutes for 403s, 30 seconds for others
+      const jitter = Math.random() * 10000; // Add up to 10 seconds of jitter
+      const retryTime = Date.now() + retryDelayBase * Math.pow(2, health.failureCount - 1) + jitter;
+      
+      this.proxyRetryTime.set(proxyString, retryTime);
+      
+      // Add to failed proxies set
+      this.failedProxies.add(proxyString);
+      
+      this.log(`Proxy ${proxyString} failure recorded. Retry after ${new Date(retryTime).toLocaleTimeString()}`, "warning");
+>>>>>>> master
     }
   }
 
@@ -241,6 +314,43 @@ class ProxyManager {
       this.log(`Warning: Requested batch size ${eventIds.length} exceeds available proxy capacity`, "warning");
       // Only process as many events as we have proxies for
       eventIds = eventIds.slice(0, this.MAX_EVENTS_PER_PROXY * this.getAvailableProxyCount());
+<<<<<<< HEAD
+    }
+    
+    // Select a proxy for the first event to return (for compatibility with existing code)
+    const firstEventId = eventIds[0];
+    let firstProxy = null;
+    let firstProxyAgent = null;
+    
+    // Assign separate proxy for each event in the batch
+    for (const eventId of eventIds) {
+      // Find a healthy available proxy for this specific event
+      const proxy = this.getProxyForEvent(eventId);
+      
+      if (!proxy) {
+        this.log(`No healthy proxy available for event ${eventId} in batch`, "warning");
+        continue; // Skip this event if no proxy available
+      }
+      
+      // Mark this proxy as used by this event
+      this.assignProxyToEvent(eventId, proxy.proxy);
+      this.proxyLastUsed.set(proxy.proxy, Date.now());
+      
+      // Save the first event's proxy for return value
+      if (eventId === firstEventId) {
+        firstProxy = proxy;
+        firstProxyAgent = this.createProxyAgent(proxy);
+      }
+    }
+    
+    // If we couldn't get a proxy for the first event, throw an error
+    if (!firstProxy) {
+      this.log(`No healthy proxy available for batch with event ${firstEventId}`, "error");
+      throw new Error(`No healthy proxy available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
+    }
+    
+    return { ...firstProxyAgent, firstEventId };
+=======
     }
     
     // Get first event from batch to determine requirements
@@ -261,6 +371,7 @@ class ProxyManager {
     const proxyAgent = this.createProxyAgent(proxy);
     
     return { ...proxyAgent, firstEventId };
+>>>>>>> master
   }
 
   /**
