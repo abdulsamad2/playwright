@@ -1052,18 +1052,18 @@ class ScraperManager {
         const batchId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         
         try {
-          // Get a proxy for this specific batch
-          const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(chunk);
+          // Get proxies for this specific batch with improved proxy assignment
+          const proxyData = this.proxyManager.getProxyForBatch(chunk);
           
           // Store the proxy assignment for this batch
-          this.batchProxies.set(batchId, { proxy, chunk });
+          this.batchProxies.set(batchId, { proxy: proxyData.proxy, chunk });
           
           if (LOG_LEVEL >= 3) {
-            this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
+            this.logWithTime(`Using ${proxyData.eventProxyMap.size} proxies for batch ${batchId} (${chunk.length} events)`, "debug");
           }
 
-          // Process the entire chunk efficiently as a batch
-          const result = await this.processBatchEfficiently(chunk, batchId, proxyAgent, proxy);
+          // Process the entire chunk efficiently as a batch using unique proxies per event
+          const result = await this.processBatchEfficiently(chunk, batchId, proxyData.proxyAgent, proxyData.proxy, proxyData.eventProxyMap);
           successCount += result.results.length;
           failureCount += result.failed.length;
           results.push(...result.results);
@@ -1071,12 +1071,12 @@ class ScraperManager {
           
           // Mark this proxy as successful
           if (result.results.length > 0) {
-            this.proxyManager.updateProxyHealth(proxy.proxy, true);
+            this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, true);
           }
           
           // If we had failures, and they outnumber successes, mark proxy as having issues
           if (result.failed.length > result.results.length && result.failed.length > 0) {
-            this.proxyManager.updateProxyHealth(proxy.proxy, false);
+            this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, false);
           }
         } catch (error) {
           this.logWithTime(`Error processing batch ${batchId}: ${error.message}`, "error");
@@ -1117,7 +1117,7 @@ class ScraperManager {
   }
 
   // New method to process a batch of events efficiently by handling API requests together
-  async processBatchEfficiently(eventIds, batchId, proxyAgent, proxy) {
+  async processBatchEfficiently(eventIds, batchId, proxyAgent, proxy, eventProxyMap) {
     const results = [];
     const failed = [];
     // Define sharedHeaders at the top level of the function
@@ -1317,8 +1317,22 @@ class ScraperManager {
       try {
         const chunkPromises = chunk.map(async ({ eventId }) => {
           try {
+            // Get the event-specific proxy if available, otherwise use the shared proxy
+            let eventProxy = proxy;
+            let eventProxyAgent = proxyAgent;
+            
+            if (eventProxyMap && eventProxyMap.has(eventId)) {
+              const proxyData = eventProxyMap.get(eventId);
+              eventProxy = proxyData.proxy;
+              eventProxyAgent = proxyData.proxyAgent;
+              
+              if (LOG_LEVEL >= 3) {
+                this.logWithTime(`Using event-specific proxy for ${eventId} in batch ${batchId}`, "debug");
+              }
+            }
+            
             const result = await Promise.race([
-              ScrapeEvent({ eventId, headers: sharedHeaders }),
+              ScrapeEvent({ eventId, headers: sharedHeaders, proxyAgent: eventProxyAgent }),
               setTimeout(SCRAPE_TIMEOUT).then(() => {
                 throw new Error("Scrape timed out");
               }),

@@ -254,7 +254,9 @@ class ProxyManager {
   }
 
   /**
-   * Get a proxy for a batch of events with improved selection logic
+   * Get proxies for a batch of events
+   * @param {string[]} eventIds - The event IDs to get proxies for
+   * @returns {Object} Object containing the proxy mappings
    */
   getProxyForBatch(eventIds) {
     // Ensure we don't process too many events per proxy
@@ -264,10 +266,8 @@ class ProxyManager {
       eventIds = eventIds.slice(0, this.MAX_EVENTS_PER_PROXY * this.getAvailableProxyCount());
     }
     
-    // Select a proxy for the first event to return (for compatibility with existing code)
-    const firstEventId = eventIds[0];
-    let firstProxy = null;
-    let firstProxyAgent = null;
+    // Create a map to store proxy assignments for each event
+    const proxyMap = new Map();
     
     // Assign separate proxy for each event in the batch
     for (const eventId of eventIds) {
@@ -283,20 +283,42 @@ class ProxyManager {
       this.assignProxyToEvent(eventId, proxy.proxy);
       this.proxyLastUsed.set(proxy.proxy, Date.now());
       
-      // Save the first event's proxy for return value
-      if (eventId === firstEventId) {
-        firstProxy = proxy;
-        firstProxyAgent = this.createProxyAgent(proxy);
+      // Create proxy agent for this proxy
+      try {
+        const proxyAgent = this.createProxyAgent(proxy);
+        proxyMap.set(eventId, { ...proxyAgent, eventId });
+      } catch (error) {
+        this.log(`Failed to create proxy agent for event ${eventId}: ${error.message}`, "error");
       }
     }
     
-    // If we couldn't get a proxy for the first event, throw an error
-    if (!firstProxy) {
-      this.log(`No healthy proxy available for batch with event ${firstEventId}`, "error");
-      throw new Error(`No healthy proxy available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
+    // For backward compatibility, still return a single proxy for the first event
+    const firstEventId = eventIds[0];
+    const firstProxyAgent = proxyMap.get(firstEventId);
+    
+    if (!firstProxyAgent && proxyMap.size > 0) {
+      // If first event doesn't have a proxy but other events do, use the first available
+      const firstAvailable = Array.from(proxyMap.values())[0];
+      return { 
+        proxyAgent: firstAvailable.proxyAgent,
+        proxy: firstAvailable.proxy,
+        eventProxyMap: proxyMap,  // Include the full map for more advanced usage
+        firstEventId
+      };
     }
     
-    return { ...firstProxyAgent, firstEventId };
+    // If we couldn't get any proxies, throw an error
+    if (proxyMap.size === 0) {
+      this.log(`No healthy proxies available for batch with ${eventIds.length} events`, "error");
+      throw new Error(`No healthy proxies available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
+    }
+    
+    return { 
+      proxyAgent: firstProxyAgent ? firstProxyAgent.proxyAgent : null,
+      proxy: firstProxyAgent ? firstProxyAgent.proxy : null,
+      eventProxyMap: proxyMap,  // Include the full map for more advanced usage
+      firstEventId
+    };
   }
 
   /**

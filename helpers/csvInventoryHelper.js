@@ -247,6 +247,11 @@ export function formatInventoryForExport(data) {
     customSplit = `${halfPoint},${quantity}`;
   }
   
+  // Format date as YYYY-MM-DD if it's a Date object
+  const inHandDate = data.in_hand_date instanceof Date ? 
+    data.in_hand_date.toISOString().split('T')[0] : 
+    data.in_hand_date || '';
+  
   // Format the exported data in the required structure
   return {
     inventory_id: data.inventory_id || '',
@@ -268,7 +273,7 @@ export function formatInventoryForExport(data) {
     cost: data.cost || '',
     hide_seats: data.hide_seats || 'Y',
     in_hand: data.in_hand || 'N',
-    in_hand_date: data.in_hand_date || '',
+    in_hand_date: inHandDate,
     instant_transfer: data.instant_transfer || 'N',
     files_available: data.files_available || 'Y',
     split_type: splitType,
@@ -279,4 +284,4 @@ export function formatInventoryForExport(data) {
     passthrough: data.passthrough || '128shd8923kjej47',
     mapping_id: data.mapping_id || data.skybox || ''
   };
-} 
+}
