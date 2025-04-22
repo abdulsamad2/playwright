@@ -540,6 +540,80 @@ class ScraperManager {
     }
   }
 
+  /**
+   * Generate CSV inventory for an event if this is the first scrape
+   * @param {string} eventId - The event ID
+   * @param {Array} scrapeResult - The scrape result data
+   */
+  async generateInventoryCsv(eventId, scrapeResult) {
+    try {
+      // Import the inventory controller
+      const inventoryController = (await import('./controllers/inventoryController.js')).default;
+      
+      // Check if this is the first scrape for this event
+      if (!inventoryController.isFirstScrape(eventId)) {
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Skipping CSV generation for event ${eventId} - not the first scrape`, "info");
+        }
+        return;
+      }
+      
+      if (LOG_LEVEL >= 1) {
+        this.logWithTime(`Generating CSV for event ${eventId} (first scrape)`, "info");
+      }
+      
+      // Get event data upfront
+      const event = await Event.findOne({ Event_ID: eventId }).lean();
+      
+      // Format the scrape results as inventory records
+      const inventoryRecords = [];
+      for (const group of scrapeResult) {
+        // Create a record with the exact required format
+        inventoryRecords.push({
+          inventory_id: `${eventId}-${group.section}-${group.row}-${Math.min(...group.seats)}`,
+          event_name: event?.Event_Name || `Event ${eventId}`,
+          venue_name: event?.Venue || 'Unknown Venue',
+          event_date: event?.Event_Date?.toISOString() || new Date().toISOString(),
+          event_id: eventId,
+          quantity: group.inventory.quantity,
+          section: group.section,
+          row: group.row,
+          seats: group.seats.join(','),
+          barcodes: group.seats.map(() => `${Math.floor(Math.random() * 1000000000000)}${Math.floor(Math.random() * 1000000000000)}`).join('|'),
+          internal_notes: `These are internal notes. @sec[${group.section}]`,
+          public_notes: `These are ${group.row} Row`,
+          tags: "john drew don",
+          list_price: group.inventory.listPrice || '500.00',
+          face_price: group.inventory?.tickets?.[0]?.faceValue || '100.00',
+          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || '175.00',
+          cost: group.inventory?.tickets?.[0]?.cost || '175.00',
+          hide_seats: 'Y',
+          in_hand: 'N',
+          in_hand_date: new Date(group.inventory.inHandDate).toISOString().split('T')[0] || '2024-12-22',
+          instant_transfer: 'N',
+          files_available: 'Y',
+          split_type: 'CUSTOM',
+          custom_split: `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
+          stock_type: 'MOBILE_TRANSFER',
+          zone: 'N',
+          shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
+          passthrough: '128shd8923kjej47'
+        });
+      }
+      
+      // Add the inventory records in bulk
+      const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
+      
+      if (result.success) {
+        this.logWithTime(`Successfully generated CSV for event ${eventId}: ${result.message}`, "success");
+      } else {
+        this.logWithTime(`Failed to generate CSV for event ${eventId}: ${result.message}`, "error");
+      }
+    } catch (error) {
+      this.logWithTime(`Error generating CSV for event ${eventId}: ${error.message}`, "error");
+    }
+  }
+
   async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null) {
     // Skip if the event should be skipped
     if (this.shouldSkipEvent(eventId)) {
@@ -683,6 +757,9 @@ class ScraperManager {
       }
 
       await this.updateEventMetadata(eventId, result);
+      
+      // Generate CSV inventory if this is the first scrape
+      await this.generateInventoryCsv(eventId, result);
       
       // Success! If this event was previously failing, update its status in DB
       const recentFailures = this.getRecentFailureCount(eventId);
