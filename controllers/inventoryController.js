@@ -201,7 +201,14 @@ class InventoryController {
       }
       
       // Validate all records
-      const validatedRecords = records.map(record => validateAndFixInventoryRecord(record));
+      let validatedRecords = records.map(record => validateAndFixInventoryRecord(record));
+      
+      // Filter out null records (insufficient seats)
+      validatedRecords = validatedRecords.filter(record => record !== null);
+      
+      if (validatedRecords.length === 0) {
+        return { success: false, message: 'No valid records after filtering (all had insufficient seats)' };
+      }
       
       // Add the records
       validatedRecords.forEach(record => {

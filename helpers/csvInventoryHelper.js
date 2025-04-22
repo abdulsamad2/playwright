@@ -105,7 +105,7 @@ export function saveInventoryToCSV(data, filePath) {
 /**
  * Validates and fixes an inventory record
  * @param {Object} record - The inventory record
- * @returns {Object} - The validated and fixed record
+ * @returns {Object|null} - The validated and fixed record, or null if invalid (e.g., single seat)
  */
 export function validateAndFixInventoryRecord(record) {
   // Make a copy of the record to avoid modifying the original
@@ -121,16 +121,24 @@ export function validateAndFixInventoryRecord(record) {
     
     // Update quantity based on the number of seats
     const seatCount = fixedRecord.seats.split(',').length;
+    
+    // Skip records with only one seat
+    if (seatCount < 2) {
+      console.log(`Skipping single-seat inventory record: ${fixedRecord.inventory_id}`);
+      return null;
+    }
+    
     fixedRecord.quantity = seatCount.toString();
     
     // Handle custom_split based on seat configuration
-    if (seatCount > 1) {
-      // Default pattern for CUSTOM split type (half, half)
-      const halfPoint = Math.ceil(seatCount / 2);
-      fixedRecord.custom_split = `${halfPoint},${seatCount}`;
-    } else {
-      fixedRecord.custom_split = '';
-    }
+    // Default pattern for CUSTOM split type (half, half)
+    const halfPoint = Math.ceil(seatCount / 2);
+    fixedRecord.custom_split = `${halfPoint},${seatCount}`;
+    fixedRecord.split_type = 'CUSTOM'; // Ensure split type is set to CUSTOM for multi-seat records
+  } else if (!fixedRecord.quantity || parseInt(fixedRecord.quantity) < 2) {
+    // Skip records with no seats or quantity less than 2
+    console.log(`Skipping inventory record with insufficient quantity: ${fixedRecord.inventory_id}`);
+    return null;
   }
   
   return fixedRecord;
@@ -258,16 +266,17 @@ export function formatInventoryForExport(data) {
     face_price: data.face_price || '',
     taxed_cost: data.taxed_cost || '',
     cost: data.cost || '',
-    hide_seats: data.hide_seats || 'N',
+    hide_seats: data.hide_seats || 'Y',
     in_hand: data.in_hand || 'N',
     in_hand_date: data.in_hand_date || '',
     instant_transfer: data.instant_transfer || 'N',
-    files_available: data.files_available || 'N',
+    files_available: data.files_available || 'Y',
     split_type: splitType,
     custom_split: customSplit,
-    stock_type: data.stock_type || '',
-    zone: data.zone || '',
+    stock_type: data.stock_type || 'MOBILE_TRANSFER',
+    zone: data.zone || 'N',
     shown_quantity: data.shown_quantity || (quantity > 1 ? Math.ceil(quantity/2).toString() : quantity.toString()),
-    passthrough: data.passthrough || ''
+    passthrough: data.passthrough || '128shd8923kjej47',
+    mapping_id: data.mapping_id || data.skybox || ''
   };
 } 

@@ -382,8 +382,17 @@ class ScraperManager {
           );
         }
 
+        // Get price increase percentage and in-hand date from event
+        const priceIncreasePercentage = event.priceIncreasePercentage || 25; // Default 25% if not set
+        const inHandDate = event.inHandDate || new Date();
+ 
+        // Filter scrape results to include only groups with at least 2 seats
+        const validScrapeResult = scrapeResult.filter(group => 
+          group.seats && group.seats.length >= 2 && group.inventory && group.inventory.quantity >= 2
+        );
+
         const previousTicketCount = event.Available_Seats || 0;
-        const currentTicketCount = scrapeResult.length;
+        const currentTicketCount = validScrapeResult.length;
 
         const metadata = {
           lastUpdate: moment().format("YYYY-MM-DD HH:mm:ss"),
@@ -412,7 +421,7 @@ class ScraperManager {
           }
         ).session(session);
 
-        if (scrapeResult?.length > 0) {
+        if (validScrapeResult?.length > 0) {
           // Check if seats have actually changed before performing database operations
           const currentGroups = await ConsecutiveGroup.find(
             { eventId },
@@ -427,7 +436,7 @@ class ScraperManager {
           );
 
           const newSeatsHash = new Set(
-            scrapeResult.flatMap((g) =>
+            validScrapeResult.flatMap((g) =>
               g.seats.map(
                 (s) => `${g.section}-${g.row}-${s}-${g.inventory.listPrice}`
               )
@@ -449,53 +458,64 @@ class ScraperManager {
             // Bulk delete and insert for better performance
             await ConsecutiveGroup.deleteMany({ eventId }).session(session);
 
-            const groupsToInsert = scrapeResult.map((group) => ({
-              eventId,
-              section: group.section,
-              row: group.row,
-              seatCount: group.inventory.quantity,
-              seatRange: `${Math.min(...group.seats)}-${Math.max(
-                ...group.seats
-              )}`,
-              seats: group.seats.map((seatNumber) => ({
-                number: seatNumber.toString(),
-                inHandDate: event.inHandDate,
-                price: group.inventory.listPrice,
-              })),
-              inventory: {
-                quantity: group.inventory.quantity,
+            const groupsToInsert = validScrapeResult.map((group) => {
+              // Calculate the increased list price based on the percentage
+              const basePrice = parseFloat(group.inventory.listPrice) || 500.00;
+              const increasedPrice = basePrice * (1 + priceIncreasePercentage / 100);
+              
+              // Format in-hand date as YYYY-MM-DD
+              const formattedInHandDate = inHandDate instanceof Date ? 
+                inHandDate : new Date();
+              
+              return {
+                eventId,
                 section: group.section,
-                hideSeatNumbers: group.inventory.hideSeatNumbers,
                 row: group.row,
-                cost: group.inventory.cost,
-                stockType: group.inventory.stockType,
-                lineType: group.inventory.lineType,
-                seatType: group.inventory.seatType,
-                inHandDate: event.inHandDate,
-                notes: group.inventory.notes,
-                tags: group.inventory.tags,
-                inventoryId: group.inventory.inventoryId,
-                offerId: group.inventory.offerId,
-                splitType: group.inventory.splitType,
-                publicNotes: group.inventory.publicNotes,
-                listPrice: group.inventory.listPrice,
-                customSplit: group.inventory.customSplit,
-                tickets: group.inventory.tickets.map((ticket) => ({
-                  id: ticket.id,
-                  seatNumber: ticket.seatNumber,
-                  notes: ticket.notes,
-                  cost: ticket.cost,
-                  faceValue: ticket.faceValue,
-                  taxedCost: ticket.taxedCost,
-                  sellPrice: ticket.sellPrice ** 1.25, // Using exponentiation as in old code
-                  stockType: ticket.stockType,
-                  eventId: ticket.eventId,
-                  accountId: ticket.accountId,
-                  status: ticket.status,
-                  auditNote: ticket.auditNote,
+                seatCount: group.inventory.quantity,
+                seatRange: `${Math.min(...group.seats)}-${Math.max(
+                  ...group.seats
+                )}`,
+                seats: group.seats.map((seatNumber) => ({
+                  number: seatNumber.toString(),
+                  inHandDate: formattedInHandDate,
+                  price: increasedPrice,
                 })),
-              },
-            }));
+                inventory: {
+                  quantity: group.inventory.quantity,
+                  section: group.section,
+                  hideSeatNumbers: group.inventory.hideSeatNumbers || true,
+                  row: group.row,
+                  cost: group.inventory.cost,
+                  stockType: group.inventory.stockType || 'MOBILE_TRANSFER',
+                  lineType: group.inventory.lineType,
+                  seatType: group.inventory.seatType,
+                  inHandDate: formattedInHandDate,
+                  notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
+                  tags: group.inventory.tags || "john drew don",
+                  inventoryId: group.inventory.inventoryId,
+                  offerId: group.inventory.offerId,
+                  splitType: group.inventory.splitType || 'CUSTOM',
+                  publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
+                  listPrice: increasedPrice,
+                  customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
+                  mapping_id: group.mapping_id || group.skybox || '',
+                  tickets: group.inventory.tickets.map((ticket) => ({
+                    id: ticket.id,
+                    seatNumber: ticket.seatNumber,
+                    notes: ticket.notes,
+                    cost: ticket.cost,
+                    faceValue: ticket.faceValue,
+                    taxedCost: ticket.taxedCost,
+                    sellPrice: ticket.sellPrice * 1.25, // Using multiplication instead of exponentiation 
+                    stockType: ticket.stockType,
+                    eventId: ticket.eventId,
+                    accountId: ticket.accountId,
+                    status: ticket.status,
+                    auditNote: ticket.auditNote,
+                  })),
+                },
+              };
+            });
 
             // Use fewer documents in a single batch insert
             const CHUNK_SIZE = 100;
@@ -564,16 +584,43 @@ class ScraperManager {
       
       // Get event data upfront
       const event = await Event.findOne({ Event_ID: eventId }).lean();
+      if (!event) {
+        this.logWithTime(`Event ${eventId} not found for CSV generation`, "error");
+        return;
+      }
+      
+      // Get price increase percentage and in-hand date from event
+      const priceIncreasePercentage = event.priceIncreasePercentage || 25; // Default 25% if not set
+      const inHandDate = event.inHandDate || new Date();
+      
+      // Filter out groups with fewer than 2 seats
+      const validGroups = scrapeResult.filter(group => 
+        group.seats && group.seats.length >= 2 && group.inventory && group.inventory.quantity >= 2
+      );
+      
+      if (validGroups.length === 0) {
+        this.logWithTime(`No valid groups with at least 2 seats found for event ${eventId}`, "warning");
+        return;
+      }
       
       // Format the scrape results as inventory records
       const inventoryRecords = [];
-      for (const group of scrapeResult) {
+      for (const group of validGroups) {
+        // Calculate the increased list price based on the percentage
+        const basePrice = parseFloat(group.inventory.listPrice) || 500.00;
+        const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
+        
+        // Format in-hand date as YYYY-MM-DD
+        const formattedInHandDate = inHandDate instanceof Date ? 
+          inHandDate.toISOString().split('T')[0] : 
+          new Date().toISOString().split('T')[0];
+        
         // Create a record with the exact required format
         inventoryRecords.push({
           inventory_id: `${eventId}-${group.section}-${group.row}-${Math.min(...group.seats)}`,
           event_name: event?.Event_Name || `Event ${eventId}`,
           venue_name: event?.Venue || 'Unknown Venue',
-          event_date: event?.Event_Date?.toISOString() || new Date().toISOString(),
+          event_date: event?.Event_DateTime?.toISOString() || new Date().toISOString(),
           event_id: eventId,
           quantity: group.inventory.quantity,
           section: group.section,
@@ -583,13 +630,13 @@ class ScraperManager {
           internal_notes: `These are internal notes. @sec[${group.section}]`,
           public_notes: `These are ${group.row} Row`,
           tags: "john drew don",
-          list_price: group.inventory.listPrice || '500.00',
+          list_price: increasedPrice,
           face_price: group.inventory?.tickets?.[0]?.faceValue || '100.00',
           taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || '175.00',
           cost: group.inventory?.tickets?.[0]?.cost || '175.00',
           hide_seats: 'Y',
           in_hand: 'N',
-          in_hand_date: new Date(group.inventory.inHandDate).toISOString().split('T')[0] || '2024-12-22',
+          in_hand_date: formattedInHandDate,
           instant_transfer: 'N',
           files_available: 'Y',
           split_type: 'CUSTOM',
@@ -597,7 +644,8 @@ class ScraperManager {
           stock_type: 'MOBILE_TRANSFER',
           zone: 'N',
           shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
-          passthrough: '128shd8923kjej47'
+          passthrough: '128shd8923kjej47',
+          mapping_id: group.mapping_id || group.skybox || ''
         });
       }
       
