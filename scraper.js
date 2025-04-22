@@ -1427,14 +1427,7 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 };
 
 // Enhanced API call with better retry logic
-<<<<<<< HEAD
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0, startTime) {
-  // Add a fallback for startTime if not provided
-  startTime = startTime || Date.now();
-  
-=======
 async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0) {
->>>>>>> master
   const maxRetries = 3;
   const baseDelayMs = 1000; // Increased base delay
   const maxDelayMs = 5000; // Increased max delay
@@ -1503,13 +1496,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     const delayMs = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
     
     if (attemptNum > 0) {
-<<<<<<< HEAD
-      await delay(delayMs);
-      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delayMs.toFixed(0)}ms`);
-=======
       await new Promise(resolve => setTimeout(resolve, delay));
       console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delay.toFixed(0)}ms`);
->>>>>>> master
     }
     
     try {
@@ -1524,55 +1512,6 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         }
       }
       
-<<<<<<< HEAD
-      // Randomly modify browser fingerprint on retries to avoid detection
-      if (attemptNum > 0) {
-        // Generate a new random user agent
-        const randomUA = randomUseragent.getRandom(function(ua) {
-          return ua.browserName === 'Chrome' || ua.browserName === 'Firefox';
-        });
-        
-        if (randomUA) {
-          safeHeaders['User-Agent'] = randomUA;
-        }
-        
-        // Add realistic browser-specific headers
-        const browserSpecificHeaders = Math.random() > 0.5 ? {
-          'sec-ch-ua': '"Chromium";v="116", "Google Chrome";v="116", "Not=A?Brand";v="99"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"'
-        } : {
-          'sec-ch-ua': '"Firefox";v="115", "Gecko";v="115"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"'
-        };
-        
-        Object.assign(safeHeaders, browserSpecificHeaders);
-        
-        // Add small variations in Accept headers to make it look more natural
-        const acceptVariations = [
-          '*/*',
-          'application/json, text/plain, */*',
-          'application/json, text/javascript, */*; q=0.01'
-        ];
-        safeHeaders['Accept'] = acceptVariations[Math.floor(Math.random() * acceptVariations.length)];
-        
-        // Vary the order of common headers to avoid fingerprinting
-        const headerOrder = {};
-        const commonHeaderKeys = ['Accept', 'Accept-Language', 'Accept-Encoding', 'User-Agent', 'Referer', 'Origin', 'X-Api-Key'];
-        const shuffledKeys = commonHeaderKeys.sort(() => Math.random() - 0.5);
-        
-        shuffledKeys.forEach(key => {
-          if (safeHeaders[key]) {
-            headerOrder[key] = safeHeaders[key];
-            delete safeHeaders[key];
-          }
-        });
-        
-        // Re-add the headers in a random order
-        Object.assign(safeHeaders, headerOrder);
-      }
-=======
       // Add jitter to user agent to reduce fingerprinting
       if (safeHeaders['User-Agent'] && Math.random() > 0.7) {
         // Slightly modify user agent string to reduce tracking
@@ -1598,7 +1537,6 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         timeout: 30000,
         validateStatus: (status) => status === 200 || status === 304,
       });
->>>>>>> master
       
       // Use throttled request to make calls look more natural
       return await throttledRequest({
@@ -1630,18 +1568,9 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         proxyErrors.set(proxyKey, (proxyErrors.get(proxyKey) || 0) + 1);
       }
       
-<<<<<<< HEAD
-      // If we've hit a rate limit, wait longer before retrying
-      if (is429Error) {
-        const retryAfter = error.response?.headers?.['retry-after'] || 30; 
-        const waitTime = parseInt(retryAfter, 10) * 1000 || 30000;
-        console.log(`Rate limited (429) for event ${eventId}, waiting ${waitTime/1000}s before retry`);
-        await delay(waitTime);
-=======
       // If we've hit a rate limit, throw immediately
       if (is429Error) {
         throw error;
->>>>>>> master
       }
       
       // For 403 errors, we should try with a new proxy before giving up
@@ -1666,13 +1595,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
             newAgent = proxyData.proxyAgent;
           }
           
-<<<<<<< HEAD
-          // Wait before retry with increasing backoff
-          await delay(2000 + Math.random() * 2000 + attemptNum * 1000);
-=======
           // Wait before retry
           await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
->>>>>>> master
           
           // Try again with new proxy
           return makeRequestWithRetry(url, headers, newAgent, attemptNum + 1, true);

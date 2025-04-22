@@ -179,7 +179,6 @@ class ProxyManager {
       this.proxySuccessRate.set(proxyString, newRate);
       
       this.log(`Proxy ${proxyString} success rate: ${newRate.toFixed(2)}`);
-<<<<<<< HEAD
     }
   }
   
@@ -230,13 +229,10 @@ class ProxyManager {
       this.failedProxies.add(proxyString);
       
       this.log(`Proxy ${proxyString} failure recorded. Retry after ${new Date(retryTime).toLocaleTimeString()}`, "warning");
-=======
->>>>>>> master
     }
   }
   
   /**
-<<<<<<< HEAD
    * Update the health status of a proxy based on successful or failed usage
    * @param {string} proxyString - The proxy string
    * @param {boolean} isHealthy - Whether the proxy is healthy or not
@@ -254,7 +250,14 @@ class ProxyManager {
       health.isHealthy = isHealthy;
       health.lastCheck = Date.now();
       this.log(`Proxy ${proxyString} health status updated to ${isHealthy ? 'healthy' : 'unhealthy'}`);
-=======
+    }
+  }
+
+  /**
+   * Get a proxy for a batch of events with improved selection logic
+   * @param {string[]} eventIds - Array of event IDs to process
+   * @returns {Object} Object containing proxy and first event ID
+  =======
    * Record a failed proxy usage
    * @param {string} proxyString - The proxy string 
    * @param {Object} error - The error object
@@ -301,7 +304,6 @@ class ProxyManager {
       this.failedProxies.add(proxyString);
       
       this.log(`Proxy ${proxyString} failure recorded. Retry after ${new Date(retryTime).toLocaleTimeString()}`, "warning");
->>>>>>> master
     }
   }
 
@@ -314,43 +316,6 @@ class ProxyManager {
       this.log(`Warning: Requested batch size ${eventIds.length} exceeds available proxy capacity`, "warning");
       // Only process as many events as we have proxies for
       eventIds = eventIds.slice(0, this.MAX_EVENTS_PER_PROXY * this.getAvailableProxyCount());
-<<<<<<< HEAD
-    }
-    
-    // Select a proxy for the first event to return (for compatibility with existing code)
-    const firstEventId = eventIds[0];
-    let firstProxy = null;
-    let firstProxyAgent = null;
-    
-    // Assign separate proxy for each event in the batch
-    for (const eventId of eventIds) {
-      // Find a healthy available proxy for this specific event
-      const proxy = this.getProxyForEvent(eventId);
-      
-      if (!proxy) {
-        this.log(`No healthy proxy available for event ${eventId} in batch`, "warning");
-        continue; // Skip this event if no proxy available
-      }
-      
-      // Mark this proxy as used by this event
-      this.assignProxyToEvent(eventId, proxy.proxy);
-      this.proxyLastUsed.set(proxy.proxy, Date.now());
-      
-      // Save the first event's proxy for return value
-      if (eventId === firstEventId) {
-        firstProxy = proxy;
-        firstProxyAgent = this.createProxyAgent(proxy);
-      }
-    }
-    
-    // If we couldn't get a proxy for the first event, throw an error
-    if (!firstProxy) {
-      this.log(`No healthy proxy available for batch with event ${firstEventId}`, "error");
-      throw new Error(`No healthy proxy available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
-    }
-    
-    return { ...firstProxyAgent, firstEventId };
-=======
     }
     
     // Get first event from batch to determine requirements
@@ -371,7 +336,6 @@ class ProxyManager {
     const proxyAgent = this.createProxyAgent(proxy);
     
     return { ...proxyAgent, firstEventId };
->>>>>>> master
   }
 
   /**
