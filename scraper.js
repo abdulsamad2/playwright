@@ -235,7 +235,7 @@ async function initBrowser(proxy) {
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
     browser = await firefox.launch({
-      headless: false,
+      headless: true,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
