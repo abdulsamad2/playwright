@@ -3,7 +3,7 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { firefox } from "playwright";
+import { chromium,firefox, webkit } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
@@ -235,7 +235,7 @@ async function initBrowser(proxy) {
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
     browser = await firefox.launch({
-      headless: true,
+      headless: false,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,

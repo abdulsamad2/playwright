@@ -11,7 +11,7 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 // Updated constants for stricter update intervals and high performance on 32GB system
 const MAX_UPDATE_INTERVAL = 160000; // Strict 2-minute update requirement
 const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 3)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
-const MAX_RETRIES = 3; // Reduced to 3 for faster failure detection
+const MAX_RETRIES = 10; // Updated to 10 per request of user
 const SCRAPE_TIMEOUT = 35000; // Reduced timeout to 35 seconds for faster failure detection
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 45); // Smaller batches for better control with limited proxies
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
@@ -25,6 +25,28 @@ const LONG_COOLDOWN_MINUTES = 3; // Reduced to 3 minutes for persistently failin
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 2; // Default to warnings and errors only
+
+// Cookie expiration threshold: only refresh cookies when expired (default 1 hour)
+const COOKIE_EXPIRATION_MS = 60 * 60 * 1000;
+
+// Anti-bot helpers: rotate User-Agent and spoof IP
+const USER_AGENT_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+];
+const generateRandomIp = () => Array.from({ length: 4 }, () => Math.floor(Math.random() * 256)).join('.');
+
+// Realistic fingerprint options to mimic human browsers (language, timezone, plugins, screen size, etc.)
+const FINGERPRINT_POOL = [
+  { language: 'en-US', timezone: 'America/Los_Angeles', platform: 'Win32', screen: { width:1920, height:1080 }, deviceMemory: 8, hardwareConcurrency: 8, plugins: ['Widevine Content Decryption Module','Chrome PDF Viewer','Native Client'] },
+  { language: 'en-GB', timezone: 'Europe/London', platform: 'MacIntel', screen: { width:1440, height:900 }, deviceMemory: 8, hardwareConcurrency: 4, plugins: ['PDF Viewer','QuickTime Plug-in 7.7.9','Java(TM) Platform SE 8 U211'] },
+  { language: 'fr-FR', timezone: 'Europe/Paris', platform: 'Win32', screen: { width:1366, height:768 }, deviceMemory: 4, hardwareConcurrency: 4, plugins: ['Chrome PDF Viewer','Widevine Content Decryption Module'] },
+  { language: 'de-DE', timezone: 'Europe/Berlin', platform: 'Linux x86_64', screen: { width:1920, height:1080 }, deviceMemory: 16, hardwareConcurrency: 8, plugins: ['Flash','QuickTime Plug-in','Java Bridge'] }
+];
+// Helper to pick a random fingerprint
+const randomFingerprint = () => FINGERPRINT_POOL[Math.floor(Math.random() * FINGERPRINT_POOL.length)];
 
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
@@ -73,6 +95,7 @@ class ScraperManager {
     this.failureTypeGroups = new Map(); // Group failed events by error type
     this.lastFailedBatchProcess = null; // Last time we processed a batch of failed events
     this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
+    this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
   }
 
   logWithTime(message, type = "info") {
@@ -227,9 +250,13 @@ class ScraperManager {
   }
 
   async refreshEventHeaders(eventId) {
+    // Anti-bot: only fetch fresh cookies/headers when expired, add random UA, referer, IP, and request ID
+    const eventDoc = await Event.findOne({ Event_ID: eventId }).select("url").lean();
+    const refererUrl = eventDoc?.url || "https://www.fans.com/";
+    const requestId = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
     const lastRefresh = this.headerRefreshTimestamps.get(eventId);
-    // Only refresh headers if they haven't been refreshed in last 5 minutes
-    if (!lastRefresh || moment().diff(lastRefresh) > 300000) {
+    // Only refresh cookies/headers if they have expired
+    if (!lastRefresh || moment().diff(lastRefresh) > COOKIE_EXPIRATION_MS) {
       try {
         // Only log at higher verbosity levels
         if (LOG_LEVEL >= 2) {
@@ -258,28 +285,69 @@ class ScraperManager {
             const cookieString = capturedState.cookies
               .map((cookie) => `${cookie.name}=${cookie.value}`)
               .join("; ");
-              
-            const userAgent = capturedState.fingerprint 
-              ? BrowserFingerprint.generateUserAgent(capturedState.fingerprint)
-              : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-              
+            // Rotate User-Agent to evade anti-bot detection
+            const poolFp = randomFingerprint();
+            const userAgent = USER_AGENT_POOL[Math.floor(Math.random() * USER_AGENT_POOL.length)];
             standardizedHeaders = {
               headers: {
                 "User-Agent": userAgent,
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Encoding": "gzip, deflate, br",
                 "Accept-Language": capturedState.fingerprint?.language || "en-US",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Connection": "keep-alive",
+                "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-User": "?1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Ch-Ua": "\"Not A;Brand\";v=\"99\", \"Chromium\";v=\"120\"",
+                "Sec-Ch-Ua-Platform": "\"Windows\"",
+                "Referer": refererUrl,
+                "X-Forwarded-For": generateRandomIp(),
+                "X-Request-Id": requestId,
                 "Cookie": cookieString,
                 "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe"
               },
-              // Also include the original cookies and fingerprint for backwards compatibility
               cookies: capturedState.cookies,
-              fingerprint: capturedState.fingerprint
+              fingerprint: { ...capturedState.fingerprint, ...poolFp }
             };
           } else if (capturedState.headers) {
-            // Use fallback headers directly if available
+            // Fallback: augment provided headers with anti-bot rotation and protections
+            const baseHeaders = capturedState.headers;
+            const poolFp = randomFingerprint();
+            const rotatedUa = USER_AGENT_POOL[Math.floor(Math.random() * USER_AGENT_POOL.length)];
             standardizedHeaders = {
-              headers: capturedState.headers,
-              fingerprint: capturedState.fingerprint
+              headers: {
+                // Override or fill UA
+                'User-Agent': rotatedUa,
+                // Preserve original Accept
+                'Accept': baseHeaders['Accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Encoding': baseHeaders['Accept-Encoding'] || 'gzip, deflate, br',
+                'Accept-Language': baseHeaders['Accept-Language'] || 'en-US,en;q=0.9',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-User': '?1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Ch-Ua': baseHeaders['Sec-Ch-Ua'] || '"Not A;Brand";v="99", "Chromium";v="120"',
+                'Sec-Ch-Ua-Mobile': baseHeaders['Sec-Ch-Ua-Mobile'] || '?0',
+                'Sec-Ch-Ua-Platform': baseHeaders['Sec-Ch-Ua-Platform'] || '"Windows"',
+                'Referer': refererUrl,
+                'Origin': refererUrl.split('/').slice(0,3).join('/'),
+                'X-Forwarded-For': generateRandomIp(),
+                'X-Request-Id': requestId,
+                // Copy any other headers
+                ...Object.fromEntries(Object.entries(baseHeaders).filter(([k]) => ![
+                  'User-Agent','Accept','Accept-Encoding','Accept-Language'
+                ].includes(k)))
+              },
+              fingerprint: { ...capturedState.fingerprint, ...poolFp }
             };
           } else {
             if (LOG_LEVEL >= 1) {
@@ -318,7 +386,7 @@ class ScraperManager {
   async resetCookiesAndHeaders() {
     // Avoid resetting cookies too frequently (at most once per hour)
     const now = moment();
-    if (this.lastCookieReset && now.diff(this.lastCookieReset) < 60 * 60 * 1000) {
+    if (this.lastCookieReset && now.diff(this.lastCookieReset) < COOKIE_EXPIRATION_MS) {
       if (LOG_LEVEL >= 1) {
         this.logWithTime(
           `Skipping cookie reset - last reset was ${moment.duration(now.diff(this.lastCookieReset)).humanize()} ago`,
@@ -334,14 +402,22 @@ class ScraperManager {
       // Check if cookies.json exists before trying to delete it
       try {
         await fs.access(this.cookiesPath);
-        
-        // Delete cookies.json
+        // Only delete if expired
+        const stats = await fs.stat(this.cookiesPath);
+        const cookieAge = now.diff(moment(stats.mtime));
+        if (cookieAge < COOKIE_EXPIRATION_MS) {
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(`Cookies not expired yet (age ${cookieAge}ms), skipping fresh retrieval`, "info");
+          }
+          return true;
+        }
+        // Delete expired cookies
         await fs.unlink(this.cookiesPath);
         if (LOG_LEVEL >= 1) {
-          this.logWithTime("Deleted cookies.json", "info");
+          this.logWithTime("Deleted expired cookies.json", "info");
         }
       } catch (e) {
-        // File doesn't exist, that's fine
+        // File doesn't exist or stat failed, that's fine
         if (LOG_LEVEL >= 2) {
           this.logWithTime("No cookies.json file found to delete", "info");
         }
@@ -631,9 +707,9 @@ class ScraperManager {
           public_notes: `These are ${group.row} Row`,
           tags: "john drew don",
           list_price: increasedPrice,
-          face_price: group.inventory?.tickets?.[0]?.faceValue || '100.00',
-          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || '175.00',
-          cost: group.inventory?.tickets?.[0]?.cost || '175.00',
+          face_price: group.inventory?.tickets?.[0]?.faceValue || '',
+          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || '',
+          cost: group.inventory?.tickets?.[0]?.cost || '',
           hide_seats: 'Y',
           in_hand: 'N',
           in_hand_date: formattedInHandDate,
@@ -836,6 +912,12 @@ class ScraperManager {
       // Reset global consecutive error counter on success
       this.globalConsecutiveErrors = 0;
       
+      // Increase retry limit by 5 after a successful scrape
+      const prevMax = this.eventMaxRetries.get(eventId) ?? MAX_RETRIES;
+      const newMax = prevMax + 3;
+      this.eventMaxRetries.set(eventId, newMax);
+      this.logWithTime(`Increased retry limit for ${eventId} to ${newMax}`, "info");
+      
       return true;
     } catch (error) {
       this.failedEvents.add(eventId);
@@ -954,7 +1036,8 @@ class ScraperManager {
       // Still update the event schedule for 2-minute compliance
       this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
 
-      if (retryCount < MAX_RETRIES) {
+      const maxRetriesForEvent = this.eventMaxRetries.get(eventId) ?? MAX_RETRIES;
+      if (retryCount < maxRetriesForEvent) {
         this.retryQueue.push({
           eventId,
           retryCount: retryCount + 1,
@@ -1265,6 +1348,7 @@ class ScraperManager {
       if (!sharedHeaders) {
         // Create fallback headers with minimal required fields
         const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+        const poolFp = randomFingerprint();
         const fallbackHeaders = {
           headers: {
             "User-Agent": userAgent,
@@ -1272,11 +1356,7 @@ class ScraperManager {
             "Accept-Language": "en-US,en;q=0.9",
             "x-tm-api-key": "b462oi7fic6pehcdkzony5bxhe"
           },
-          fingerprint: {
-            language: "en-US",
-            timezone: "America/New_York",
-            screen: { width: 1920, height: 1080 }
-          }
+          fingerprint: { ...poolFp }
         };
         
         sharedHeaders = fallbackHeaders;
@@ -1517,7 +1597,8 @@ class ScraperManager {
     // Still update the event schedule for 2-minute compliance
     this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
 
-    if (retryCount < MAX_RETRIES) {
+    const maxRetriesForEvent = this.eventMaxRetries.get(eventId) ?? MAX_RETRIES;
+    if (retryCount < maxRetriesForEvent) {
       this.retryQueue.push({
         eventId,
         retryCount: retryCount + 1,
