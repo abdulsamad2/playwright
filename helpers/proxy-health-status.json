@@ -1,0 +1,26 @@
+{
+  "unhealthyProxies": {
+    "160.84.68.58:17808": {
+      "failureCount": 1,
+      "successCount": 0,
+      "count403": 0,
+      "firstFailure": "2025-04-23T05:17:44.947Z",
+      "lastFailure": "2025-04-23T05:17:44.947Z",
+      "lastCheck": "2025-04-23T05:17:44.947Z",
+      "cooldownMultiplier": 1,
+      "failureSequences": 0
+    },
+    "160.84.68.56:17806": {
+      "failureCount": 1,
+      "successCount": 0,
+      "count403": 0,
+      "firstFailure": "2025-04-23T05:18:05.387Z",
+      "lastFailure": "2025-04-23T05:18:05.387Z",
+      "lastCheck": "2025-04-23T05:18:05.387Z",
+      "cooldownMultiplier": 1,
+      "failureSequences": 0
+    }
+  },
+  "bannedProxies": [],
+  "lastReset": 1745385439938
+}
