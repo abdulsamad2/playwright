@@ -1,7 +1,7 @@
 import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
-import { ScrapeEvent, refreshHeaders } from "./scraper.js";
+import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
 import { cpus } from "os";
 import fs from "fs/promises";
 import path from "path";
@@ -34,16 +34,25 @@ const USER_AGENT_POOL = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  // Additional Firefox UA for variety
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:115.0) Gecko/20100101 Firefox/115.0"
 ];
 const generateRandomIp = () => Array.from({ length: 4 }, () => Math.floor(Math.random() * 256)).join('.');
+// Number of proxy rotation attempts when fetching fresh cookies/headers
+const PROXY_ROTATION_ATTEMPTS = 3;
+
+// Only accept cookie sets with at least this many cookies to avoid challenge pages
+const MIN_VALID_COOKIES = 3;
 
 // Realistic fingerprint options to mimic human browsers (language, timezone, plugins, screen size, etc.)
 const FINGERPRINT_POOL = [
   { language: 'en-US', timezone: 'America/Los_Angeles', platform: 'Win32', screen: { width:1920, height:1080 }, deviceMemory: 8, hardwareConcurrency: 8, plugins: ['Widevine Content Decryption Module','Chrome PDF Viewer','Native Client'] },
   { language: 'en-GB', timezone: 'Europe/London', platform: 'MacIntel', screen: { width:1440, height:900 }, deviceMemory: 8, hardwareConcurrency: 4, plugins: ['PDF Viewer','QuickTime Plug-in 7.7.9','Java(TM) Platform SE 8 U211'] },
   { language: 'fr-FR', timezone: 'Europe/Paris', platform: 'Win32', screen: { width:1366, height:768 }, deviceMemory: 4, hardwareConcurrency: 4, plugins: ['Chrome PDF Viewer','Widevine Content Decryption Module'] },
-  { language: 'de-DE', timezone: 'Europe/Berlin', platform: 'Linux x86_64', screen: { width:1920, height:1080 }, deviceMemory: 16, hardwareConcurrency: 8, plugins: ['Flash','QuickTime Plug-in','Java Bridge'] }
+  { language: 'de-DE', timezone: 'Europe/Berlin', platform: 'Linux x86_64', screen: { width:1920, height:1080 }, deviceMemory: 16, hardwareConcurrency: 8, plugins: ['Flash','QuickTime Plug-in','Java Bridge'] },
+  // Firefox fingerprint with common privacy/bot-buster add-ons for human-like behavior
+  { language: 'en-US', timezone: 'America/New_York', platform: 'MacIntel', screen: { width:1680, height:1050 }, deviceMemory: 8, hardwareConcurrency: 4, plugins: ['uBlock Origin','Privacy Badger','CanvasBlocker','NoScript','Video DownloadHelper'] }
 ];
 // Helper to pick a random fingerprint
 const randomFingerprint = () => FINGERPRINT_POOL[Math.floor(Math.random() * FINGERPRINT_POOL.length)];
@@ -274,102 +283,61 @@ class ScraperManager {
           return cachedHeaders;
         }
         
-        const capturedState = await refreshHeaders(eventId);
+        let capturedState;
+        // Rotate proxies to fetch fresh cookies; skip proxies that result in no cookies (e.g. challenge pages)
+        for (let attempt = 0; attempt < PROXY_ROTATION_ATTEMPTS; attempt++) {
+          const { proxyAgent: cookieProxyAgent, proxy: cookieProxy } = this.proxyManager.getProxyForBatch([eventId]);
+          try {
+            capturedState = await refreshHeaders(eventId, cookieProxy);
+          } catch (e) {
+            capturedState = null;
+          }
+          // If we got a valid cookie set (not a challenge), stop rotating
+          if (capturedState && capturedState.cookies && capturedState.cookies.length >= MIN_VALID_COOKIES) {
+            break;
+          }
+          // Otherwise blacklist proxy and retry
+          this.proxyManager.blacklistCurrentProxy(eventId);
+          this.logWithTime(`Proxy rotation (attempt ${attempt + 1}) failed to fetch cookies for ${eventId}, rotating proxy`, "warning");
+        }
+        // If still no capturedState, try without proxy as last resort
+        if (!capturedState) {
+          capturedState = await refreshHeaders(eventId);
+        }
         
         if (capturedState) {
-          // Ensure we have a standardized header object format
-          let standardizedHeaders;
-          
-          if (capturedState.cookies && capturedState.cookies.length > 0) {
-            // Create headers from cookies
-            const cookieString = capturedState.cookies
-              .map((cookie) => `${cookie.name}=${cookie.value}`)
-              .join("; ");
-            // Rotate User-Agent to evade anti-bot detection
-            const poolFp = randomFingerprint();
-            const userAgent = USER_AGENT_POOL[Math.floor(Math.random() * USER_AGENT_POOL.length)];
-            standardizedHeaders = {
-              headers: {
-                "User-Agent": userAgent,
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Accept-Language": capturedState.fingerprint?.language || "en-US",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Connection": "keep-alive",
-                "DNT": "1",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-User": "?1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Ch-Ua": "\"Not A;Brand\";v=\"99\", \"Chromium\";v=\"120\"",
-                "Sec-Ch-Ua-Platform": "\"Windows\"",
-                "Referer": refererUrl,
-                "X-Forwarded-For": generateRandomIp(),
-                "X-Request-Id": requestId,
-                "Cookie": cookieString,
-                "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe"
-              },
-              cookies: capturedState.cookies,
-              fingerprint: { ...capturedState.fingerprint, ...poolFp }
-            };
-          } else if (capturedState.headers) {
-            // Fallback: augment provided headers with anti-bot rotation and protections
-            const baseHeaders = capturedState.headers;
-            const poolFp = randomFingerprint();
-            const rotatedUa = USER_AGENT_POOL[Math.floor(Math.random() * USER_AGENT_POOL.length)];
-            standardizedHeaders = {
-              headers: {
-                // Override or fill UA
-                'User-Agent': rotatedUa,
-                // Preserve original Accept
-                'Accept': baseHeaders['Accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Encoding': baseHeaders['Accept-Encoding'] || 'gzip, deflate, br',
-                'Accept-Language': baseHeaders['Accept-Language'] || 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-User': '?1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Ch-Ua': baseHeaders['Sec-Ch-Ua'] || '"Not A;Brand";v="99", "Chromium";v="120"',
-                'Sec-Ch-Ua-Mobile': baseHeaders['Sec-Ch-Ua-Mobile'] || '?0',
-                'Sec-Ch-Ua-Platform': baseHeaders['Sec-Ch-Ua-Platform'] || '"Windows"',
-                'Referer': refererUrl,
-                'Origin': refererUrl.split('/').slice(0,3).join('/'),
-                'X-Forwarded-For': generateRandomIp(),
-                'X-Request-Id': requestId,
-                // Copy any other headers
-                ...Object.fromEntries(Object.entries(baseHeaders).filter(([k]) => ![
-                  'User-Agent','Accept','Accept-Encoding','Accept-Language'
-                ].includes(k)))
-              },
-              fingerprint: { ...capturedState.fingerprint, ...poolFp }
-            };
-          } else {
-            if (LOG_LEVEL >= 1) {
-              this.logWithTime(`No valid headers found for ${eventId}`, "warning");
-            }
+          // Only proceed if we have a valid cookies set (avoid challenge/bot pages)
+          if (!capturedState.cookies || capturedState.cookies.length < MIN_VALID_COOKIES) {
+            this.logWithTime(
+              `Skipping header refresh for ${eventId}: invalid or insufficient cookies`,
+              "warning"
+            );
             return null;
           }
-          
+          // Build enhanced headers using the shared generator
+          const cookieString = capturedState.cookies
+            .map(c => `${c.name}=${c.value}`)
+            .join("; ");
+          const poolFp = randomFingerprint();
+          const mergedFp = { ...capturedState.fingerprint, ...poolFp };
+          // Generate varied headers: UA, Accept, Connection, etc.
+          const enhanced = generateEnhancedHeaders(mergedFp, cookieString);
+          // Inject anti-bot fields
+          enhanced['Referer'] = refererUrl;
+          enhanced['X-Forwarded-For'] = generateRandomIp();
+          enhanced['X-Request-Id'] = requestId;
+          const standardizedHeaders = {
+            headers: enhanced,
+            cookies: capturedState.cookies,
+            fingerprint: mergedFp,
+          };
+          // Cache and rotate
           this.headersCache.set(eventId, standardizedHeaders);
           this.headerRefreshTimestamps.set(eventId, moment());
-          
-          // New: Add to rotation pool if not already there
-          if (!this.headerRotationPool.some(h => 
-            h.headers.Cookie === standardizedHeaders.headers.Cookie
-          )) {
+          if (!this.headerRotationPool.some(h => h.headers.Cookie === cookieString)) {
             this.headerRotationPool.push(standardizedHeaders);
-            // Limit pool size
-            if (this.headerRotationPool.length > 10) {
-              this.headerRotationPool.shift();
-            }
+            if (this.headerRotationPool.length > 10) this.headerRotationPool.shift();
           }
-          
           return standardizedHeaders;
         }
       } catch (error) {

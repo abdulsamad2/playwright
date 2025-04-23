@@ -218,9 +218,8 @@ async function handleTicketmasterChallenge(page) {
   }
 }
 
-
-
-
+// Available Playwright browser engines for rotation
+const BROWSER_ENGINES = { chromium, firefox, webkit };
 
 export async function initBrowser(proxy) {
   try {
@@ -229,8 +228,13 @@ export async function initBrowser(proxy) {
       proxy = newProxy;
     }
 
+    // Randomly pick a browser engine for this session
+    const engineNames = Object.keys(BROWSER_ENGINES);
+    const chosenEngine = engineNames[Math.floor(Math.random() * engineNames.length)];
+    const playwrightEngine = BROWSER_ENGINES[chosenEngine];
     const fingerprint = BrowserFingerprint.generate();
-    const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
+    // Generate a UA matching the chosen engine type
+    const userAgent = BrowserFingerprint.generateUserAgent({ ...fingerprint, browser: chosenEngine });
 
     if (browser) {
       await cleanup(browser, context);
@@ -238,7 +242,8 @@ export async function initBrowser(proxy) {
 
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
-    browser = await firefox.launch({
+    // Launch with the chosen engine
+    browser = await playwrightEngine.launch({
       headless: true,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
@@ -287,7 +292,6 @@ export async function initBrowser(proxy) {
     throw error;
   }
 }
-
 
 async function captureCookies(page, fingerprint) {
   for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
@@ -663,6 +667,23 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         waitUntil: "domcontentloaded",
         timeout: 30000, // 30 second timeout
       });
+
+      // Only capture cookies if the page URL still contains the event ID (i.e., real event data)
+      const currentUrl = page.url();
+      if (!currentUrl.includes(`/event/${eventId}`)) {
+        console.warn(`Page did not load event data for ${eventId}, URL: ${currentUrl}`);
+        // Abort and return fallback state without cookies
+        capturedState = {
+          cookies: null,
+          fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
+          lastRefresh: Date.now(),
+          headers: fallbackHeaders,
+          proxy: proxy
+        };
+        clearTimeout(globalTimeoutId);
+        cleanupRefreshProcess();
+        return capturedState;
+      }
 
       console.log(`Successfully loaded page for event ${eventId}`);
 
@@ -2130,4 +2151,4 @@ function resetCapturedState() {
   };
 }
 
-export { ScrapeEvent, refreshHeaders };
+export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders };
