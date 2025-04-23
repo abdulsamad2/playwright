@@ -218,7 +218,11 @@ async function handleTicketmasterChallenge(page) {
   }
 }
 
-async function initBrowser(proxy) {
+
+
+
+
+export async function initBrowser(proxy) {
   try {
     if (!proxy?.proxy) {
       const { proxy: newProxy } = GetProxy();
@@ -250,6 +254,30 @@ async function initBrowser(proxy) {
       deviceScaleFactor: fingerprint.devicePixelRatio,
       colorScheme: "light",
       timezoneId: fingerprint.timezone,
+      javaScriptEnabled: true,
+    });
+
+    // 🛡️ Anti-detection script
+    await context.addInitScript(() => {
+      // Remove webdriver
+      Object.defineProperty(navigator, "webdriver", {
+        get: () => false,
+      });
+
+      // Fake plugins
+      Object.defineProperty(navigator, "plugins", {
+        get: () => [1, 2, 3, 4, 5],
+      });
+
+      // Fake languages
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["en-US", "en"],
+      });
+
+      // Fake Chrome object
+      window.chrome = {
+        runtime: {},
+      };
     });
 
     return { context, fingerprint };
@@ -259,6 +287,7 @@ async function initBrowser(proxy) {
     throw error;
   }
 }
+
 
 async function captureCookies(page, fingerprint) {
   for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
