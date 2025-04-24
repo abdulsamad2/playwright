@@ -14,8 +14,8 @@ class ProxyManager {
     this.logger = logger;
     this.proxyUsage = new Map(); // Maps proxy IP to set of eventIds using it
     this.eventToProxy = new Map(); // Maps eventId to assigned proxy
-    this.MAX_EVENTS_PER_PROXY = 1; // Ensuring each event gets a dedicated proxy
-    this.BATCH_SIZE = 3; // Maximum batch size
+    this.MAX_EVENTS_PER_PROXY = 5; // Increased from 1 to 5 to allow more events per proxy
+    this.BATCH_SIZE = 15; // Increased from 3 to 15 for larger batches
     this.proxies = [...proxyArray.proxies];
     this.lastAssignedProxyIndex = -1;
     this.proxyLastUsed = new Map(); // Track when proxies were last used
@@ -93,6 +93,14 @@ class ProxyManager {
   }
 
   /**
+   * Get a list of all available healthy proxies
+   * @returns {Array} Array of available proxy objects
+   */
+  getAvailableProxies() {
+    return this.proxies.filter(proxy => this.isProxyHealthy(proxy));
+  }
+
+  /**
    * Record a successful proxy usage
    * @param {string} proxyString - The proxy string
    */
@@ -138,56 +146,25 @@ class ProxyManager {
     // Create a map to store proxy assignments for each event
     const proxyMap = new Map();
     
-    // Assign separate proxy for each event in the batch
+    // Get available proxies
+    const availableProxies = this.getAvailableProxies();
+    if (availableProxies.length === 0) {
+      this.log("No available proxies for batch", "error");
+      return { proxyAgent: null, proxy: null, eventProxyMap: proxyMap };
+    }
+    
+    // Select a random proxy from available ones
+    const randomProxy = availableProxies[Math.floor(Math.random() * availableProxies.length)];
+    const proxyAgent = this.createProxyAgent(randomProxy);
+    
+    // Assign the same random proxy to all events in the batch
     for (const eventId of eventIds) {
-      // Find a healthy available proxy for this specific event
-      const proxy = this.getProxyForEvent(eventId);
-      
-      if (!proxy) {
-        this.log(`No healthy proxy available for event ${eventId} in batch`, "warning");
-        continue; // Skip this event if no proxy available
-      }
-      
-      // Mark this proxy as used by this event
-      this.assignProxyToEvent(eventId, proxy.proxy);
-      this.proxyLastUsed.set(proxy.proxy, Date.now());
-      
-      // Create proxy agent for this proxy
-      try {
-        const proxyAgent = this.createProxyAgent(proxy);
-        proxyMap.set(eventId, { ...proxyAgent, eventId });
-      } catch (error) {
-        this.log(`Failed to create proxy agent for event ${eventId}: ${error.message}`, "error");
-      }
+      this.assignProxyToEvent(eventId, randomProxy.proxy);
+      this.proxyLastUsed.set(randomProxy.proxy, Date.now());
+      proxyMap.set(eventId, { proxyAgent, proxy: randomProxy });
     }
     
-    // For backward compatibility, still return a single proxy for the first event
-    const firstEventId = eventIds[0];
-    const firstProxyAgent = proxyMap.get(firstEventId);
-    
-    if (!firstProxyAgent && proxyMap.size > 0) {
-      // If first event doesn't have a proxy but other events do, use the first available
-      const firstAvailable = Array.from(proxyMap.values())[0];
-      return { 
-        proxyAgent: firstAvailable.proxyAgent,
-        proxy: firstAvailable.proxy,
-        eventProxyMap: proxyMap,  // Include the full map for more advanced usage
-        firstEventId
-      };
-    }
-    
-    // If we couldn't get any proxies, throw an error
-    if (proxyMap.size === 0) {
-      this.log(`No healthy proxies available for batch with ${eventIds.length} events`, "error");
-      throw new Error(`No healthy proxies available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
-    }
-    
-    return { 
-      proxyAgent: firstProxyAgent ? firstProxyAgent.proxyAgent : null,
-      proxy: firstProxyAgent ? firstProxyAgent.proxy : null,
-      eventProxyMap: proxyMap,  // Include the full map for more advanced usage
-      firstEventId
-    };
+    return { proxyAgent, proxy: randomProxy, eventProxyMap: proxyMap };
   }
 
   /**

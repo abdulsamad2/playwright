@@ -21,25 +21,31 @@ class ProxyHealthManager {
     // Health status configuration
     this.config = {
       // How many consecutive failures before marking a proxy as potentially unhealthy
-      failureThreshold: 5,
-      
+      failureThreshold: 8,
+
       // How many potential health issues before marking as unhealthy
-      unhealthyThreshold: 10,
-      
+      unhealthyThreshold: 15,
+
       // How many 403 errors before banning a proxy
-      ban403Threshold: 5,
-      
-      // Initial cooldown time (30 minutes)
-      initialCooldown: 30 * 60 * 1000,
-      
-      // Maximum cooldown time (24 hours)
-      maxCooldown: 24 * 60 * 60 * 1000,
-      
+      ban403Threshold: 8,
+
+      // Initial cooldown time (15 minutes)
+      initialCooldown: 15 * 60 * 1000,
+
+      // Maximum cooldown time (12 hours)
+      maxCooldown: 12 * 60 * 60 * 1000,
+
       // Minimum time to test a proxy before final health decision
-      minTestPeriod: 5 * 60 * 1000,
-      
+      minTestPeriod: 3 * 60 * 1000,
+
       // Reset health metrics interval
-      resetInterval: 6 * 60 * 60 * 1000 // 6 hours
+      resetInterval: 4 * 60 * 60 * 1000,
+
+      // Secondary test website for proxy validation
+      secondaryTestUrl: "https://www.bing.com/",
+
+      // Number of successful secondary tests required to rehabilitate
+      secondaryTestSuccessThreshold: 2,
     };
   }
   
@@ -184,7 +190,7 @@ class ProxyHealthManager {
       healthData.lastCheck = new Date();
       
       // If we've had several successes in a row, rehabilitate the proxy
-      if (healthData.successCount >= 3) {
+      if (healthData.successCount >= 2) {
         this.log(`Proxy ${proxyString} has been successfully rehabilitated after ${healthData.successCount} successful uses`);
         this.healthStore.unhealthyProxies.delete(proxyString);
         this.saveHealthData();
@@ -223,7 +229,8 @@ class ProxyHealthManager {
       lastFailure: now,
       lastCheck: now,
       cooldownMultiplier: 1,
-      failureSequences: 0
+      failureSequences: 0,
+      secondaryTestSuccess: 0
     };
     
     // Update failure counts
@@ -238,6 +245,11 @@ class ProxyHealthManager {
       
       // Check if we should ban this proxy due to excessive 403 errors
       if (healthData.count403 >= this.config.ban403Threshold) {
+        // Before banning, try secondary test
+        if (healthData.secondaryTestSuccess < this.config.secondaryTestSuccessThreshold) {
+          this.log(`Proxy ${proxyString} will be tested with secondary website before banning`, "warning");
+          return;
+        }
         this.banProxy(proxyString, "Excessive 403 errors");
         return;
       }
@@ -250,20 +262,26 @@ class ProxyHealthManager {
     if (healthData.failureCount >= this.config.unhealthyThreshold && 
         timeSinceFirstFailure >= this.config.minTestPeriod) {
       
+      // Before marking as unhealthy, try secondary test
+      if (healthData.secondaryTestSuccess < this.config.secondaryTestSuccessThreshold) {
+        this.log(`Proxy ${proxyString} will be tested with secondary website before marking unhealthy`, "warning");
+        return;
+      }
+      
       // Calculate cooldown period based on failure sequence
       healthData.failureSequences = (healthData.failureSequences || 0) + 1;
       
       // Exponential backoff for repeated failures, capped at maxCooldown
       const cooldownTime = Math.min(
-        this.config.initialCooldown * Math.pow(2, healthData.failureSequences - 1),
+        this.config.initialCooldown * Math.pow(1.5, healthData.failureSequences - 1),
         this.config.maxCooldown
       );
       
       // Add randomness to prevent all proxies retrying at the same time
-      const jitter = Math.floor(Math.random() * 60000); // up to 1 minute of jitter
+      const jitter = Math.floor(Math.random() * 30000);
       healthData.nextRetryTime = new Date(now.getTime() + cooldownTime + jitter);
       
-      if (healthData.failureSequences >= 3) {
+      if (healthData.failureSequences >= 4) {
         this.log(`Proxy ${proxyString} has failed ${healthData.failureSequences} consecutive cooldown periods, permanently banning`, "error");
         this.banProxy(proxyString, "Multiple consecutive failure sequences");
         return;

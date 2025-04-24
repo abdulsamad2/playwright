@@ -44,15 +44,16 @@ const COOKIE_MANAGEMENT = {
     'MUID', 'au_id', 'aud', 'tmTrackID', 'TapAd_DID', 'uid'
   ],
   AUTH_COOKIES: ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'],
-  MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
-  COOKIE_REFRESH_INTERVAL: 12 * 60 * 60 * 1000, // 12 hours (more conservative refresh)
-  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
+  MAX_COOKIE_LENGTH: 8000,
+  COOKIE_REFRESH_INTERVAL: 12 * 60 * 60 * 1000, // 12 hours
+  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days
   COOKIE_ROTATION: {
     ENABLED: true,
-    MAX_STORED_COOKIES: 100, // Keep multiple cookie sets
-    ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours between rotations
+    MAX_STORED_COOKIES: 100,
+    ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
     LAST_ROTATION: Date.now()
-  }
+  },
+  PERIODIC_REFRESH_INTERVAL: 30 * 60 * 1000 // 30 minutes
 };
 
 // Enhanced cookie handling
@@ -294,7 +295,10 @@ export async function initBrowser(proxy) {
 }
 
 async function captureCookies(page, fingerprint) {
-  for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
+  let retryCount = 0;
+  const MAX_RETRIES = 5;
+  
+  while (retryCount < MAX_RETRIES) {
     try {
       const challengePresent = await page.evaluate(() => {
         return document.body.textContent.includes(
@@ -304,16 +308,17 @@ async function captureCookies(page, fingerprint) {
 
       if (challengePresent) {
         console.log(
-          `Attempt ${attempt}: Challenge detected during cookie capture`
+          `Attempt ${retryCount + 1}: Challenge detected during cookie capture`
         );
 
         const challengeResolved = await handleTicketmasterChallenge(page);
         if (!challengeResolved) {
-          if (attempt === CONFIG.MAX_RETRIES) {
+          if (retryCount === MAX_RETRIES - 1) {
             console.log("Max retries reached during challenge resolution");
             return { cookies: null, fingerprint };
           }
           await page.waitForTimeout(CONFIG.RETRY_DELAY);
+          retryCount++;
           continue;
         }
       }
@@ -321,11 +326,46 @@ async function captureCookies(page, fingerprint) {
       let cookies = await context.cookies();
 
       if (!cookies?.length) {
-        console.log(`Attempt ${attempt}: No cookies captured`);
-        if (attempt === CONFIG.MAX_RETRIES) {
+        console.log(`Attempt ${retryCount + 1}: No cookies captured`);
+        if (retryCount === MAX_RETRIES - 1) {
           return { cookies: null, fingerprint };
         }
         await page.waitForTimeout(CONFIG.RETRY_DELAY);
+        retryCount++;
+        continue;
+      }
+
+      // Filter out reCAPTCHA Google cookies
+      cookies = cookies.filter(cookie => !cookie.name.includes('_grecaptcha') && 
+                                      !cookie.domain.includes('google.com'));
+
+      // Check if we have enough cookies from ticketmaster.com
+      const ticketmasterCookies = cookies.filter(cookie => 
+        cookie.domain.includes('ticketmaster.com') || 
+        cookie.domain.includes('.ticketmaster.com')
+      );
+
+      if (ticketmasterCookies.length < 3) {
+        console.log(`Attempt ${retryCount + 1}: Not enough Ticketmaster cookies`);
+        if (retryCount === MAX_RETRIES - 1) {
+          return { cookies: null, fingerprint };
+        }
+        await page.waitForTimeout(CONFIG.RETRY_DELAY);
+        retryCount++;
+        continue;
+      }
+
+      // Check JSON size
+      const cookiesJson = JSON.stringify(cookies, null, 2);
+      const lineCount = cookiesJson.split('\n').length;
+      
+      if (lineCount < 200) {
+        console.log(`Attempt ${retryCount + 1}: Cookie JSON too small (${lineCount} lines)`);
+        if (retryCount === MAX_RETRIES - 1) {
+          return { cookies: null, fingerprint };
+        }
+        await page.waitForTimeout(CONFIG.RETRY_DELAY);
+        retryCount++;
         continue;
       }
 
@@ -349,18 +389,17 @@ async function captureCookies(page, fingerprint) {
       );
 
       fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
-      console.log(`Successfully captured cookies on attempt ${attempt}`);
+      console.log(`Successfully captured cookies on attempt ${retryCount + 1}`);
       return { cookies, fingerprint };
     } catch (error) {
-      console.error(`Error capturing cookies (attempt ${attempt}):`, error);
-      if (attempt === CONFIG.MAX_RETRIES) {
+      console.error(`Error capturing cookies on attempt ${retryCount + 1}:`, error);
+      if (retryCount === MAX_RETRIES - 1) {
         return { cookies: null, fingerprint };
       }
       await page.waitForTimeout(CONFIG.RETRY_DELAY);
+      retryCount++;
     }
   }
-
-  return { cookies: null, fingerprint };
 }
 
 async function loadCookiesFromFile() {
@@ -2152,3 +2191,53 @@ function resetCapturedState() {
 }
 
 export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders };
+
+// Function to periodically refresh cookies
+async function startPeriodicCookieRefresh() {
+  console.log('Starting periodic cookie refresh service...');
+  
+  // Initial refresh
+  await refreshCookiesPeriodically();
+  
+  // Set up interval for periodic refresh
+  setInterval(async () => {
+    await refreshCookiesPeriodically();
+  }, COOKIE_MANAGEMENT.PERIODIC_REFRESH_INTERVAL);
+}
+
+async function refreshCookiesPeriodically() {
+  try {
+    console.log('Starting periodic cookie refresh...');
+    
+    // Get a random event ID to use for cookie refresh
+    const eventId = '1F0056C7D6A5B0E'; // Example event ID, you can make this dynamic
+    
+    // Get a fresh proxy
+    const { proxy } = GetProxy();
+    
+    // Force refresh cookies
+    const newState = await refreshHeaders(eventId, proxy, null);
+    
+    if (newState?.cookies?.length) {
+      console.log('Successfully refreshed cookies in periodic refresh');
+      
+      // Update the captured state
+      capturedState = {
+        ...newState,
+        lastRefresh: Date.now()
+      };
+      
+      // Save to file
+      await saveCookiesToFile(newState.cookies);
+    } else {
+      console.warn('Failed to refresh cookies in periodic refresh');
+    }
+  } catch (error) {
+    console.error('Error in periodic cookie refresh:', error);
+  }
+}
+
+// Start the periodic refresh when the module is loaded
+startPeriodicCookieRefresh().catch(error => {
+  console.error('Failed to start periodic cookie refresh:', error);
+});

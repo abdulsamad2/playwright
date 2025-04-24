@@ -1,0 +1,17 @@
+{
+  "unhealthyProxies": {
+    "160.84.68.67:17817": {
+      "failureCount": 1,
+      "successCount": 0,
+      "count403": 0,
+      "firstFailure": "2025-04-24T05:47:33.714Z",
+      "lastFailure": "2025-04-24T05:47:33.714Z",
+      "lastCheck": "2025-04-24T05:47:33.714Z",
+      "cooldownMultiplier": 1,
+      "failureSequences": 0,
+      "secondaryTestSuccess": 0
+    }
+  },
+  "bannedProxies": [],
+  "lastReset": 1745473558485
+}
