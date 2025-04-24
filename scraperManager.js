@@ -10,10 +10,10 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 
 // Updated constants for stricter update intervals and high performance on 32GB system
 const MAX_UPDATE_INTERVAL = 160000; // Strict 2-minute update requirement
-const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 2)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
+const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 3)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
 const MAX_RETRIES = 10; // Updated to 10 per request of user
 const SCRAPE_TIMEOUT = 35000; // Reduced timeout to 35 seconds for faster failure detection
-const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 20); // Increased batch size for better throughput
+const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 45); // Smaller batches for better control with limited proxies
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 120000; // Minimum 1 minute between scrapes (allowing for 2-minute updates)
 const URGENT_THRESHOLD = 30000; // Events needing update within 30 seconds of deadline (tighter window)
@@ -60,7 +60,7 @@ const randomFingerprint = () => FINGERPRINT_POOL[Math.floor(Math.random() * FING
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
  */
-class ScraperManager {
+export class ScraperManager {
   constructor() {
     this.startTime = moment();
     this.lastSuccessTime = null;
@@ -1064,12 +1064,12 @@ class ScraperManager {
     // Get available proxy count to better determine batch sizing
     const availableProxies = this.proxyManager.getAvailableProxyCount();
     // Determine optimal batch size based on available proxies
-    // We want to use larger batches when we have more proxies
+    // We want to use smaller batches when we have fewer proxies to avoid overloading
     const maxEventsPerProxy = this.proxyManager.MAX_EVENTS_PER_PROXY;
     // Dynamic chunk sizing based on available proxies
     const chunkSize = Math.min(
-      maxEventsPerProxy * availableProxies, 
-      Math.max(10, Math.min(Math.ceil(eventIds.length / Math.max(1, availableProxies)), 20))
+      maxEventsPerProxy, 
+      Math.max(3, Math.min(Math.ceil(eventIds.length / Math.max(1, availableProxies)), 10))
     );
     
     if (LOG_LEVEL >= 1) {
@@ -1090,12 +1090,12 @@ class ScraperManager {
     let successCount = 0;
     let failureCount = 0;
     
-    // Process in larger batches for better throughput
-    const batchCount = Math.ceil(chunks.length / 2);
+    // Process in smaller batches for better control
+    const batchCount = Math.ceil(chunks.length / 4); // Process up to 4 chunks in parallel
     
     for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
-      const batchStart = batchIndex * 2;
-      const batchEnd = Math.min(batchStart + 2, chunks.length);
+      const batchStart = batchIndex * 4;
+      const batchEnd = Math.min(batchStart + 4, chunks.length);
       const batchChunks = chunks.slice(batchStart, batchEnd);
       
       // Generate unique batch IDs for each chunk
@@ -1103,17 +1103,17 @@ class ScraperManager {
         const batchId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         
         try {
-          // Get a random proxy for this batch
+          // Get proxies for this specific batch with improved proxy assignment
           const proxyData = this.proxyManager.getProxyForBatch(chunk);
           
           // Store the proxy assignment for this batch
           this.batchProxies.set(batchId, { proxy: proxyData.proxy, chunk });
           
           if (LOG_LEVEL >= 3) {
-            this.logWithTime(`Using random proxy ${proxyData.proxy.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
+            this.logWithTime(`Using ${proxyData.eventProxyMap.size} proxies for batch ${batchId} (${chunk.length} events)`, "debug");
           }
 
-          // Process the entire chunk efficiently as a batch using the random proxy
+          // Process the entire chunk efficiently as a batch using unique proxies per event
           const result = await this.processBatchEfficiently(chunk, batchId, proxyData.proxyAgent, proxyData.proxy, proxyData.eventProxyMap);
           successCount += result.results.length;
           failureCount += result.failed.length;

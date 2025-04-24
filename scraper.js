@@ -14,6 +14,8 @@ import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
+import { CookieManager } from './helpers/CookieManager.js';
+import { ScraperManager } from './scraperManager.js';
 
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
@@ -36,6 +38,9 @@ let capturedState = {
 let isRefreshingCookies = false;
 // Queue for pending cookie refresh requests
 let cookieRefreshQueue = [];
+
+// Replace the old cookie management code with CookieManager instance
+const cookieManager = new CookieManager();
 
 // Enhanced cookie management
 const COOKIE_MANAGEMENT = {
@@ -158,26 +163,36 @@ async function handleTicketmasterChallenge(page) {
   const startTime = Date.now();
 
   try {
+    // Enhanced challenge detection
     const challengePresent = await page.evaluate(() => {
-      return document.body.textContent.includes(
-        "Your Browsing Activity Has Been Paused"
-      );
+      return document.body.textContent.includes("Your Browsing Activity Has Been Paused") ||
+             document.querySelector('iframe[src*="recaptcha"]') !== null ||
+             document.querySelector('div[class*="challenge"]') !== null ||
+             document.querySelector('div[class*="verify"]') !== null;
     });
 
     if (challengePresent) {
       console.log("Detected Ticketmaster challenge, attempting resolution...");
-      await page.waitForTimeout(1000 + Math.random() * 1000);
+      
+      // Add more natural delay before any action
+      await page.waitForTimeout(3000 + Math.random() * 3000);
 
+      // Enhanced human-like mouse movements
       const viewportSize = page.viewportSize();
       if (viewportSize) {
-        await page.mouse.move(
-          Math.floor(Math.random() * viewportSize.width),
-          Math.floor(Math.random() * viewportSize.height),
-          { steps: 5 }
-        );
+        // More natural mouse movement pattern
+        const steps = 8 + Math.floor(Math.random() * 8);
+        for (let i = 0; i < steps; i++) {
+          const x = Math.floor(Math.random() * viewportSize.width);
+          const y = Math.floor(Math.random() * viewportSize.height);
+          const moveSteps = 15 + Math.floor(Math.random() * 15);
+          await page.mouse.move(x, y, { steps: moveSteps });
+          await page.waitForTimeout(150 + Math.random() * 300);
+        }
       }
 
-      const buttons = await page.$$("button");
+      // Try to find and click the challenge button with enhanced detection
+      const buttons = await page.$$("button, input[type='button'], .challenge-button, .verify-button");
       let buttonClicked = false;
 
       for (const button of buttons) {
@@ -186,13 +201,31 @@ async function handleTicketmasterChallenge(page) {
         }
 
         const text = await button.textContent();
+        const buttonText = text?.toLowerCase() || '';
+        
         if (
-          text?.toLowerCase().includes("continue") ||
-          text?.toLowerCase().includes("verify")
+          buttonText.includes("continue") ||
+          buttonText.includes("verify") ||
+          buttonText.includes("i'm not a robot") ||
+          buttonText.includes("proceed") ||
+          buttonText.includes("submit")
         ) {
-          await button.click();
-          buttonClicked = true;
-          break;
+          // More natural delay before clicking
+          await page.waitForTimeout(1000 + Math.random() * 2000);
+          
+          // Move mouse to button with natural movement
+          const box = await button.boundingBox();
+          if (box) {
+            await page.mouse.move(
+              box.x + box.width / 2,
+              box.y + box.height / 2,
+              { steps: 10 + Math.floor(Math.random() * 10) }
+            );
+            await page.waitForTimeout(500 + Math.random() * 1000);
+            await button.click();
+            buttonClicked = true;
+            break;
+          }
         }
       }
 
@@ -200,21 +233,36 @@ async function handleTicketmasterChallenge(page) {
         throw new Error("Could not find challenge button");
       }
 
-      await page.waitForTimeout(2000);
+      // Wait for challenge resolution with enhanced checks
+      await page.waitForTimeout(3000);
+      
+      // Enhanced challenge resolution check
       const stillChallenged = await page.evaluate(() => {
-        return document.body.textContent.includes(
-          "Your Browsing Activity Has Been Paused"
-        );
+        return document.body.textContent.includes("Your Browsing Activity Has Been Paused") ||
+               document.querySelector('iframe[src*="recaptcha"]') !== null ||
+               document.querySelector('div[class*="challenge"]') !== null ||
+               document.querySelector('div[class*="verify"]') !== null;
       });
 
       if (stillChallenged) {
         throw new Error("Challenge not resolved");
       }
+
+      // Additional verification
+      await page.waitForTimeout(2000);
+      const finalCheck = await page.evaluate(() => {
+        return !document.body.textContent.includes("Your Browsing Activity Has Been Paused") &&
+               document.querySelector('iframe[src*="recaptcha"]') === null;
+      });
+
+      if (!finalCheck) {
+        throw new Error("Challenge resolution verification failed");
+      }
     }
     return true;
   } catch (error) {
     console.error("Challenge handling failed:", error.message);
-    resetCapturedState();
+    cookieManager.resetCapturedState();
     throw error;
   }
 }
@@ -222,16 +270,16 @@ async function handleTicketmasterChallenge(page) {
 // Available Playwright browser engines for rotation
 const BROWSER_ENGINES = { chromium, firefox, webkit };
 
-export async function initBrowser(proxy) {
+export async function initBrowser(proxy, isForCookieCapture = false) {
   try {
     if (!proxy?.proxy) {
       const { proxy: newProxy } = GetProxy();
       proxy = newProxy;
     }
 
-    // Randomly pick a browser engine for this session
+    // Use Firefox for cookie capture, otherwise randomly pick a browser engine
     const engineNames = Object.keys(BROWSER_ENGINES);
-    const chosenEngine = engineNames[Math.floor(Math.random() * engineNames.length)];
+    const chosenEngine = isForCookieCapture ? 'firefox' : engineNames[Math.floor(Math.random() * engineNames.length)];
     const playwrightEngine = BROWSER_ENGINES[chosenEngine];
     const fingerprint = BrowserFingerprint.generate();
     // Generate a UA matching the chosen engine type
@@ -245,7 +293,7 @@ export async function initBrowser(proxy) {
 
     // Launch with the chosen engine
     browser = await playwrightEngine.launch({
-      headless: true,
+      headless: false,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
@@ -455,24 +503,21 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
   const currentTime = Date.now();
 
   // If we don't have cookies, try to load them from file first
-  if (!capturedState.cookies) {
-    const cookiesFromFile = await loadCookiesFromFile();
+  if (!cookieManager.capturedState.cookies) {
+    const cookiesFromFile = await cookieManager.loadCookiesFromFile();
     if (cookiesFromFile) {
-      // For more reliable cookie freshness, we now depend on explicit expiry
-      // rather than just checking when they were last refreshed
       const cookieAge = cookiesFromFile[0]?.expiry ? 
                        (cookiesFromFile[0].expiry * 1000 - currentTime) : 
-                       COOKIE_MANAGEMENT.MAX_COOKIE_AGE;
+                       CookieManager.CONFIG.MAX_COOKIE_AGE;
       
-      // If cookies are still valid (not expired and not too old)
-      if (cookieAge > 0 && cookieAge < COOKIE_MANAGEMENT.MAX_COOKIE_AGE) {
-        capturedState.cookies = cookiesFromFile;
-        capturedState.lastRefresh = currentTime - (COOKIE_MANAGEMENT.MAX_COOKIE_AGE - cookieAge);
-        if (!capturedState.fingerprint) {
-          capturedState.fingerprint = BrowserFingerprint.generate();
+      if (cookieAge > 0 && cookieAge < CookieManager.CONFIG.MAX_COOKIE_AGE) {
+        cookieManager.capturedState.cookies = cookiesFromFile;
+        cookieManager.capturedState.lastRefresh = currentTime - (CookieManager.CONFIG.MAX_COOKIE_AGE - cookieAge);
+        if (!cookieManager.capturedState.fingerprint) {
+          cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
         }
-        if (!capturedState.proxy) {
-          capturedState.proxy = proxy;
+        if (!cookieManager.capturedState.proxy) {
+          cookieManager.capturedState.proxy = proxy;
         }
       }
     }
@@ -480,25 +525,23 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
 
   // Check if we need to refresh cookies
   const needsRefresh =
-    !capturedState.cookies ||
-    !capturedState.fingerprint ||
-    !capturedState.lastRefresh ||
-    !capturedState.proxy ||
-    currentTime - capturedState.lastRefresh > COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL ||
+    !cookieManager.capturedState.cookies ||
+    !cookieManager.capturedState.fingerprint ||
+    !cookieManager.capturedState.lastRefresh ||
+    !cookieManager.capturedState.proxy ||
+    currentTime - cookieManager.capturedState.lastRefresh > CookieManager.CONFIG.COOKIE_REFRESH_INTERVAL ||
     forceRefresh;
 
   if (needsRefresh) {
-    // Add jitter to prevent all refreshes happening at the same time
     const jitter = Math.random() * 600000 - 300000; // ±5 minutes
-    const effectiveInterval = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL + jitter;
+    const effectiveInterval = CookieManager.CONFIG.COOKIE_REFRESH_INTERVAL + jitter;
     
-    // Check again with jitter applied
     const needsRefreshWithJitter = 
-      !capturedState.cookies ||
-      !capturedState.fingerprint ||
-      !capturedState.lastRefresh ||
-      !capturedState.proxy ||
-      currentTime - capturedState.lastRefresh > effectiveInterval ||
+      !cookieManager.capturedState.cookies ||
+      !cookieManager.capturedState.fingerprint ||
+      !cookieManager.capturedState.lastRefresh ||
+      !cookieManager.capturedState.proxy ||
+      currentTime - cookieManager.capturedState.lastRefresh > effectiveInterval ||
       forceRefresh;
     
     if (needsRefreshWithJitter) {
@@ -507,12 +550,12 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
     }
   }
 
-  return capturedState;
+  return cookieManager.capturedState;
 }
 
 async function refreshHeaders(eventId, proxy, existingCookies = null) {
   // If cookies are already being refreshed, add this request to the queue with a timeout
-  if (isRefreshingCookies) {
+  if (cookieManager.isRefreshingCookies) {
     console.log(
       `Cookies are already being refreshed, queueing request for event ${eventId}`
     );
@@ -520,9 +563,9 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       // Add a timeout to prevent requests from getting stuck in the queue forever
       const timeoutId = setTimeout(() => {
         // Find and remove this request from the queue
-        const index = cookieRefreshQueue.findIndex(item => item.timeoutId === timeoutId);
+        const index = cookieManager.cookieRefreshQueue.findIndex(item => item.timeoutId === timeoutId);
         if (index !== -1) {
-          cookieRefreshQueue.splice(index, 1);
+          cookieManager.cookieRefreshQueue.splice(index, 1);
         }
         
         // Generate fallback headers since we timed out waiting
@@ -537,7 +580,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         });
       }, 30000); // 30 second timeout
       
-      cookieRefreshQueue.push({ resolve, reject, eventId, timeoutId });
+      cookieManager.cookieRefreshQueue.push({ resolve, reject, eventId, timeoutId });
     });
   }
 
@@ -545,21 +588,21 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
   let localBrowser = null;
 
   try {
-    isRefreshingCookies = true;
+    cookieManager.isRefreshingCookies = true;
     
     // Set up a cleanup function to ensure we always reset the flag and process the queue
     const cleanupRefreshProcess = (error = null) => {
-      isRefreshingCookies = false;
+      cookieManager.isRefreshingCookies = false;
       
       // Process any queued refresh requests
-      while (cookieRefreshQueue.length > 0) {
-        const { resolve, reject, timeoutId } = cookieRefreshQueue.shift();
+      while (cookieManager.cookieRefreshQueue.length > 0) {
+        const { resolve, reject, timeoutId } = cookieManager.cookieRefreshQueue.shift();
         clearTimeout(timeoutId); // Clear the timeout for this request
         
         if (error) {
           reject(error);
-        } else if (capturedState.cookies || capturedState.headers) {
-          resolve(capturedState);
+        } else if (cookieManager.capturedState.cookies || cookieManager.capturedState.headers) {
+          resolve(cookieManager.capturedState);
         } else {
           // If we don't have cookies or headers, use fallback headers
           const fallbackHeaders = generateFallbackHeaders();
@@ -583,34 +626,34 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
     // Check if we have valid cookies in memory first
     if (
-      capturedState.cookies?.length &&
-      capturedState.lastRefresh &&
-      Date.now() - capturedState.lastRefresh <= COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
+      cookieManager.capturedState.cookies?.length &&
+      cookieManager.capturedState.lastRefresh &&
+      Date.now() - cookieManager.capturedState.lastRefresh <= COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
     ) {
       console.log("Using existing cookies from memory");
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
-      return capturedState;
+      return cookieManager.capturedState;
     }
 
     // If specific cookies are provided, use them
     if (existingCookies !== null) {
       console.log(`Using provided cookies for event ${eventId}`);
 
-      if (!capturedState.fingerprint) {
-        capturedState.fingerprint = BrowserFingerprint.generate();
+      if (!cookieManager.capturedState.fingerprint) {
+        cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
       }
 
-      capturedState = {
+      cookieManager.capturedState = {
         cookies: existingCookies,
-        fingerprint: capturedState.fingerprint,
+        fingerprint: cookieManager.capturedState.fingerprint,
         lastRefresh: Date.now(),
-        proxy: capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxy,
       };
       
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
-      return capturedState;
+      return cookieManager.capturedState;
     }
 
     // Try to load cookies from file with improved validation
@@ -618,20 +661,20 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       const cookiesFromFile = await loadCookiesFromFile();
       if (cookiesFromFile && cookiesFromFile.length >= 3) { // Ensure we have enough cookies
         console.log("Using cookies from file");
-        if (!capturedState.fingerprint) {
-          capturedState.fingerprint = BrowserFingerprint.generate();
+        if (!cookieManager.capturedState.fingerprint) {
+          cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
         }
 
-        capturedState = {
+        cookieManager.capturedState = {
           cookies: cookiesFromFile,
-          fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
+          fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
-          proxy: capturedState.proxy || proxy,
+          proxy: cookieManager.capturedState.proxy || proxy,
         };
         
         clearTimeout(globalTimeoutId);
         cleanupRefreshProcess();
-        return capturedState;
+        return cookieManager.capturedState;
       }
     } catch (err) {
       console.error("Error loading cookies from file:", err);
@@ -651,7 +694,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     
     while (initAttempts < 3 && !initSuccess) {
       try {
-        const { context: newContext, fingerprint } = await initBrowser(proxy);
+        const { context: newContext, fingerprint } = await initBrowser(proxy, true); // Pass true for cookie capture
         if (!newContext || !fingerprint) {
           throw new Error("Failed to initialize browser or generate fingerprint");
         }
@@ -670,17 +713,17 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       console.error("All browser initialization attempts failed");
       
       // Return fallback headers since we couldn't initialize browser
-      capturedState = {
+      cookieManager.capturedState = {
         cookies: null,
         fingerprint: BrowserFingerprint.generate(),
         lastRefresh: Date.now(),
         headers: fallbackHeaders,
-        proxy: capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxy,
       };
       
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
-      return capturedState;
+      return cookieManager.capturedState;
     }
 
     // Create page in try-catch block
@@ -712,16 +755,16 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       if (!currentUrl.includes(`/event/${eventId}`)) {
         console.warn(`Page did not load event data for ${eventId}, URL: ${currentUrl}`);
         // Abort and return fallback state without cookies
-        capturedState = {
+        cookieManager.capturedState = {
           cookies: null,
-          fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
+          fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
           headers: fallbackHeaders,
           proxy: proxy
         };
         clearTimeout(globalTimeoutId);
         cleanupRefreshProcess();
-        return capturedState;
+        return cookieManager.capturedState;
       }
 
       console.log(`Successfully loaded page for event ${eventId}`);
@@ -744,67 +787,67 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       // Capture cookies
       const { cookies, fingerprint: newFingerprint } = await captureCookies(
         page,
-        capturedState.fingerprint || BrowserFingerprint.generate()
+        cookieManager.capturedState.fingerprint || BrowserFingerprint.generate()
       );
 
       if (!cookies || cookies.length === 0) {
         console.error("Failed to capture cookies for event", eventId);
         
         // Use fallback headers if we couldn't get cookies
-        capturedState = {
+        cookieManager.capturedState = {
           cookies: null,
           fingerprint: newFingerprint,
           lastRefresh: Date.now(),
           headers: fallbackHeaders,
-          proxy: capturedState.proxy || proxy,
+          proxy: cookieManager.capturedState.proxy || proxy,
         };
         
         // Process queued refresh requests with fallback data
-        while (cookieRefreshQueue.length > 0) {
-          const { resolve } = cookieRefreshQueue.shift();
-          resolve(capturedState);
+        while (cookieManager.cookieRefreshQueue.length > 0) {
+          const { resolve } = cookieManager.cookieRefreshQueue.shift();
+          resolve(cookieManager.capturedState);
         }
         
-        isRefreshingCookies = false;
-        return capturedState;
+        cookieManager.isRefreshingCookies = false;
+        return cookieManager.capturedState;
       }
 
       // Update captured state with new cookies and fingerprint
-      capturedState = {
+      cookieManager.capturedState = {
         cookies,
         fingerprint: newFingerprint,
         lastRefresh: Date.now(),
-        proxy: capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxy,
       };
 
       // Save cookies to file in the background
-      saveCookiesToFile(cookies).catch((error) => {
+      cookieManager.saveCookiesToFile(cookies).catch((error) => {
         console.error("Error saving cookies to file:", error);
       });
       
       // Process queued refresh requests
-      while (cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieRefreshQueue.shift();
-        resolve(capturedState);
+      while (cookieManager.cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieManager.cookieRefreshQueue.shift();
+        resolve(cookieManager.capturedState);
       }
 
-      return capturedState;
+      return cookieManager.capturedState;
     } catch (error) {
       console.error("Error refreshing headers:", error);
       
       // Use fallback headers on error
-      capturedState = {
+      cookieManager.capturedState = {
         cookies: null,
         fingerprint: BrowserFingerprint.generate(),
         lastRefresh: Date.now(),
         headers: fallbackHeaders,
-        proxy: capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxy,
       };
       
       // Process queued refresh requests with fallback data
-      while (cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieRefreshQueue.shift();
-        resolve(capturedState);
+      while (cookieManager.cookieRefreshQueue.length > 0) {
+        const { resolve } = cookieManager.cookieRefreshQueue.shift();
+        resolve(cookieManager.capturedState);
       }
       
       throw error;
@@ -830,11 +873,11 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     }
     
     // Reset the flag to allow new requests
-    isRefreshingCookies = false;
+    cookieManager.isRefreshingCookies = false;
     
     // In case of error, reject all queued requests
-    while (cookieRefreshQueue.length > 0) {
-      const { reject, timeoutId } = cookieRefreshQueue.shift();
+    while (cookieManager.cookieRefreshQueue.length > 0) {
+      const { reject, timeoutId } = cookieManager.cookieRefreshQueue.shift();
       clearTimeout(timeoutId); // Clear the timeout
       reject(error);
     }
@@ -2209,8 +2252,14 @@ async function refreshCookiesPeriodically() {
   try {
     console.log('Starting periodic cookie refresh...');
     
-    // Get a random event ID to use for cookie refresh
-    const eventId = '1F0056C7D6A5B0E'; // Example event ID, you can make this dynamic
+    // Get a random active event ID
+    const activeEvents = await ScraperManager.getEventsToProcess();
+    if (!activeEvents || activeEvents.length === 0) {
+      console.warn('No active events found for cookie refresh');
+      return;
+    }
+    
+    const eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
     
     // Get a fresh proxy
     const { proxy } = GetProxy();
@@ -2222,13 +2271,13 @@ async function refreshCookiesPeriodically() {
       console.log('Successfully refreshed cookies in periodic refresh');
       
       // Update the captured state
-      capturedState = {
+      cookieManager.capturedState = {
         ...newState,
         lastRefresh: Date.now()
       };
       
       // Save to file
-      await saveCookiesToFile(newState.cookies);
+      await cookieManager.saveCookiesToFile(newState.cookies);
     } else {
       console.warn('Failed to refresh cookies in periodic refresh');
     }
