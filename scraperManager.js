@@ -10,10 +10,10 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 
 // Updated constants for stricter update intervals and high performance on 32GB system
 const MAX_UPDATE_INTERVAL = 160000; // Strict 2-minute update requirement
-const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 3)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
+const CONCURRENT_LIMIT = Math.max(30, Math.floor(cpus().length * 2)); // Reduced from 4x to 3x CPU cores to avoid proxy exhaustion
 const MAX_RETRIES = 10; // Updated to 10 per request of user
 const SCRAPE_TIMEOUT = 35000; // Reduced timeout to 35 seconds for faster failure detection
-const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 3, 60); // Increased batch size for better throughput
+const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 20); // Increased batch size for better throughput
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 120000; // Minimum 1 minute between scrapes (allowing for 2-minute updates)
 const URGENT_THRESHOLD = 30000; // Events needing update within 30 seconds of deadline (tighter window)

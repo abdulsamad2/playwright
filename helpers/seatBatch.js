@@ -172,18 +172,14 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
     });
   }
 
-  /*
-  let totalCost=parseFloat(offer?.charges.reduce((total, item) => total + item.amount, 0)+offer?.faceValue);
-  let totalCostWithPercentage=totalCost+(totalCost*(event?.listCostPercentage/100));
-  */
- //Get Fee which won't multiply
+  //Get Fee which won't multiply
  const orderProcessingCharges =
    offer?.charges?.filter((x) => x?.reason === "order_processing") || [];
  const singleExtraCharges = parseFloat(
    orderProcessingCharges.reduce(
      (total, item) => total + (item?.amount || 0),
      0
-   ) / (data?.seats?.length || 1)
+   )
  );
 
  const otherCharges =
@@ -193,14 +189,21 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
  );
 
  const faceValue = offer?.faceValue || 0;
- const totalCost = singleExtraCharges + repeatExtraCharges + faceValue;
+ const listPrice = offer?.listPrice || 0;
+ const totalPrice = offer?.totalPrice || 0;
+ 
+ // Calculate per-seat costs
+ const perSeatCost = faceValue + repeatExtraCharges;
+ const totalCost = perSeatCost * (data?.seats?.length || 0) + singleExtraCharges;
+ 
+ // Apply markup percentage if specified
  const listCostPercentage = event?.listCostPercentage || 0;
- const totalCostWithPercentage =
-   totalCost + totalCost * (listCostPercentage / 100);
+ const totalCostWithPercentage = totalCost + (totalCost * (listCostPercentage / 100));
   return {
       "inventory": {
       "quantity": data?.seats?.length || 0,
       "section": data?.section || "",
+      "SeatsType":data?.seatsType || "",
       "hideSeatNumbers": true,
       "row": data?.row || "",
       "cost": totalCost * (data?.seats?.length || 0),
@@ -379,6 +382,10 @@ return returnData.map(x=>{
        return undefined;
     }
     else if (offerGet?.protected==true)
+    {
+      return undefined;
+    }
+    else if (!offerGet.offerTypes || !offerGet.offerTypes.includes("standard"))
     {
       return undefined;
     }

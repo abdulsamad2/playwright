@@ -339,6 +339,19 @@ class ProxyManager {
     
     return stats;
   }
+
+  /**
+   * Blacklist the current proxy for an event
+   * @param {string} eventId - The event ID
+   */
+  blacklistCurrentProxy(eventId) {
+    const currentProxy = this.eventToProxy.get(eventId);
+    if (currentProxy) {
+      this.log(`Blacklisting proxy ${currentProxy} for event ${eventId}`, "warning");
+      this.healthManager.recordProxyFailure(currentProxy, new Error("Proxy blacklisted"));
+      this.releaseProxy(eventId, false, new Error("Proxy blacklisted"));
+    }
+  }
 }
 
 export default ProxyManager; 
