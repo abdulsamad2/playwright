@@ -42,19 +42,16 @@ class ProxyManager {
     });
     
     // Set up periodic health reset to prevent permanently marking proxies as unhealthy
-    setInterval(() => this.resetProxyHealthMetrics(), 5 * 60 * 1000); // Reset every 5 minutes
+    setInterval(() => this.resetProxyHealth(), 5 * 60 * 1000); // Reset every 5 minutes
     
     this.log("ProxyManager initialized with " + this.proxies.length + " proxies");
   }
   
   /**
-   * Reset proxy health metrics periodically to give all proxies another chance
+   * Reset proxy health metrics periodically to give proxies a new chance
    */
-  resetProxyHealthMetrics() {
+  resetProxyHealth() {
     const now = Date.now();
-    if (now - this.proxyLastReset < 5 * 60 * 1000) return; // Don't reset too frequently
-    
-    this.proxyLastReset = now;
     this.log("Resetting proxy health metrics");
     
     // Reduce (but don't completely reset) failure counts to give proxies a new chance
@@ -83,12 +80,13 @@ class ProxyManager {
       }
     }
     
-    // Clear the failed proxies set (except banned ones)
-    for (const proxy of this.failedProxies) {
-      if (!this.bannedProxies.has(proxy)) {
-        this.failedProxies.delete(proxy);
-      }
-    }
+    // Clear retry times for all proxies
+    this.proxyRetryTime.clear();
+    
+    // Clear failed proxies set
+    this.failedProxies.clear();
+    
+    this.log("Proxy health metrics reset complete");
   }
 
   /**
@@ -114,13 +112,25 @@ class ProxyManager {
    * @returns {boolean} Whether the proxy is healthy
    */
   isProxyHealthy(proxy) {
+    // If proxy is not in health tracking, initialize it
+    if (!this.proxyHealth.has(proxy.proxy)) {
+      this.proxyHealth.set(proxy.proxy, {
+        isHealthy: true,
+        failureCount: 0,
+        successCount: 0,
+        lastCheck: Date.now(),
+        last403Time: 0
+      });
+      return true;
+    }
+
     const health = this.proxyHealth.get(proxy.proxy);
-    if (!health) return false;
     
-    // If in retry timeout, consider unhealthy
-    const retryTime = this.proxyRetryTime.get(proxy.proxy) || 0;
-    if (retryTime > Date.now()) {
-      return false;
+    // Reset health metrics periodically (every 5 minutes)
+    const now = Date.now();
+    if (now - this.proxyLastReset > 5 * 60 * 1000) {
+      this.resetProxyHealth();
+      this.proxyLastReset = now;
     }
     
     // If proxy is banned, it's unhealthy
@@ -130,19 +140,19 @@ class ProxyManager {
     
     // If too many 403 errors, consider unhealthy
     const count403 = this.proxy403Count.get(proxy.proxy) || 0;
-    if (count403 >= 3) { // 3 strikes and you're out
+    if (count403 >= 5) { // Increased from 3 to 5 strikes
       return false;
     }
     
     // If proxy has too many failures, mark as unhealthy
-    if (health.failureCount > 3 && health.successCount < health.failureCount) {
+    if (health.failureCount > 5 && health.successCount < health.failureCount) { // Increased from 3 to 5
       return false;
     }
     
-    // If proxy was used recently, add cooldown (short cooldown to prevent overuse)
+    // If proxy was used recently, add cooldown (shorter cooldown to prevent overuse)
     const lastUsed = this.proxyLastUsed.get(proxy.proxy) || 0;
-    const cooldownTime = 3000; // 3 seconds cooldown
-    if (Date.now() - lastUsed < cooldownTime) {
+    const cooldownTime = 1000; // Reduced from 3000 to 1000ms
+    if (now - lastUsed < cooldownTime) {
       return false;
     }
     

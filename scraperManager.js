@@ -938,26 +938,30 @@ class ScraperManager {
         
         try {
           // Get a proxy for this specific batch
-          const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(chunk);
+          const proxyData = this.proxyManager.getProxyForBatch(chunk);
+          
+          if (!proxyData) {
+            throw new Error("No healthy proxy available for this batch");
+          }
           
           // Store the proxy assignment for this batch
-          this.batchProxies.set(batchId, { proxy, chunk });
+          this.batchProxies.set(batchId, { proxy: proxyData.proxy, chunk });
           
           if (LOG_LEVEL >= 3) {
-            this.logWithTime(`Using proxy ${proxy.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
+            this.logWithTime(`Using proxy ${proxyData.proxy} for batch ${batchId} (${chunk.length} events)`, "debug");
           }
 
           // Process the entire chunk efficiently as a batch
-          const result = await this.processBatchEfficiently(chunk, batchId, proxyAgent, proxy);
+          const result = await this.processBatchEfficiently(chunk, batchId, proxyData.proxyAgent, proxyData.proxy);
           successCount += result.results.length;
           failureCount += result.failed.length;
           results.push(...result.results);
           failed.push(...result.failed);
           
           // Update proxy success 
-          if (this.proxyManager && proxy && proxy.proxy) {
+          if (this.proxyManager && proxyData.proxy) {
             try {
-              this.proxyManager.recordProxySuccess(proxy.proxy);
+              this.proxyManager.recordProxySuccess(proxyData.proxy);
             } catch (error) {
               console.error(`Error updating proxy success: ${error.message}`);
             }
@@ -965,7 +969,7 @@ class ScraperManager {
           
           // If we had failures, and they outnumber successes, mark proxy as having issues
           if (result.failed.length > result.results.length && result.failed.length > 0) {
-            this.proxyManager.recordProxyFailure(proxy.proxy, { message: "Batch failures exceeded successes" });
+            this.proxyManager.recordProxyFailure(proxyData.proxy, { message: "Batch failures exceeded successes" });
           }
         } catch (error) {
           this.logWithTime(`Error processing batch ${batchId}: ${error.message}`, "error");
@@ -973,7 +977,7 @@ class ScraperManager {
           // If there's a proxy error, mark the proxy as unhealthy
           if (this.batchProxies.has(batchId)) {
             const { proxy, chunk } = this.batchProxies.get(batchId);
-            this.proxyManager.updateProxyHealth(proxy.proxy, false);
+            this.proxyManager.updateProxyHealth(proxy, false);
             this.proxyManager.releaseProxyBatch(chunk);
           }
           
@@ -983,15 +987,6 @@ class ScraperManager {
             error: new Error(`Batch processing error: ${error.message}`) 
           })));
           failureCount += chunk.length;
-          
-          // Update proxy failure
-          if (this.proxyManager && proxy && proxy.proxy) {
-            try {
-              this.proxyManager.recordProxyFailure(proxy.proxy, error);
-            } catch (proxyError) {
-              console.error(`Error updating proxy failure: ${proxyError.message}`);
-            }
-          }
         } finally {
           // Clean up batch tracking
           this.batchProxies.delete(batchId);
