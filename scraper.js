@@ -3,7 +3,7 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { chromium,firefox, webkit } from "playwright";
+import { chromium,devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
@@ -15,14 +15,18 @@ import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
 import { CookieManager } from './helpers/CookieManager.js';
-import { ScraperManager } from './scraperManager.js';
+import scraperManager from './scraperManager.js';
+// Initialize CookieManager instance
+const cookieManager = new CookieManager();
+
+const iphone13 = devices["iPhone 13"];
 
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
   PAGE_TIMEOUT: 30000,
   MAX_RETRIES: 5,
-  RETRY_DELAY: 30000,
+  RETRY_DELAY: 10000,
   CHALLENGE_TIMEOUT: 10000,
 };
 
@@ -38,121 +42,136 @@ let capturedState = {
 let isRefreshingCookies = false;
 // Queue for pending cookie refresh requests
 let cookieRefreshQueue = [];
-
-// Replace the old cookie management code with CookieManager instance
-const cookieManager = new CookieManager();
+// Flag to track if periodic refresh has been started
+let isPeriodicRefreshStarted = false;
 
 // Enhanced cookie management
 const COOKIE_MANAGEMENT = {
   ESSENTIAL_COOKIES: [
-    'TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit', 'CMPS', 'CMID',
-    'MUID', 'au_id', 'aud', 'tmTrackID', 'TapAd_DID', 'uid'
+    "TMUO",
+    "TMPS",
+    "TM_TKTS",
+    "SESSION",
+    "audit",
+    "CMPS",
+    "CMID",
+    "MUID",
+    "au_id",
+    "aud",
+    "tmTrackID",
+    "TapAd_DID",
+    "uid",
   ],
-  AUTH_COOKIES: ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'],
-  MAX_COOKIE_LENGTH: 8000,
-  COOKIE_REFRESH_INTERVAL: 12 * 60 * 60 * 1000, // 12 hours
-  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days
+  AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
+  MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
+  COOKIE_REFRESH_INTERVAL: 30 * 60 * 1000, // 30 minutes
+  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
   COOKIE_ROTATION: {
     ENABLED: true,
-    MAX_STORED_COOKIES: 100,
-    ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
-    LAST_ROTATION: Date.now()
+    MAX_STORED_COOKIES: 100, // Keep multiple cookie sets
+    ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours between rotations
+    LAST_ROTATION: Date.now(),
   },
-  PERIODIC_REFRESH_INTERVAL: 30 * 60 * 1000 // 30 minutes
 };
 
 // Enhanced cookie handling
 const handleCookies = {
   // Extract and validate essential cookies
   extractEssentialCookies: (cookies) => {
-    if (!cookies) return '';
-    
+    if (!cookies) return "";
+
     const cookieMap = new Map();
-    cookies.split(';').forEach(cookie => {
-      const [name, value] = cookie.trim().split('=');
+    cookies.split(";").forEach((cookie) => {
+      const [name, value] = cookie.trim().split("=");
       if (name && value) {
         cookieMap.set(name, value);
       }
     });
-    
+
     // Prioritize auth cookies
     const essentialCookies = [];
-    COOKIE_MANAGEMENT.AUTH_COOKIES.forEach(name => {
+    COOKIE_MANAGEMENT.AUTH_COOKIES.forEach((name) => {
       if (cookieMap.has(name)) {
         essentialCookies.push(`${name}=${cookieMap.get(name)}`);
         cookieMap.delete(name);
       }
     });
-    
+
     // Add other essential cookies if we have space
-    COOKIE_MANAGEMENT.ESSENTIAL_COOKIES.forEach(name => {
-      if (cookieMap.has(name) && essentialCookies.length < 20) { // Increased from 10
+    COOKIE_MANAGEMENT.ESSENTIAL_COOKIES.forEach((name) => {
+      if (cookieMap.has(name) && essentialCookies.length < 20) {
+        // Increased from 10
         essentialCookies.push(`${name}=${cookieMap.get(name)}`);
         cookieMap.delete(name);
       }
     });
 
     // Add any remaining cookies if they fit
-    if (essentialCookies.join('; ').length < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH) {
+    if (
+      essentialCookies.join("; ").length < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH
+    ) {
       for (const [name, value] of cookieMap.entries()) {
         const potentialCookie = `${name}=${value}`;
-        if (essentialCookies.join('; ').length + potentialCookie.length + 2 < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH) {
+        if (
+          essentialCookies.join("; ").length + potentialCookie.length + 2 <
+          COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH
+        ) {
           essentialCookies.push(potentialCookie);
         }
       }
     }
-    
-    return essentialCookies.join('; ');
+
+    return essentialCookies.join("; ");
   },
-  
+
   // Validate cookie freshness with improved logic
   areCookiesFresh: (cookies) => {
     if (!cookies) return false;
-    
+
     const cookieMap = new Map();
-    cookies.split(';').forEach(cookie => {
-      const [name, value] = cookie.trim().split('=');
+    cookies.split(";").forEach((cookie) => {
+      const [name, value] = cookie.trim().split("=");
       if (name && value) {
         cookieMap.set(name, value);
       }
     });
-    
+
     // More lenient check: require at least 3 auth cookies
-    const authCookiesPresent = COOKIE_MANAGEMENT.AUTH_COOKIES.filter(name => 
-      cookieMap.has(name) && cookieMap.get(name).length > 0
+    const authCookiesPresent = COOKIE_MANAGEMENT.AUTH_COOKIES.filter(
+      (name) => cookieMap.has(name) && cookieMap.get(name).length > 0
     );
-    
+
     return authCookiesPresent.length >= 3; // Need at least 3 auth cookies
   },
-  
+
   // Merge cookies from different sources
   mergeCookies: (existingCookies, newCookies) => {
     if (!existingCookies) return newCookies;
     if (!newCookies) return existingCookies;
-    
+
     const cookieMap = new Map();
-    
+
     // Add existing cookies first
-    existingCookies.split(';').forEach(cookie => {
-      const [name, value] = cookie.trim().split('=');
+    existingCookies.split(";").forEach((cookie) => {
+      const [name, value] = cookie.trim().split("=");
       if (name && value) {
         cookieMap.set(name, value);
       }
     });
-    
+
     // Update with new cookies
-    newCookies.split(';').forEach(cookie => {
-      const [name, value] = cookie.trim().split('=');
+    newCookies.split(";").forEach((cookie) => {
+      const [name, value] = cookie.trim().split("=");
       if (name && value) {
         cookieMap.set(name, value);
       }
     });
-    
+
     // Convert back to string
     return Array.from(cookieMap.entries())
       .map(([name, value]) => `${name}=${value}`)
-      .join('; ');
-  }
+      .join("; ");
+  },
 };
 
 function generateCorrelationId() {
@@ -163,36 +182,26 @@ async function handleTicketmasterChallenge(page) {
   const startTime = Date.now();
 
   try {
-    // Enhanced challenge detection
     const challengePresent = await page.evaluate(() => {
-      return document.body.textContent.includes("Your Browsing Activity Has Been Paused") ||
-             document.querySelector('iframe[src*="recaptcha"]') !== null ||
-             document.querySelector('div[class*="challenge"]') !== null ||
-             document.querySelector('div[class*="verify"]') !== null;
+      return document.body.textContent.includes(
+        "Your Browsing Activity Has Been Paused"
+      );
     });
 
     if (challengePresent) {
       console.log("Detected Ticketmaster challenge, attempting resolution...");
-      
-      // Add more natural delay before any action
-      await page.waitForTimeout(3000 + Math.random() * 3000);
+      await page.waitForTimeout(1000 + Math.random() * 1000);
 
-      // Enhanced human-like mouse movements
       const viewportSize = page.viewportSize();
       if (viewportSize) {
-        // More natural mouse movement pattern
-        const steps = 8 + Math.floor(Math.random() * 8);
-        for (let i = 0; i < steps; i++) {
-          const x = Math.floor(Math.random() * viewportSize.width);
-          const y = Math.floor(Math.random() * viewportSize.height);
-          const moveSteps = 15 + Math.floor(Math.random() * 15);
-          await page.mouse.move(x, y, { steps: moveSteps });
-          await page.waitForTimeout(150 + Math.random() * 300);
-        }
+        await page.mouse.move(
+          Math.floor(Math.random() * viewportSize.width),
+          Math.floor(Math.random() * viewportSize.height),
+          { steps: 5 }
+        );
       }
 
-      // Try to find and click the challenge button with enhanced detection
-      const buttons = await page.$$("button, input[type='button'], .challenge-button, .verify-button");
+      const buttons = await page.$$("button");
       let buttonClicked = false;
 
       for (const button of buttons) {
@@ -201,31 +210,13 @@ async function handleTicketmasterChallenge(page) {
         }
 
         const text = await button.textContent();
-        const buttonText = text?.toLowerCase() || '';
-        
         if (
-          buttonText.includes("continue") ||
-          buttonText.includes("verify") ||
-          buttonText.includes("i'm not a robot") ||
-          buttonText.includes("proceed") ||
-          buttonText.includes("submit")
+          text?.toLowerCase().includes("continue") ||
+          text?.toLowerCase().includes("verify")
         ) {
-          // More natural delay before clicking
-          await page.waitForTimeout(1000 + Math.random() * 2000);
-          
-          // Move mouse to button with natural movement
-          const box = await button.boundingBox();
-          if (box) {
-            await page.mouse.move(
-              box.x + box.width / 2,
-              box.y + box.height / 2,
-              { steps: 10 + Math.floor(Math.random() * 10) }
-            );
-            await page.waitForTimeout(500 + Math.random() * 1000);
-            await button.click();
-            buttonClicked = true;
-            break;
-          }
+          await button.click();
+          buttonClicked = true;
+          break;
         }
       }
 
@@ -233,111 +224,207 @@ async function handleTicketmasterChallenge(page) {
         throw new Error("Could not find challenge button");
       }
 
-      // Wait for challenge resolution with enhanced checks
-      await page.waitForTimeout(3000);
-      
-      // Enhanced challenge resolution check
+      await page.waitForTimeout(2000);
       const stillChallenged = await page.evaluate(() => {
-        return document.body.textContent.includes("Your Browsing Activity Has Been Paused") ||
-               document.querySelector('iframe[src*="recaptcha"]') !== null ||
-               document.querySelector('div[class*="challenge"]') !== null ||
-               document.querySelector('div[class*="verify"]') !== null;
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
       });
 
       if (stillChallenged) {
         throw new Error("Challenge not resolved");
       }
-
-      // Additional verification
-      await page.waitForTimeout(2000);
-      const finalCheck = await page.evaluate(() => {
-        return !document.body.textContent.includes("Your Browsing Activity Has Been Paused") &&
-               document.querySelector('iframe[src*="recaptcha"]') === null;
-      });
-
-      if (!finalCheck) {
-        throw new Error("Challenge resolution verification failed");
-      }
     }
     return true;
   } catch (error) {
     console.error("Challenge handling failed:", error.message);
-    cookieManager.resetCapturedState();
+    resetCapturedState();
     throw error;
   }
 }
 
-// Available Playwright browser engines for rotation
-const BROWSER_ENGINES = { chromium, firefox, webkit };
+// Enhanced location generation
+function getRandomLocation() {
+  const locations = [
+    { timezone: "America/New_York", latitude: 40.7128 + (Math.random() * 0.1 - 0.05), longitude: -74.006 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
+    { timezone: "America/Chicago", latitude: 41.8781 + (Math.random() * 0.1 - 0.05), longitude: -87.6298 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
+    { timezone: "America/Denver", latitude: 39.7392 + (Math.random() * 0.1 - 0.05), longitude: -104.9903 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
+    { timezone: "America/Los_Angeles", latitude: 34.0522 + (Math.random() * 0.1 - 0.05), longitude: -118.2437 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
+    { timezone: "America/Phoenix", latitude: 33.4484 + (Math.random() * 0.1 - 0.05), longitude: -112.0740 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
+    { timezone: "America/Toronto", latitude: 43.6532 + (Math.random() * 0.1 - 0.05), longitude: -79.3832 + (Math.random() * 0.1 - 0.05), locale: "en-CA" },
+    { timezone: "America/Vancouver", latitude: 49.2827 + (Math.random() * 0.1 - 0.05), longitude: -123.1207 + (Math.random() * 0.1 - 0.05), locale: "en-CA" },
+    { timezone: "Europe/London", latitude: 51.5074 + (Math.random() * 0.1 - 0.05), longitude: -0.1278 + (Math.random() * 0.1 - 0.05), locale: "en-GB" },
+    { timezone: "Europe/Paris", latitude: 48.8566 + (Math.random() * 0.1 - 0.05), longitude: 2.3522 + (Math.random() * 0.1 - 0.05), locale: "fr-FR" },
+    { timezone: "Europe/Berlin", latitude: 52.5200 + (Math.random() * 0.1 - 0.05), longitude: 13.4050 + (Math.random() * 0.1 - 0.05), locale: "de-DE" },
+  ];
 
-export async function initBrowser(proxy, isForCookieCapture = false) {
+  const weightedLocations = [
+    ...locations.slice(0, 6),
+    ...locations.slice(0, 6),
+    ...locations
+  ];
+
+  const random = Math.floor(Math.random() * weightedLocations.length);
+  return weightedLocations[random];
+}
+
+// Generate realistic iPhone user agent
+function getRealisticIphoneUserAgent() {
+  const iOSVersions = ['15_0', '15_1', '15_2', '15_3', '15_4', '15_5', '15_6', '16_0', '16_1', '16_2'];
+  const safariVersions = ['15.0', '15.1', '15.2', '15.3', '15.4', '16.0', '16.1'];
+  
+  const iOSVersion = iOSVersions[Math.floor(Math.random() * iOSVersions.length)];
+  const safariVersion = safariVersions[Math.floor(Math.random() * safariVersions.length)];
+  
+  return `Mozilla/5.0 (iPhone; CPU iPhone OS ${iOSVersion} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${safariVersion} Mobile/15E148 Safari/604.1`;
+}
+
+// Enhanced browser fingerprint generation
+function enhancedFingerprint() {
+  const baseFingerprint = BrowserFingerprint.generate();
+  
+  const hardwareValues = [4, 6, 8];
+  const memoryValues = [2, 4, 8];
+  
+  return {
+    ...baseFingerprint,
+    hardwareConcurrency: hardwareValues[Math.floor(Math.random() * hardwareValues.length)],
+    deviceMemory: memoryValues[Math.floor(Math.random() * memoryValues.length)],
+    screenResolution: {
+      width: [375, 390, 414][Math.floor(Math.random() * 3)],
+      height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
+    },
+    colorDepth: 24,
+    touchPoints: Math.floor(Math.random() * 3) + 3
+  };
+}
+
+// Simulate mobile interactions
+async function simulateMobileInteractions(page) {
+  const viewport = page.viewportSize();
+  if (!viewport) return;
+
+  const startX = viewport.width / 2;
+  const startY = viewport.height * (0.7 + Math.random() * 0.2);
+  const endY = viewport.height * (0.3 + Math.random() * 0.2);
+  
+  await page.touchscreen.tap(startX, startY);
+  await page.waitForTimeout(100 + Math.random() * 300);
+  
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  
+  const steps = 10 + Math.floor(Math.random() * 10);
+  const timePerStep = 10 + Math.floor(Math.random() * 20);
+  
+  for (let i = 0; i <= steps; i++) {
+    const currentY = startY - ((startY - endY) * (i / steps));
+    await page.mouse.move(startX, currentY);
+    await page.waitForTimeout(timePerStep);
+  }
+  
+  await page.mouse.up();
+  await page.waitForTimeout(300 + Math.random() * 500);
+}
+
+// Enhanced browser initialization
+async function initBrowser(proxy) {
   try {
+    const location = getRandomLocation();
+    
     if (!proxy?.proxy) {
       const { proxy: newProxy } = GetProxy();
       proxy = newProxy;
     }
-
-    // Use Firefox for cookie capture, otherwise randomly pick a browser engine
-    const engineNames = Object.keys(BROWSER_ENGINES);
-    const chosenEngine = isForCookieCapture ? 'firefox' : engineNames[Math.floor(Math.random() * engineNames.length)];
-    const playwrightEngine = BROWSER_ENGINES[chosenEngine];
-    const fingerprint = BrowserFingerprint.generate();
-    // Generate a UA matching the chosen engine type
-    const userAgent = BrowserFingerprint.generateUserAgent({ ...fingerprint, browser: chosenEngine });
-
+    
+    const fingerprint = enhancedFingerprint();
+    const userAgent = getRealisticIphoneUserAgent();
+    
     if (browser) {
       await cleanup(browser, context);
     }
-
+    
     const proxyUrl = new URL(`http://${proxy.proxy}`);
-
-    // Launch with the chosen engine
-    browser = await playwrightEngine.launch({
+    
+    browser = await chromium.launch({
       headless: false,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
         password: proxy.password,
       },
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins',
+        '--disable-site-isolation-trials',
+        '--disable-web-security',
+        '--disable-features=BlockInsecurePrivateNetworkRequests',
+        '--disable-features=SameSiteByDefaultCookies',
+        `--user-agent=${userAgent}`,
+        '--disable-dev-shm-usage',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--ignore-certificate-errors',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-infobars',
+        '--disable-notifications'
+      ],
+      timeout: 60000,
     });
-
+    
     context = await browser.newContext({
-      viewport: fingerprint.screen,
-      userAgent,
-      locale: fingerprint.language,
-      deviceScaleFactor: fingerprint.devicePixelRatio,
-      colorScheme: "light",
-      timezoneId: fingerprint.timezone,
+      ...iphone13,
+      userAgent: userAgent,
+      locale: location.locale,
+      colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
+      timezoneId: location.timezone,
+      geolocation: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: 100 * Math.random() + 50,
+      },
+      permissions: [
+        "geolocation",
+        "notifications",
+        "microphone",
+        "camera",
+      ],
+      deviceScaleFactor: 2 + Math.random() * 0.5,
+      hasTouch: true,
+      isMobile: true,
       javaScriptEnabled: true,
+      acceptDownloads: true,
+      ignoreHTTPSErrors: true,
+      bypassCSP: true,
+      extraHTTPHeaders: {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+        "Accept-Language": `${location.locale},en;q=0.9`,
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "DNT": Math.random() > 0.5 ? "1" : "0", // Ensure DNT is always a string
+        "Upgrade-Insecure-Requests": "1",
+        "Pragma": "no-cache"
+      },
+      viewport: {
+        width: [375, 390, 414][Math.floor(Math.random() * 3)],
+        height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
+      }
     });
-
-    // 🛡️ Anti-detection script
-    await context.addInitScript(() => {
-      // Remove webdriver
-      Object.defineProperty(navigator, "webdriver", {
-        get: () => false,
-      });
-
-      // Fake plugins
-      Object.defineProperty(navigator, "plugins", {
-        get: () => [1, 2, 3, 4, 5],
-      });
-
-      // Fake languages
-      Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en"],
-      });
-
-      // Fake Chrome object
-      window.chrome = {
-        runtime: {},
-      };
-    });
-
-    return { context, fingerprint };
+    
+    // Create a new page and simulate human behavior
+    const page = await context.newPage();
+    await page.waitForTimeout(1000 + Math.random() * 2000);
+    await simulateMobileInteractions(page);
+    
+    return { context, fingerprint, page };
   } catch (error) {
+    console.error("Error initializing browser:", error.message);
     await cleanup(browser, context);
-    console.error("Error initializing browser:", error);
     throw error;
   }
 }
@@ -1154,7 +1241,11 @@ const GetProxy = () => {
   }
 };
 
-const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = null) => {
+const ScrapeEvent = async (
+  event,
+  externalProxyAgent = null,
+  externalProxy = null
+) => {
   try {
     // Determine event ID from either object or simple ID
     const eventId = event?.eventId || event;
@@ -1162,131 +1253,74 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
     const correlationId = generateCorrelationId();
     let proxyAgent = externalProxyAgent;
     let proxy = externalProxy;
-    
+
     // Ensure we have a valid event ID
     if (!eventId) {
       console.error("Missing event ID in ScrapeEvent call");
       return false;
     }
-    
-    console.log(`Starting event ${eventId} processing with correlation ID: ${correlationId}`);
-    
-    // Initialize static tracking variables if needed
+
+    console.log(
+      `Starting event ${eventId} processing with correlation ID: ${correlationId}`
+    );
+
+    // Initialize rate limiting tracking
     if (!ScrapeEvent.rateLimits) {
       ScrapeEvent.rateLimits = {
         hourlyCount: 0,
         lastHour: new Date().getHours(),
         maxPerHour: 1000,
-        recentEvents: new Set(),
-        blockedUntil: 0
+        blockedUntil: 0,
       };
     }
-    
-    if (!ScrapeEvent.headerCache) {
-      ScrapeEvent.headerCache = new Map();
-    }
-    
-    if (!ScrapeEvent.resultCache) {
-      ScrapeEvent.resultCache = new Map();
-      // Set up automatic cache cleanup
-      setInterval(() => {
-        const now = Date.now();
-        // Keep results for up to 30 minutes
-        const maxAge = 30 * 60 * 1000;
-        
-        for (const [key, value] of ScrapeEvent.resultCache.entries()) {
-          if (now - value.timestamp > maxAge) {
-            ScrapeEvent.resultCache.delete(key);
-          }
-        }
-      }, 5 * 60 * 1000); // Run cleanup every 5 minutes
-    }
-    
-    // Check result cache first (if this exact event was processed recently)
-    const resultCacheKey = `result_${eventId}`;
-    if (ScrapeEvent.resultCache.has(resultCacheKey)) {
-      const cachedResult = ScrapeEvent.resultCache.get(resultCacheKey);
-      if (cachedResult && cachedResult.data && Date.now() - cachedResult.timestamp < 5 * 60 * 1000) { // 5 min cache
-        console.log(`Using cached result for event ${eventId} from ${new Date(cachedResult.timestamp).toISOString()}`);
-        return cachedResult.data;
-      }
-    }
-    
+
     // Check rate limits to avoid overwhelming external services
     const currentHour = new Date().getHours();
     if (currentHour !== ScrapeEvent.rateLimits.lastHour) {
       ScrapeEvent.rateLimits.hourlyCount = 0;
       ScrapeEvent.rateLimits.lastHour = currentHour;
     }
-    
-    if (ScrapeEvent.rateLimits.hourlyCount >= ScrapeEvent.rateLimits.maxPerHour) {
-      console.warn(`Hourly rate limit reached (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour})`);
+
+    if (
+      ScrapeEvent.rateLimits.hourlyCount >= ScrapeEvent.rateLimits.maxPerHour
+    ) {
+      console.warn(
+        `Hourly rate limit reached (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour})`
+      );
       throw new Error("Rate limit exceeded");
     }
-    
+
     // Check global block (if we've detected we're being blocked by the server)
     if (ScrapeEvent.rateLimits.blockedUntil > Date.now()) {
-      const waitTime = Math.ceil((ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000);
+      const waitTime = Math.ceil(
+        (ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000
+      );
       console.warn(`Global block in effect for ${waitTime} more seconds`);
-      throw new Error(`Service temporarily unavailable for ${waitTime} seconds`);
+      throw new Error(
+        `Service temporarily unavailable for ${waitTime} seconds`
+      );
     }
-    
-    // Check if this specific event was processed recently to avoid duplicates
-    if (ScrapeEvent.rateLimits.recentEvents.has(eventId)) {
-      console.log(`Event ${eventId} was processed recently, skipping duplicated request`);
-      
-      // Wait for a cached result if one is being processed
-      if (ScrapeEvent.pendingEvents && ScrapeEvent.pendingEvents.has(eventId)) {
-        console.log(`Waiting for pending result of event ${eventId}`);
-        try {
-          // Wait up to 10 seconds for the result
-          const waitStart = Date.now();
-          while (Date.now() - waitStart < 10000) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            if (ScrapeEvent.resultCache.has(resultCacheKey)) {
-              const result = ScrapeEvent.resultCache.get(resultCacheKey);
-              if (result && result.data) {
-                console.log(`Got pending result for event ${eventId}`);
-                return result.data;
-              }
-            }
-            if (!ScrapeEvent.pendingEvents.has(eventId)) {
-              console.log(`Event ${eventId} is no longer pending`);
-              break;
-            }
-          }
-        } catch (error) {
-          console.error(`Error waiting for pending event ${eventId}:`, error.message);
-        }
-      }
-    }
-    
-    // Track this event as recently processed
-    ScrapeEvent.rateLimits.recentEvents.add(eventId);
-    // Auto-clear events after 30 seconds to allow reprocessing
-    setTimeout(() => {
-      ScrapeEvent.rateLimits.recentEvents.delete(eventId);
-    }, 30 * 1000);
-    
-    // Track as pending for deduplication
-    if (!ScrapeEvent.pendingEvents) {
-      ScrapeEvent.pendingEvents = new Set();
-    }
-    ScrapeEvent.pendingEvents.add(eventId);
-    
+
     // Use provided proxy if available, otherwise get a new one
     try {
       if (proxyAgent && proxy) {
-        console.log(`Using provided proxy ${proxy.proxy || 'unknown'} for event ${eventId}`);
+        console.log(
+          `Using provided proxy ${
+            proxy.proxy || "unknown"
+          } for event ${eventId}`
+        );
       } else {
         // If we have a ProxyManager instance, use it to get an event-specific proxy
         if (global.proxyManager) {
           const proxyData = global.proxyManager.getProxyForEvent(eventId);
           if (proxyData) {
-            const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
+            const proxyAgentData =
+              global.proxyManager.createProxyAgent(proxyData);
             proxyAgent = proxyAgentData.proxyAgent;
             proxy = proxyData;
-            console.log(`Using dedicated proxy ${proxy.proxy} for event ${eventId} from ProxyManager`);
+            console.log(
+              `Using dedicated proxy ${proxy.proxy} for event ${eventId} from ProxyManager`
+            );
           } else {
             // Fallback to random proxy selection
             const proxyData = GetProxy();
@@ -1303,39 +1337,50 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
     } catch (proxyError) {
       console.error(`Proxy error for event ${eventId}:`, proxyError.message);
       // Try again with a different proxy selection mechanism
-      console.log(`Attempting alternative proxy selection for event ${eventId}`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      console.log(
+        `Attempting alternative proxy selection for event ${eventId}`
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       const proxyData = GetProxy();
       proxyAgent = proxyData.proxyAgent;
       proxy = proxyData.proxy;
     }
-    
+
     // Log memory usage as needed
     const memUsage = process.memoryUsage();
-    if (memUsage.heapUsed > 1024 * 1024 * 1024) { // Over 1GB
-      console.warn(`High memory usage (${Math.round(memUsage.heapUsed / 1024 / 1024)}MB) during event ${eventId} processing`);
+    if (memUsage.heapUsed > 1024 * 1024 * 1024) {
+      // Over 1GB
+      console.warn(
+        `High memory usage (${Math.round(
+          memUsage.heapUsed / 1024 / 1024
+        )}MB) during event ${eventId} processing`
+      );
     }
-    
+
     // If headers are provided (for batch processing), use them directly
     let cookieString, userAgent, fingerprint;
     let useProvidedHeaders = false;
-    
+
     if (event?.headers) {
       console.log(`Processing headers for event ${eventId} (batch processing)`);
-      
+
       // Check different header formats for compatibility
-      if (typeof event.headers === 'object') {
+      if (typeof event.headers === "object") {
         // If it's a complete headers object with all required fields
         if (event.headers.headers) {
           // Extract from nested headers property if available
-          cookieString = event.headers.headers.Cookie || event.headers.headers.cookie;
-          userAgent = event.headers.headers["User-Agent"] || event.headers.headers["user-agent"];
+          cookieString =
+            event.headers.headers.Cookie || event.headers.headers.cookie;
+          userAgent =
+            event.headers.headers["User-Agent"] ||
+            event.headers.headers["user-agent"];
         } else {
           // Try direct properties
           cookieString = event.headers.Cookie || event.headers.cookie;
-          userAgent = event.headers["User-Agent"] || event.headers["user-agent"];
+          userAgent =
+            event.headers["User-Agent"] || event.headers["user-agent"];
         }
-        
+
         // For backwards compatibility, check if headers contains capturedState format
         if (event.headers.cookies && Array.isArray(event.headers.cookies)) {
           cookieString = event.headers.cookies
@@ -1343,90 +1388,93 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
             .join("; ");
         }
       }
-      
+
       // Check if we have valid headers to use
       if (cookieString && userAgent) {
-        console.log(`Reusing existing headers for batch processing of event ${eventId}`);
+        console.log(
+          `Reusing existing headers for batch processing of event ${eventId}`
+        );
         useProvidedHeaders = true;
         // Initialize fingerprint with at least basic properties
-        fingerprint = event.headers.fingerprint || generateEnhancedFingerprint();
+        fingerprint =
+          event.headers.fingerprint || generateEnhancedFingerprint();
       } else {
-        console.log(`Incomplete headers for event ${eventId}, falling back to standard flow`);
+        console.log(
+          `Incomplete headers for event ${eventId}, falling back to standard flow`
+        );
       }
     }
-    
+
     if (!useProvidedHeaders) {
       // Standard flow - get cookies and headers
-      // Use memory cache for frequently used events to optimize performance
-      const cacheKey = `header_${eventId}_${proxy?.proxy || 'default'}`;
-      if (ScrapeEvent.headerCache.has(cacheKey)) {
-        const cachedHeaders = ScrapeEvent.headerCache.get(cacheKey);
-        if (cachedHeaders && Date.now() - cachedHeaders.timestamp < 60 * 60 * 1000) { // 1 hour cache
-          console.log(`Using cached headers for event ${eventId}`);
-          cookieString = cachedHeaders.cookieString;
-          userAgent = cachedHeaders.userAgent;
-          fingerprint = cachedHeaders.fingerprint;
-        } else {
-          ScrapeEvent.headerCache.delete(cacheKey); // Remove expired cache entry
+      try {
+        const capturedData = await getCapturedData(eventId, proxy);
+
+        if (!capturedData) {
+          throw new Error("Failed to get captured data");
         }
-      }
-      
-      if (!cookieString) {
-        try {
-          const capturedData = await getCapturedData(eventId, proxy);
 
-          if (!capturedData) {
-            throw new Error("Failed to get captured data");
-          }
-          
-          // Use headers from capturedData if available (fallback mechanism)
-          if (capturedData.headers && !capturedData.cookies) {
-            console.log(`Using fallback headers for event ${eventId}`);
-            return callTicketmasterAPI(capturedData.headers, proxyAgent, eventId, event, 0, startTime);
-          }
-
-          if (!capturedData?.cookies?.length) {
-            throw new Error("Failed to capture cookies");
-          }
-
-          cookieString = capturedData.cookies
-            .map((cookie) => `${cookie.name}=${cookie.value}`)
-            .join("; ");
-
-          // Generate enhanced fingerprint instead of the basic one
-          fingerprint = generateEnhancedFingerprint();
-          userAgent = fingerprint.browser?.userAgent || 
-                      randomUseragent.getRandom(ua => ua.browserName === fingerprint.browser?.name) ||
-                      BrowserFingerprint.generateUserAgent(fingerprint);
-          
-          // Store in memory cache
-          ScrapeEvent.headerCache.set(cacheKey, {
-            cookieString,
-            userAgent,
-            fingerprint,
-            timestamp: Date.now()
-          });
-        } catch (error) {
-          console.error(`Error getting cookies for event ${eventId}:`, error.message);
-          // Use fallback headers if available
-          const fallbackHeaders = generateFallbackHeaders();
-          if (fallbackHeaders) {
-            console.log(`Using fallback headers for event ${eventId} after error`);
-            return callTicketmasterAPI(fallbackHeaders, proxyAgent, eventId, event, 0, startTime);
-          }
-          throw error;
+        // Use headers from capturedData if available (fallback mechanism)
+        if (capturedData.headers && !capturedData.cookies) {
+          console.log(`Using fallback headers for event ${eventId}`);
+          return callTicketmasterAPI(
+            capturedData.headers,
+            proxyAgent,
+            eventId,
+            event,
+            0,
+            startTime
+          );
         }
+
+        if (!capturedData?.cookies?.length) {
+          throw new Error("Failed to capture cookies");
+        }
+
+        cookieString = capturedData.cookies
+          .map((cookie) => `${cookie.name}=${cookie.value}`)
+          .join("; ");
+
+        // Generate enhanced fingerprint instead of the basic one
+        fingerprint = generateEnhancedFingerprint();
+        userAgent =
+          fingerprint.browser?.userAgent ||
+          randomUseragent.getRandom(
+            (ua) => ua.browserName === fingerprint.browser?.name
+          ) ||
+          BrowserFingerprint.generateUserAgent(fingerprint);
+      } catch (error) {
+        console.error(
+          `Error getting cookies for event ${eventId}:`,
+          error.message
+        );
+        // Use fallback headers if available
+        const fallbackHeaders = generateFallbackHeaders();
+        if (fallbackHeaders) {
+          console.log(
+            `Using fallback headers for event ${eventId} after error`
+          );
+          return callTicketmasterAPI(
+            fallbackHeaders,
+            proxyAgent,
+            eventId,
+            event,
+            0,
+            startTime
+          );
+        }
+        throw error;
       }
     }
 
     // Generate enhanced headers using our improved function
     const enhancedHeaders = generateEnhancedHeaders(fingerprint, cookieString);
-    
+
     // Create safe header objects that match the expected format
     const MapHeader = {
       ...enhancedHeaders,
       "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
-      "X-Correlation-ID": correlationId
+      "X-Correlation-ID": correlationId,
     };
 
     const FacetHeader = {
@@ -1434,85 +1482,96 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
       "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
       "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
-      "X-Correlation-ID": correlationId
+      "X-Correlation-ID": correlationId,
     };
 
-    console.log(`Starting event scraping for ${eventId} with${event?.headers ? " shared" : ""} cookies and enhanced headers...`);
+    console.log(
+      `Starting event scraping for ${eventId} with${
+        event?.headers ? " shared" : ""
+      } cookies and enhanced headers...`
+    );
 
     // Measure API call time for performance monitoring
     const apiStartTime = Date.now();
-    const result = await callTicketmasterAPI(FacetHeader, proxyAgent, eventId, event, MapHeader, 0, startTime);
+    const result = await callTicketmasterAPI(
+      FacetHeader,
+      proxyAgent,
+      eventId,
+      event,
+      MapHeader,
+      0,
+      startTime
+    );
     const apiDuration = Date.now() - apiStartTime;
-    
-    console.log(`Event ${eventId} processing completed in ${Date.now() - startTime}ms (API: ${apiDuration}ms)`);
-    
-    // Store successful result in cache
-    if (result) {
-      ScrapeEvent.resultCache.set(resultCacheKey, {
-        data: result,
-        timestamp: Date.now()
-      });
-    }
-    
+
+    console.log(
+      `Event ${eventId} processing completed in ${
+        Date.now() - startTime
+      }ms (API: ${apiDuration}ms)`
+    );
+
     // If API call was too fast, it might be suspicious (rate limited or blocked)
     if (apiDuration < 100 && !result) {
-      console.warn(`Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting detected.`);
+      console.warn(
+        `Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting detected.`
+      );
       // Implement a temporary rate limiting backoff (1 minute)
       ScrapeEvent.rateLimits.blockedUntil = Date.now() + 60 * 1000;
     }
-    
+
     return result;
   } catch (error) {
-    console.error(`Scraping error for event ${event?.eventId || event}:`, error.message);
-    
-    // Clear pending status
-    const eventId = event?.eventId || event;
-    if (ScrapeEvent.pendingEvents) {
-      ScrapeEvent.pendingEvents.delete(eventId);
-    }
-    
-    // Implement automatic retry mechanism for recoverable errors
-    const recoverable = error.message && (
-      error.message.includes("proxy") || 
-      error.message.includes("timeout") || 
-      error.message.includes("network") ||
-      error.message.includes("ECONNRESET") ||
-      error.message.includes("ETIMEDOUT") ||
-      error.message.includes("circular") ||
-      error.message.includes("JSON") ||
-      error.message.includes("403") // Also retry 403 errors with a new proxy
+    console.error(
+      `Scraping error for event ${event?.eventId || event}:`,
+      error.message
     );
-    
+
+    // Implement automatic retry mechanism for recoverable errors
+    const recoverable =
+      error.message &&
+      (error.message.includes("proxy") ||
+        error.message.includes("timeout") ||
+        error.message.includes("network") ||
+        error.message.includes("ECONNRESET") ||
+        error.message.includes("ETIMEDOUT") ||
+        error.message.includes("circular") ||
+        error.message.includes("JSON") ||
+        error.message.includes("403")); // Also retry 403 errors with a new proxy
+
     if (recoverable) {
       // Track failed attempts to prevent infinite retries
       if (!ScrapeEvent.failedAttempts) {
         ScrapeEvent.failedAttempts = new Map();
       }
-      
+
       const eventId = event?.eventId || event;
       const attempts = (ScrapeEvent.failedAttempts.get(eventId) || 0) + 1;
       ScrapeEvent.failedAttempts.set(eventId, attempts);
-      
+
       // Only retry if we haven't exceeded max attempts
-      if (attempts <= 3) { // Max 4 total attempts (1 original + 3 retries)
-        console.log(`Retrying event ${eventId} after recoverable error (attempt ${attempts})`);
+      if (attempts <= 3) {
+        // Max 4 total attempts (1 original + 3 retries)
+        console.log(
+          `Retrying event ${eventId} after recoverable error (attempt ${attempts})`
+        );
         // Add exponential backoff
         const backoff = Math.pow(2, attempts) * 2000 + Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, backoff));
-        
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+
         // Try with a fresh proxy - ensure we get a different one than before
         let newProxy, newProxyAgent;
-        
+
         if (global.proxyManager) {
           // Release the old proxy with error
           if (externalProxy && externalProxy.proxy) {
             global.proxyManager.releaseProxy(eventId, false, error);
           }
-          
+
           // Get a fresh proxy from ProxyManager
           const proxyData = global.proxyManager.getProxyForEvent(eventId);
           if (proxyData) {
-            const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
+            const proxyAgentData =
+              global.proxyManager.createProxyAgent(proxyData);
             newProxyAgent = proxyAgentData.proxyAgent;
             newProxy = proxyData;
           } else {
@@ -1527,33 +1586,24 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
           newProxyAgent = proxyData.proxyAgent;
           newProxy = proxyData.proxy;
         }
-        
-        // Force cookie refresh on second retry
-        if (attempts >= 2) {
-          // Force refresh by clearing header cache
-          const cacheKey = `header_${eventId}_${newProxy?.proxy || 'default'}`;
-          if (ScrapeEvent.headerCache) {
-            ScrapeEvent.headerCache.delete(cacheKey);
-          }
-        }
-        
+
         return ScrapeEvent(event, newProxyAgent, newProxy);
       } else {
         // Clean up failed attempts tracking after some time
         setTimeout(() => {
           ScrapeEvent.failedAttempts.delete(eventId);
         }, 10 * 60 * 1000); // 10 minutes
-        
+
         // Log final failure
         console.error(`Exhausted all retry attempts for event ${eventId}`);
       }
     }
-    
+
     // Release proxy with error if we have a proxy manager
     if (global.proxyManager && externalProxy && externalProxy.proxy) {
       global.proxyManager.releaseProxy(event?.eventId || event, false, error);
     }
-    
+
     return false;
   }
 };
@@ -2237,56 +2287,100 @@ export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders };
 
 // Function to periodically refresh cookies
 async function startPeriodicCookieRefresh() {
+  // Prevent multiple starts
+  if (isPeriodicRefreshStarted) {
+    console.log('Periodic cookie refresh already started, skipping...');
+    return;
+  }
+  
+  isPeriodicRefreshStarted = true;
   console.log('Starting periodic cookie refresh service...');
   
   // Initial refresh
   await refreshCookiesPeriodically();
   
-  // Set up interval for periodic refresh
-  setInterval(async () => {
-    await refreshCookiesPeriodically();
-  }, COOKIE_MANAGEMENT.PERIODIC_REFRESH_INTERVAL);
+  // Set up interval for periodic refresh with proper error handling
+  const refreshInterval = setInterval(async () => {
+    try {
+      await refreshCookiesPeriodically();
+    } catch (error) {
+      console.error('Error in periodic cookie refresh:', error);
+      // Don't retry immediately on error, let the interval handle the next attempt
+    }
+  }, COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL);
+  
+  // Store the interval ID so we can clear it if needed
+  return refreshInterval;
 }
 
 async function refreshCookiesPeriodically() {
-  try {
-    console.log('Starting periodic cookie refresh...');
-    
-    // Get a random active event ID
-    const activeEvents = await ScraperManager.getEventsToProcess();
-    if (!activeEvents || activeEvents.length === 0) {
-      console.warn('No active events found for cookie refresh');
-      return;
-    }
-    
-    const eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
-    
-    // Get a fresh proxy
-    const { proxy } = GetProxy();
-    
-    // Force refresh cookies
-    const newState = await refreshHeaders(eventId, proxy, null);
-    
-    if (newState?.cookies?.length) {
-      console.log('Successfully refreshed cookies in periodic refresh');
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY = 5000; // 5 seconds between retries
+  let retryCount = 0;
+  let lastError = null;
+
+  while (retryCount < MAX_RETRIES) {
+    try {
+      console.log(`Starting periodic cookie refresh (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
       
-      // Update the captured state
-      cookieManager.capturedState = {
-        ...newState,
-        lastRefresh: Date.now()
-      };
+      // Get a random active event ID
+      const activeEvents = await scraperManager.getEventsToProcess();
+      if (!activeEvents || activeEvents.length === 0) {
+        console.warn('No active events found for cookie refresh');
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+        retryCount++;
+        continue;
+      }
       
-      // Save to file
-      await cookieManager.saveCookiesToFile(newState.cookies);
-    } else {
-      console.warn('Failed to refresh cookies in periodic refresh');
+      const eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
+      
+      // Get a fresh proxy
+      const { proxy } = GetProxy();
+      
+      // Force refresh cookies with timeout
+      const newState = await Promise.race([
+        refreshHeaders(eventId, proxy, null),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Cookie refresh timeout')), 60000)
+        )
+      ]);
+      
+      if (newState?.cookies?.length) {
+        console.log('Successfully refreshed cookies in periodic refresh');
+        
+        // Update the captured state
+        cookieManager.capturedState = {
+          ...newState,
+          lastRefresh: Date.now()
+        };
+        
+        // Save to file
+        await cookieManager.saveCookiesToFile(newState.cookies);
+        return; // Success, exit the retry loop
+      } else {
+        console.warn('Failed to refresh cookies in periodic refresh - no cookies returned');
+        lastError = new Error('No cookies returned from refresh');
+      }
+    } catch (error) {
+      console.error(`Error in periodic cookie refresh (attempt ${retryCount + 1}):`, error.message);
+      lastError = error;
     }
-  } catch (error) {
-    console.error('Error in periodic cookie refresh:', error);
+
+    // If we get here, we need to retry
+    retryCount++;
+    if (retryCount < MAX_RETRIES) {
+      console.log(`Waiting ${RETRY_DELAY/1000} seconds before retry...`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+    }
   }
+
+  // If we've exhausted all retries, log the final error
+  console.error('Failed to refresh cookies after all retries:', lastError?.message);
+  throw lastError; // Re-throw to be handled by the interval
 }
 
 // Start the periodic refresh when the module is loaded
 startPeriodicCookieRefresh().catch(error => {
   console.error('Failed to start periodic cookie refresh:', error);
+  isPeriodicRefreshStarted = false; // Reset the flag on startup failure
 });

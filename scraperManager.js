@@ -105,6 +105,34 @@ export class ScraperManager {
     this.lastFailedBatchProcess = null; // Last time we processed a batch of failed events
     this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
+    
+    // Add cache configuration
+    this.cacheConfig = {
+      responseCacheDuration: 5 * 60 * 1000, // 5 minutes default cache duration
+      maxCacheSize: 1000, // Maximum number of cached responses
+      cacheCleanupInterval: 60 * 1000, // Cleanup cache every minute
+    };
+    
+    // Start cache cleanup interval
+    setInterval(() => this.cleanupCache(), this.cacheConfig.cacheCleanupInterval);
+  }
+
+  // Add cache cleanup method
+  cleanupCache() {
+    const now = Date.now();
+    for (const [eventId, { timestamp, data }] of this.responseCache.entries()) {
+      if (now - timestamp > this.cacheConfig.responseCacheDuration) {
+        this.responseCache.delete(eventId);
+      }
+    }
+    
+    // Limit cache size
+    if (this.responseCache.size > this.cacheConfig.maxCacheSize) {
+      const entries = Array.from(this.responseCache.entries());
+      entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+      const toRemove = entries.slice(0, entries.length - this.cacheConfig.maxCacheSize);
+      toRemove.forEach(([eventId]) => this.responseCache.delete(eventId));
+    }
   }
 
   logWithTime(message, type = "info") {
@@ -775,28 +803,14 @@ export class ScraperManager {
         return true;
       }
 
-      // New: Check response cache first if it's a non-critical update
+      // Check cache first
       const cachedResponse = this.responseCache.get(eventId);
-      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
-      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
-      
-      // DISABLED CACHING: Always fetch fresh data to ensure we have the latest information
-      // Previously, the code used cache for non-critical updates to reduce API load
-      // if (cachedResponse && timeSinceUpdate < MAX_UPDATE_INTERVAL - 30000) {
-      //   // Cache is recent enough for non-critical updates
-      //   await this.updateEventMetadata(eventId, cachedResponse);
-      //   
-      //   this.successCount++;
-      //   this.lastSuccessTime = moment();
-      //   this.eventUpdateTimestamps.set(eventId, moment());
-      //   this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
-      //   
-      //   // Log as cache hit
-      //   if (LOG_LEVEL >= 2) {
-      //     this.logWithTime(`Using cached data for ${eventId} (non-critical update)`, "success");
-      //   }
-      //   return true;
-      // }
+      if (cachedResponse && Date.now() - cachedResponse.timestamp < this.cacheConfig.responseCacheDuration) {
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Using cached data for ${eventId} (cache age: ${Math.round((Date.now() - cachedResponse.timestamp) / 1000)}s)`, "success");
+        }
+        return cachedResponse.data;
+      }
 
       // Refresh headers with backoff/caching strategy
       const headers = await this.refreshEventHeaders(eventId);
@@ -826,7 +840,10 @@ export class ScraperManager {
       
       // We're still storing in the cache for metrics/monitoring purposes
       // but we'll never use the cached results for returning to the client
-      this.responseCache.set(eventId, result);
+      this.responseCache.set(eventId, {
+        timestamp: Date.now(),
+        data: result
+      });
       
       // Mark this header as successful
       if (headers) {

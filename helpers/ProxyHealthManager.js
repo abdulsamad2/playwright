@@ -1,7 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
+const execAsync = promisify(exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -46,6 +49,12 @@ class ProxyHealthManager {
 
       // Number of successful secondary tests required to rehabilitate
       secondaryTestSuccessThreshold: 2,
+
+      // Ping configuration
+      pingCount: 10,                    // Number of pings to send
+      pingTimeout: 2000,                // Timeout for each ping in milliseconds
+      pingFailureThreshold: 10,         // Number of failed pings before banning
+      pingInterval: 60 * 1000,          // Interval between ping checks in milliseconds
     };
   }
   
@@ -57,6 +66,9 @@ class ProxyHealthManager {
     
     // Schedule periodic health reset
     setInterval(() => this.resetHealthMetrics(), this.config.resetInterval);
+    
+    // Start ping monitoring
+    this.startPingMonitoring();
     
     this.log(`ProxyHealthManager initialized with ${this.healthStore.unhealthyProxies.size} unhealthy proxies and ${this.healthStore.bannedProxies.size} banned proxies`);
     return this;
@@ -398,6 +410,56 @@ class ProxyHealthManager {
       })),
       bannedProxies: Array.from(this.healthStore.bannedProxies)
     };
+  }
+
+  /**
+   * Check proxy health using ping
+   * @param {string} proxyString - The proxy string to check
+   * @returns {Promise<boolean>} Whether the proxy is healthy based on ping
+   */
+  async checkProxyWithPing(proxyString) {
+    try {
+      // Extract host from proxy string (assuming format: protocol://host:port)
+      const proxyUrl = new URL(proxyString);
+      const host = proxyUrl.hostname;
+      
+      // Execute ping command
+      const { stdout, stderr } = await execAsync(
+        `ping -n ${this.config.pingCount} -w ${this.config.pingTimeout} ${host}`
+      );
+      
+      // Count successful pings
+      const successfulPings = (stdout.match(/Reply from/g) || []).length;
+      const failedPings = this.config.pingCount - successfulPings;
+      
+      this.log(`Ping results for ${proxyString}: ${successfulPings} successful, ${failedPings} failed`);
+      
+      if (failedPings >= this.config.pingFailureThreshold) {
+        this.log(`Proxy ${proxyString} failed ${failedPings} pings, marking as unhealthy`, 'warning');
+        this.recordProxyFailure(proxyString, { message: `Failed ${failedPings} pings` });
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      this.log(`Error pinging proxy ${proxyString}: ${error.message}`, 'error');
+      this.recordProxyFailure(proxyString, error);
+      return false;
+    }
+  }
+
+  /**
+   * Start periodic ping checks for all proxies
+   */
+  startPingMonitoring() {
+    setInterval(async () => {
+      const proxies = Array.from(this.healthStore.unhealthyProxies.keys());
+      for (const proxy of proxies) {
+        if (!this.healthStore.bannedProxies.has(proxy)) {
+          await this.checkProxyWithPing(proxy);
+        }
+      }
+    }, this.config.pingInterval);
   }
 }
 
