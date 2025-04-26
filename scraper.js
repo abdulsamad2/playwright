@@ -3,7 +3,7 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { firefox } from "playwright";
+import { firefox,chromium, devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
@@ -14,13 +14,15 @@ import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
+import axios from "axios";
+const iphone13 = devices["iPhone 13"];
 
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
   PAGE_TIMEOUT: 30000,
   MAX_RETRIES: 5,
-  RETRY_DELAY: 30000,
+  RETRY_DELAY: 10000,
   CHALLENGE_TIMEOUT: 10000,
 };
 
@@ -217,9 +219,32 @@ async function handleTicketmasterChallenge(page) {
     throw error;
   }
 }
+function getRandomLocation() {
+  const locations = [
+    { timezone: "America/New_York", latitude: 40.7128, longitude: -74.006 },
+    { timezone: "Europe/Rome", latitude: 41.8902, longitude: 12.4922 },
+    { timezone: "Asia/Tokyo", latitude: 35.6895, longitude: 139.6917 },
+    { timezone: "Australia/Sydney", latitude: -33.8688, longitude: 151.2093 },
+    { timezone: "Europe/London", latitude: 51.5074, longitude: -0.1278 },
+    {
+      timezone: "America/Los_Angeles",
+      latitude: 34.0522,
+      longitude: -118.2437,
+    },
+    { timezone: "Asia/Kuala_Lumpur", latitude: 3.139, longitude: 101.6869 },
+    { timezone: "Africa/Nairobi", latitude: -1.2921, longitude: 36.8219 },
+    { timezone: "Asia/Dubai", latitude: 25.2048, longitude: 55.2708 },
+    { timezone: "America/Sao_Paulo", latitude: -23.5505, longitude: -46.6333 },
+  ];
 
+  const random = Math.floor(Math.random() * locations.length);
+  return locations[random];
+}
 async function initBrowser(proxy) {
+  
   try {
+    const location = getRandomLocation();
+
     if (!proxy?.proxy) {
       const { proxy: newProxy } = GetProxy();
       proxy = newProxy;
@@ -234,22 +259,63 @@ async function initBrowser(proxy) {
 
     const proxyUrl = new URL(`http://${proxy.proxy}`);
 
-    browser = await firefox.launch({
+    // Enhanced browser launch options with longer timeouts
+    browser = await chromium.launch({
       headless: true,
       proxy: {
         server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
         username: proxy.username,
         password: proxy.password,
       },
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials',
+        '--disable-web-security',
+        '--disable-features=BlockInsecurePrivateNetworkRequests',
+        '--disable-features=SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure',
+        '--window-size=1920,1080',
+        '--start-maximized',
+      ],
+      timeout: 30000, // Increased browser launch timeout
     });
 
+    // Enhanced context options with more human-like settings
     context = await browser.newContext({
-      viewport: fingerprint.screen,
-      userAgent,
+      ...iphone13,
+      userAgent: userAgent,
       locale: fingerprint.language,
-      deviceScaleFactor: fingerprint.devicePixelRatio,
-      colorScheme: "light",
-      timezoneId: fingerprint.timezone,
+      colorScheme: "dark",
+      timezoneId: location.timezone,
+      geolocation: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+      },
+      permissions: ["geolocation"],
+      deviceScaleFactor: 1 + Math.random() * 0.5,
+      hasTouch: true,
+      isMobile: true,
+      javaScriptEnabled: true,
+      acceptDownloads: true,
+      ignoreHTTPSErrors: true,
+      bypassCSP: true,
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        DNT: "1",
+        "Upgrade-Insecure-Requests": "1",
+      },
+    });
+
+    // Enhanced stealth plugins
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
     });
 
     return { context, fingerprint };
@@ -509,64 +575,20 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       cleanupRefreshProcess(new Error("Global timeout for cookie refresh"));
     }, 60000); // 60 second timeout for the entire process
 
-    // Check if we have valid cookies in memory first
-    if (
-      capturedState.cookies?.length &&
-      capturedState.lastRefresh &&
-      Date.now() - capturedState.lastRefresh <= COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
-    ) {
-      console.log("Using existing cookies from memory");
+    // Check if we need to force refresh cookies based on time interval
+    const currentTime = Date.now();
+    const needsRefresh = !capturedState.lastRefresh || 
+                        (currentTime - capturedState.lastRefresh) > CONFIG.COOKIE_REFRESH_INTERVAL;
+
+    if (!needsRefresh && capturedState.cookies?.length) {
+      console.log("Using existing cookies as they are still fresh");
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
       return capturedState;
-    }
-
-    // If specific cookies are provided, use them
-    if (existingCookies !== null) {
-      console.log(`Using provided cookies for event ${eventId}`);
-
-      if (!capturedState.fingerprint) {
-        capturedState.fingerprint = BrowserFingerprint.generate();
-      }
-
-      capturedState = {
-        cookies: existingCookies,
-        fingerprint: capturedState.fingerprint,
-        lastRefresh: Date.now(),
-        proxy: capturedState.proxy || proxy,
-      };
-      
-      clearTimeout(globalTimeoutId);
-      cleanupRefreshProcess();
-      return capturedState;
-    }
-
-    // Try to load cookies from file with improved validation
-    try {
-      const cookiesFromFile = await loadCookiesFromFile();
-      if (cookiesFromFile && cookiesFromFile.length >= 3) { // Ensure we have enough cookies
-        console.log("Using cookies from file");
-        if (!capturedState.fingerprint) {
-          capturedState.fingerprint = BrowserFingerprint.generate();
-        }
-
-        capturedState = {
-          cookies: cookiesFromFile,
-          fingerprint: capturedState.fingerprint || BrowserFingerprint.generate(),
-          lastRefresh: Date.now(),
-          proxy: capturedState.proxy || proxy,
-        };
-        
-        clearTimeout(globalTimeoutId);
-        cleanupRefreshProcess();
-        return capturedState;
-      }
-    } catch (err) {
-      console.error("Error loading cookies from file:", err);
     }
 
     console.log(
-      `No valid cookies found, getting new cookies using event ${eventId}`
+      `Cookies need refresh (${needsRefresh ? 'interval expired' : 'no cookies'}), getting new cookies using event ${eventId}`
     );
 
     // Generate fallback headers if we can't get proper ones
@@ -625,16 +647,10 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     }
 
     const url = `https://www.ticketmaster.com/event/${eventId}`;
+    console.log(`Navigating to ${url} for event ${eventId}`);
 
     try {
-      console.log(`Navigating to ${url} for event ${eventId}`);
-
-      // Use domcontentloaded instead of networkidle for faster, more reliable loading
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000, // 30 second timeout
-      });
-
+      await navigateWithRetry(page, url);
       console.log(`Successfully loaded page for event ${eventId}`);
 
       // Check for Ticketmaster challenge (e.g., CAPTCHA)
@@ -1428,6 +1444,7 @@ const ScrapeEvent = async (event, externalProxyAgent = null, externalProxy = nul
 
 // Enhanced API call with better retry logic
 async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0) {
+  const startTime = Date.now(); // Define startTime at the beginning
   const maxRetries = 3;
   const baseDelayMs = 1000; // Increased base delay
   const maxDelayMs = 5000; // Increased max delay
@@ -1496,8 +1513,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     const delayMs = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
     
     if (attemptNum > 0) {
-      await new Promise(resolve => setTimeout(resolve, delay));
-      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delay.toFixed(0)}ms`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delayMs.toFixed(0)}ms`);
     }
     
     try {
@@ -2071,6 +2088,110 @@ function resetCapturedState() {
     lastRefresh: null,
     proxy: null,
   };
+}
+
+// Enhanced navigation with better human simulation
+async function navigateWithRetry(page, url, maxRetries = 3) {
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // Simulate human-like behavior before navigation
+      await simulateHumanBehavior(page);
+      
+      // Add random delay before navigation (longer delays)
+      await page.waitForTimeout(2000 + Math.random() * 3000);
+      
+      // Enhanced navigation options with longer timeouts
+      const response = await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000, // Increased timeout
+        referer: "https://www.ticketmaster.com/",
+      });
+
+      // Check for HTTP errors
+      if (!response.ok()) {
+        const status = response.status();
+        if (status >= 400 && status < 500) {
+          throw new Error(`HTTP ${status} error: ${response.statusText()}`);
+        }
+      }
+
+      // Check for challenge pages
+      const isChallenge = await page.evaluate(() => {
+        return document.body.textContent.includes("Your Browsing Activity Has Been Paused") ||
+               document.body.textContent.includes("Please verify you are a human");
+      });
+
+      if (isChallenge) {
+        throw new Error("Challenge page detected");
+      }
+
+      // Simulate post-navigation human behavior
+      await simulatePostNavigationBehavior(page);
+
+      return response;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Navigation attempt ${attempt} failed:`, error.message);
+      
+      if (attempt < maxRetries) {
+        // Exponential backoff with jitter (longer delays)
+        const backoff = Math.min(2000 * Math.pow(2, attempt) + Math.random() * 2000, 15000);
+        await page.waitForTimeout(backoff);
+        
+        // Try with a new proxy if available
+        if (error.message.includes("ERR_HTTP_RESPONSE_CODE_FAILURE")) {
+          const { proxy: newProxy } = GetProxy();
+          if (newProxy) {
+            await page.context().setExtraHTTPHeaders({
+              'X-Forwarded-For': newProxy.proxy.split(':')[0],
+            });
+          }
+        }
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// Post-navigation human behavior
+async function simulatePostNavigationBehavior(page) {
+  try {
+    // Random delays between actions
+    const delayOptions = [300, 400, 500, 600, 700];
+    const randomDelay = () => delayOptions[Math.floor(Math.random() * delayOptions.length)];
+    
+    // Wait for a random time after page load
+    await page.waitForTimeout(1000 + Math.random() * 2000);
+    
+    // Random scrolling after page load
+    const scrollAmount = Math.floor(Math.random() * 800) + 400;
+    const scrollSteps = 4 + Math.floor(Math.random() * 3);
+    const stepSize = scrollAmount / scrollSteps;
+    
+    for (let i = 0; i < scrollSteps; i++) {
+      await page.mouse.wheel(0, stepSize);
+      await page.waitForTimeout(randomDelay());
+    }
+    
+    // Random mouse movements after scrolling
+    const viewportSize = page.viewportSize();
+    if (viewportSize) {
+      const steps = 2 + Math.floor(Math.random() * 2);
+      for (let i = 0; i < steps; i++) {
+        await page.mouse.move(
+          Math.floor(Math.random() * viewportSize.width),
+          Math.floor(Math.random() * viewportSize.height),
+          { steps: 3 + Math.floor(Math.random() * 2) }
+        );
+        await page.waitForTimeout(randomDelay());
+      }
+    }
+  } catch (error) {
+    console.error('Error in post-navigation behavior simulation:', error);
+  }
 }
 
 export { ScrapeEvent, refreshHeaders };
