@@ -400,7 +400,7 @@ async function initBrowser(proxy) {
     if (!browser) {
       // Try to launch browser with proxy if available
       let launchOptions = {
-        headless: false,
+        headless: true,
         args: [
           '--disable-blink-features=AutomationControlled',
           '--disable-features=IsolateOrigins',
@@ -1287,36 +1287,113 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
   }
 };
 
-const GetProxy = () => {
+const GetProxy = async () => {
   try {
     // Use ProxyManager global instance if available
     if (global.proxyManager) {
-      return global.proxyManager.getProxyForEvent('random');
+      // Try multiple times to get a healthy proxy
+      let attempts = 0;
+      const maxAttempts = 3;
+      let lastError = null;
+
+      while (attempts < maxAttempts) {
+        try {
+          const proxyData = global.proxyManager.getProxyForEvent('random');
+          if (proxyData) {
+            // Test the proxy with a simple connection before returning
+            try {
+              const proxyUrl = new URL(`http://${proxyData.proxy}`);
+              const testUrl = `http://${proxyData.username}:${proxyData.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
+              const testAgent = new HttpsProxyAgent(testUrl);
+              
+              // Quick test connection with short timeout
+              await new Promise((resolve, reject) => {
+                const testReq = require('https').get({
+                  host: 'www.ticketmaster.com',
+                  port: 443,
+                  agent: testAgent,
+                  timeout: 5000 // Short 5s timeout for test
+                }, resolve);
+                testReq.on('error', reject);
+                testReq.on('timeout', () => reject(new Error('Proxy test timeout')));
+              });
+              
+              // If we get here, the proxy is responsive
+              const proxyAgent = new HttpsProxyAgent(testUrl);
+              return { proxyAgent, proxy: proxyData };
+            } catch (testError) {
+              console.warn(`Proxy test failed for ${proxyData.proxy}: ${testError.message}`);
+              global.proxyManager.recordProxyFailure(proxyData.proxy, testError);
+              attempts++;
+              lastError = testError;
+              continue;
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to get proxy (attempt ${attempts + 1}): ${error.message}`);
+          attempts++;
+          lastError = error;
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+          continue;
+        }
+      }
+
+      console.error(`Failed to get healthy proxy after ${maxAttempts} attempts:`, lastError?.message);
     }
     
-    // Fallback to old method
+    // Fallback to old method with similar health checks
     let _proxy = [...proxyArray?.proxies];
-    const randomProxy = Math.floor(Math.random() * _proxy.length);
-    _proxy = _proxy[randomProxy];
+    let attempts = 0;
+    const maxAttempts = 3;
 
-    if (!_proxy?.proxy || !_proxy?.username || !_proxy?.password) {
-      throw new Error("Invalid proxy configuration");
+    while (attempts < maxAttempts) {
+      try {
+        const randomProxy = Math.floor(Math.random() * _proxy.length);
+        const selectedProxy = _proxy[randomProxy];
+
+        if (!selectedProxy?.proxy || !selectedProxy?.username || !selectedProxy?.password) {
+          throw new Error("Invalid proxy configuration");
+        }
+
+        const proxyUrl = new URL(`http://${selectedProxy.proxy}`);
+        const proxyURl = `http://${selectedProxy.username}:${selectedProxy.password}@${
+          proxyUrl.hostname
+        }:${proxyUrl.port || 80}`;
+        
+        // Test the proxy before returning
+        try {
+          const testAgent = new HttpsProxyAgent(proxyURl);
+          await new Promise((resolve, reject) => {
+            const testReq = require('https').get({
+              host: 'www.ticketmaster.com',
+              port: 443,
+              agent: testAgent,
+              timeout: 5000
+            }, resolve);
+            testReq.on('error', reject);
+            testReq.on('timeout', () => reject(new Error('Proxy test timeout')));
+          });
+          
+          // If we get here, proxy is good
+          const proxyAgent = new HttpsProxyAgent(proxyURl);
+          return { proxyAgent, proxy: selectedProxy };
+        } catch (testError) {
+          console.warn(`Proxy test failed for ${selectedProxy.proxy}: ${testError.message}`);
+          // Remove failed proxy from the list for this session
+          _proxy = _proxy.filter(p => p.proxy !== selectedProxy.proxy);
+          attempts++;
+          continue;
+        }
+      } catch (error) {
+        console.warn(`Failed to get proxy (attempt ${attempts + 1}): ${error.message}`);
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+        continue;
+      }
     }
 
-    try {
-      const proxyUrl = new URL(`http://${_proxy.proxy}`);
-      const proxyURl = `http://${_proxy.username}:${_proxy.password}@${
-        proxyUrl.hostname
-      }:${proxyUrl.port || 80}`;
-      const proxyAgent = new HttpsProxyAgent(proxyURl);
-      return { proxyAgent, proxy: _proxy };
-    } catch (error) {
-      console.error("Invalid proxy URL format:", error);
-      throw new Error("Invalid proxy URL format");
-    }
-  } catch (error) {
-    console.error("Error getting proxy:", error);
-    // Last resort fallback if everything fails
+    // Last resort fallback
+    console.warn("Using fallback proxy after all attempts failed");
     const fallbackProxy = proxyArray.proxies[0];
     const proxyUrl = new URL(`http://${fallbackProxy.proxy}`);
     const proxyURl = `http://${fallbackProxy.username}:${fallbackProxy.password}@${
@@ -1324,6 +1401,9 @@ const GetProxy = () => {
     }:${proxyUrl.port || 80}`;
     const proxyAgent = new HttpsProxyAgent(proxyURl);
     return { proxyAgent, proxy: fallbackProxy };
+  } catch (error) {
+    console.error("Critical error in GetProxy:", error);
+    throw new Error(`Failed to get any working proxy: ${error.message}`);
   }
 };
 
@@ -1409,13 +1489,13 @@ const ScrapeEvent = async (
             );
           } else {
             // Fallback to random proxy selection
-            const proxyData = GetProxy();
+            const proxyData = await GetProxy();
             proxyAgent = proxyData.proxyAgent;
             proxy = proxyData.proxy;
           }
         } else {
           // Fallback to old method if no proxy manager is available
-          const proxyData = GetProxy();
+          const proxyData = await GetProxy();
           proxyAgent = proxyData.proxyAgent;
           proxy = proxyData.proxy;
         }
@@ -1427,7 +1507,7 @@ const ScrapeEvent = async (
         `Attempting alternative proxy selection for event ${eventId}`
       );
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      const proxyData = GetProxy();
+      const proxyData = await GetProxy();
       proxyAgent = proxyData.proxyAgent;
       proxy = proxyData.proxy;
     }
@@ -1662,13 +1742,13 @@ const ScrapeEvent = async (
             newProxy = proxyData;
           } else {
             // Fallback
-            const proxyData = GetProxy();
+            const proxyData = await GetProxy();
             newProxyAgent = proxyData.proxyAgent;
             newProxy = proxyData.proxy;
           }
         } else {
           // Fallback to old method
-          const proxyData = GetProxy();
+          const proxyData = await GetProxy();
           newProxyAgent = proxyData.proxyAgent;
           newProxy = proxyData.proxy;
         }
@@ -1715,7 +1795,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   try {
     for (let i = 0; i < 3; i++) { // Increased alternative proxies
       try {
-        const { proxyAgent: altAgent, proxy: altProxy } = GetProxy();
+        const { proxyAgent: altAgent, proxy: altProxy } = await GetProxy();
         if (altAgent && altProxy) {
           alternativeProxies.push({ proxyAgent: altAgent, proxy: altProxy });
         }
@@ -1883,11 +1963,11 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
               const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
               newAgent = proxyAgentData.proxyAgent;
             } else {
-              const proxyData = GetProxy();
+              const proxyData = await GetProxy();
               newAgent = proxyData.proxyAgent;
             }
           } else {
-            const proxyData = GetProxy();
+            const proxyData = await GetProxy();
             newAgent = proxyData.proxyAgent;
           }
           
@@ -2457,7 +2537,7 @@ async function refreshCookiesPeriodically() {
       const eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
       
       // Get a fresh proxy
-      const { proxy } = GetProxy();
+      const { proxy } = await GetProxy();
       
       // Force refresh cookies with timeout
       const newState = await Promise.race([
