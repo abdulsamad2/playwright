@@ -186,42 +186,53 @@ async function handleTicketmasterChallenge(page) {
       return document.body.textContent.includes(
         "Your Browsing Activity Has Been Paused"
       );
-    });
+    }).catch(() => false); // Catch any navigation errors
 
     if (challengePresent) {
       console.log("Detected Ticketmaster challenge, attempting resolution...");
       await page.waitForTimeout(1000 + Math.random() * 1000);
 
-      const viewportSize = page.viewportSize();
-      if (viewportSize) {
-        await page.mouse.move(
-          Math.floor(Math.random() * viewportSize.width),
-          Math.floor(Math.random() * viewportSize.height),
-          { steps: 5 }
-        );
+      try {
+        const viewportSize = page.viewportSize();
+        if (viewportSize) {
+          await page.mouse.move(
+            Math.floor(Math.random() * viewportSize.width),
+            Math.floor(Math.random() * viewportSize.height),
+            { steps: 5 }
+          );
+        }
+      } catch (moveError) {
+        console.warn("Mouse movement error in challenge, continuing:", moveError.message);
       }
 
-      const buttons = await page.$$("button");
+      const buttons = await page.$$("button").catch(() => []);
       let buttonClicked = false;
 
       for (const button of buttons) {
         if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
-          throw new Error("Challenge timeout");
+          console.warn("Challenge timeout, continuing without resolution");
+          return false;
         }
 
-        const text = await button.textContent();
-        if (
-          text?.toLowerCase().includes("continue") ||
-          text?.toLowerCase().includes("verify")
-        ) {
-          await button.click();
-          buttonClicked = true;
-          break;
+        try {
+          const text = await button.textContent();
+          if (
+            text?.toLowerCase().includes("continue") ||
+            text?.toLowerCase().includes("verify")
+          ) {
+            await button.click();
+            buttonClicked = true;
+            break;
+          }
+        } catch (buttonError) {
+          console.warn("Button click error, continuing:", buttonError.message);
+          continue;
         }
       }
 
       if (!buttonClicked) {
-        throw new Error("Could not find challenge button");
+        console.warn("Could not find challenge button, continuing without resolution");
+        return false;
       }
 
       await page.waitForTimeout(2000);
@@ -229,17 +240,17 @@ async function handleTicketmasterChallenge(page) {
         return document.body.textContent.includes(
           "Your Browsing Activity Has Been Paused"
         );
-      });
+      }).catch(() => false);
 
       if (stillChallenged) {
-        throw new Error("Challenge not resolved");
+        console.warn("Challenge not resolved, continuing without resolution");
+        return false;
       }
     }
     return true;
   } catch (error) {
-    console.error("Challenge handling failed:", error.message);
-    resetCapturedState();
-    throw error;
+    console.warn("Challenge handling failed, continuing:", error.message);
+    return false;
   }
 }
 
@@ -332,51 +343,106 @@ async function initBrowser(proxy) {
   try {
     const location = getRandomLocation();
     
-    if (!proxy?.proxy) {
-      const { proxy: newProxy } = GetProxy();
-      proxy = newProxy;
-    }
-    
-    const fingerprint = enhancedFingerprint();
-    const userAgent = getRealisticIphoneUserAgent();
-    
+    // If browser is already open, just create a new context
     if (browser) {
-      await cleanup(browser, context);
+      console.log('Reusing existing browser instance');
+      try {
+        context = await browser.newContext({
+          ...iphone13,
+          userAgent: getRealisticIphoneUserAgent(),
+          locale: location.locale,
+          colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
+          timezoneId: location.timezone,
+          geolocation: {
+            latitude: location.latitude,
+            longitude: location.longitude,
+            accuracy: 100 * Math.random() + 50,
+          },
+          permissions: [
+            "geolocation",
+            "notifications",
+            "microphone",
+            "camera",
+          ],
+          deviceScaleFactor: 2 + Math.random() * 0.5,
+          hasTouch: true,
+          isMobile: true,
+          javaScriptEnabled: true,
+          acceptDownloads: true,
+          ignoreHTTPSErrors: true,
+          bypassCSP: true,
+          extraHTTPHeaders: {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+            "Accept-Language": `${location.locale},en;q=0.9`,
+            "Accept-Encoding": "gzip, deflate, br",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "DNT": Math.random() > 0.5 ? "1" : "0",
+            "Upgrade-Insecure-Requests": "1",
+            "Pragma": "no-cache"
+          },
+          viewport: {
+            width: [375, 390, 414][Math.floor(Math.random() * 3)],
+            height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
+          }
+        });
+        return { context, fingerprint: enhancedFingerprint(), page: await context.newPage() };
+      } catch (error) {
+        console.error('Error creating new context:', error);
+        // If context creation fails, try to create a new context but don't close browser
+        context = null;
+      }
     }
     
-    const proxyUrl = new URL(`http://${proxy.proxy}`);
+    // If no browser exists, launch a new one
+    if (!browser) {
+      // Try to launch browser with proxy if available
+      let launchOptions = {
+        headless: false,
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--disable-features=IsolateOrigins',
+          '--disable-site-isolation-trials',
+          '--disable-web-security',
+          '--disable-features=BlockInsecurePrivateNetworkRequests',
+          '--disable-features=SameSiteByDefaultCookies',
+          `--user-agent=${getRealisticIphoneUserAgent()}`,
+          '--disable-dev-shm-usage',
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--ignore-certificate-errors',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-infobars',
+          '--disable-notifications'
+        ],
+        timeout: 60000,
+      };
+
+      if (proxy?.proxy) {
+        try {
+          const proxyUrl = new URL(`http://${proxy.proxy}`);
+          launchOptions.proxy = {
+            server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
+            username: proxy.username,
+            password: proxy.password,
+          };
+        } catch (error) {
+          console.warn('Invalid proxy configuration, launching without proxy:', error);
+        }
+      }
+
+      // Launch browser
+      browser = await chromium.launch(launchOptions);
+    }
     
-    browser = await chromium.launch({
-      headless: false,
-      proxy: {
-        server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
-        username: proxy.username,
-        password: proxy.password,
-      },
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins',
-        '--disable-site-isolation-trials',
-        '--disable-web-security',
-        '--disable-features=BlockInsecurePrivateNetworkRequests',
-        '--disable-features=SameSiteByDefaultCookies',
-        `--user-agent=${userAgent}`,
-        '--disable-dev-shm-usage',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--ignore-certificate-errors',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-infobars',
-        '--disable-notifications'
-      ],
-      timeout: 60000,
-    });
-    
+    // Create new context with same options as above
     context = await browser.newContext({
       ...iphone13,
-      userAgent: userAgent,
+      userAgent: getRealisticIphoneUserAgent(),
       locale: location.locale,
       colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
       timezoneId: location.timezone,
@@ -406,7 +472,7 @@ async function initBrowser(proxy) {
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
-        "DNT": Math.random() > 0.5 ? "1" : "0", // Ensure DNT is always a string
+        "DNT": Math.random() > 0.5 ? "1" : "0",
         "Upgrade-Insecure-Requests": "1",
         "Pragma": "no-cache"
       },
@@ -421,10 +487,13 @@ async function initBrowser(proxy) {
     await page.waitForTimeout(1000 + Math.random() * 2000);
     await simulateMobileInteractions(page);
     
-    return { context, fingerprint, page };
+    return { context, fingerprint: enhancedFingerprint(), page };
   } catch (error) {
     console.error("Error initializing browser:", error.message);
-    await cleanup(browser, context);
+    // Only close context on error, not browser
+    if (context) {
+      await context.close().catch(e => console.error("Error closing context:", e));
+    }
     throw error;
   }
 }
@@ -439,7 +508,7 @@ async function captureCookies(page, fingerprint) {
         return document.body.textContent.includes(
           "Your Browsing Activity Has Been Paused"
         );
-      });
+      }).catch(() => false);
 
       if (challengePresent) {
         console.log(
@@ -458,7 +527,7 @@ async function captureCookies(page, fingerprint) {
         }
       }
 
-      let cookies = await context.cookies();
+      let cookies = await context.cookies().catch(() => []);
 
       if (!cookies?.length) {
         console.log(`Attempt ${retryCount + 1}: No cookies captured`);
@@ -511,17 +580,14 @@ async function captureCookies(page, fingerprint) {
         expiry: oneHourFromNow / 1000,
       }));
 
-      await Promise.all(
-        cookies.map((cookie) =>
-          context.addCookies([
-            {
-              ...cookie,
-              expires: oneHourFromNow / 1000,
-              expiry: oneHourFromNow / 1000,
-            },
-          ])
-        )
-      );
+      // Add cookies one at a time with error handling
+      for (const cookie of cookies) {
+        try {
+          await context.addCookies([cookie]);
+        } catch (error) {
+          console.warn(`Error adding cookie ${cookie.name}:`, error.message);
+        }
+      }
 
       fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
       console.log(`Successfully captured cookies on attempt ${retryCount + 1}`);
@@ -672,13 +738,13 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
   }
 
   let localContext = null;
-  let localBrowser = null;
+  let page = null;
 
   try {
     cookieManager.isRefreshingCookies = true;
     
     // Set up a cleanup function to ensure we always reset the flag and process the queue
-    const cleanupRefreshProcess = (error = null) => {
+    const cleanupRefreshProcess = async (error = null) => {
       cookieManager.isRefreshingCookies = false;
       
       // Process any queued refresh requests
@@ -703,6 +769,15 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           resolve(fallbackState);
         }
       }
+      
+      // Only close the context if it exists, never close the browser
+      if (localContext) {
+        try {
+          // await localContext.close();
+        } catch (e) {
+          console.error("Error closing context:", e);
+        }
+      }
     };
     
     // Add a global timeout for the entire refresh process
@@ -719,7 +794,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     ) {
       console.log("Using existing cookies from memory");
       clearTimeout(globalTimeoutId);
-      cleanupRefreshProcess();
+      await cleanupRefreshProcess();
       return cookieManager.capturedState;
     }
 
@@ -739,7 +814,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       };
       
       clearTimeout(globalTimeoutId);
-      cleanupRefreshProcess();
+      await cleanupRefreshProcess();
       return cookieManager.capturedState;
     }
 
@@ -760,7 +835,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         };
         
         clearTimeout(globalTimeoutId);
-        cleanupRefreshProcess();
+        await cleanupRefreshProcess();
         return cookieManager.capturedState;
       }
     } catch (err) {
@@ -814,7 +889,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     }
 
     // Create page in try-catch block
-    let page;
     try {
       page = await localContext.newPage();
     } catch (pageError) {
@@ -941,22 +1015,34 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     } finally {
       if (page) {
         try {
-          await page.close();
+          // await page.close();
         } catch (e) {
           console.error("Error closing page:", e);
         }
       }
       
-      await cleanup(localBrowser, localContext);
+      // Only close the context, never close the browser
+      if (localContext) {
+        try {
+          await localContext.close();
+        } catch (e) {
+          console.error("Error closing context:", e);
+        }
+      }
+      
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
     
-    // Make sure we clean up on error
-    if (localBrowser) {
-      await cleanup(localBrowser, localContext);
+    // Make sure we clean up on error - only close context, not browser
+    if (localContext) {
+      try {
+        await localContext.close();
+      } catch (e) {
+        console.error("Error closing context:", e);
+      }
     }
     
     // Reset the flag to allow new requests
@@ -2110,47 +2196,76 @@ const simulateEnhancedHumanBehavior = async (page) => {
     const delayOptions = [100, 200, 300, 400, 500];
     const randomDelay = () => delayOptions[Math.floor(Math.random() * delayOptions.length)];
     
-    // Random mouse movements
-    const viewportSize = page.viewportSize();
-    if (viewportSize) {
-      const steps = 3 + Math.floor(Math.random() * 3);
-      for (let i = 0; i < steps; i++) {
-        await page.mouse.move(
-          Math.floor(Math.random() * viewportSize.width),
-          Math.floor(Math.random() * viewportSize.height),
-          { steps: 4 + Math.floor(Math.random() * 3) }
-        );
+    // Random mouse movements with error handling
+    try {
+      const viewportSize = page.viewportSize();
+      if (viewportSize) {
+        const steps = 3 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < steps; i++) {
+          try {
+            await page.mouse.move(
+              Math.floor(Math.random() * viewportSize.width),
+              Math.floor(Math.random() * viewportSize.height),
+              { steps: 4 + Math.floor(Math.random() * 3) }
+            );
+            await page.waitForTimeout(randomDelay());
+          } catch (moveError) {
+            console.warn("Mouse movement error, continuing:", moveError.message);
+            continue;
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("Viewport error in human behavior, continuing:", error.message);
+    }
+    
+    // Random scrolling with error handling
+    try {
+      const scrollAmount = Math.floor(Math.random() * 500) + 200;
+      const scrollSteps = 3 + Math.floor(Math.random() * 2);
+      const stepSize = scrollAmount / scrollSteps;
+      
+      for (let i = 0; i < scrollSteps; i++) {
+        try {
+          await page.mouse.wheel(0, stepSize);
+          await page.waitForTimeout(randomDelay());
+        } catch (scrollError) {
+          console.warn("Scroll error, continuing:", scrollError.message);
+          continue;
+        }
+      }
+    } catch (error) {
+      console.warn("Scrolling error in human behavior, continuing:", error.message);
+    }
+    
+    // Random keyboard activity with error handling
+    if (Math.random() > 0.6) {
+      try {
+        await page.keyboard.press('Tab');
         await page.waitForTimeout(randomDelay());
+      } catch (keyboardError) {
+        console.warn("Keyboard error, continuing:", keyboardError.message);
       }
     }
     
-    // Random scrolling
-    const scrollAmount = Math.floor(Math.random() * 500) + 200;
-    const scrollSteps = 3 + Math.floor(Math.random() * 2);
-    const stepSize = scrollAmount / scrollSteps;
-    
-    for (let i = 0; i < scrollSteps; i++) {
-      await page.mouse.wheel(0, stepSize);
-      await page.waitForTimeout(randomDelay());
-    }
-    
-    // Random keyboard activity
-    if (Math.random() > 0.6) {
-      await page.keyboard.press('Tab');
-      await page.waitForTimeout(randomDelay());
-    }
-    
-    // Random viewport resizing
-    if (Math.random() > 0.7 && viewportSize) {
-      const newWidth = Math.max(800, viewportSize.width + Math.floor(Math.random() * 100) - 50);
-      const newHeight = Math.max(600, viewportSize.height + Math.floor(Math.random() * 100) - 50);
-      await page.setViewportSize({ width: newWidth, height: newHeight });
-      await page.waitForTimeout(randomDelay());
+    // Random viewport resizing with error handling
+    if (Math.random() > 0.7) {
+      try {
+        const viewportSize = page.viewportSize();
+        if (viewportSize) {
+          const newWidth = Math.max(800, viewportSize.width + Math.floor(Math.random() * 100) - 50);
+          const newHeight = Math.max(600, viewportSize.height + Math.floor(Math.random() * 100) - 50);
+          await page.setViewportSize({ width: newWidth, height: newHeight });
+          await page.waitForTimeout(randomDelay());
+        }
+      } catch (resizeError) {
+        console.warn("Viewport resize error, continuing:", resizeError.message);
+      }
     }
   } catch (error) {
-    console.error('Error in human behavior simulation:', error);
+    console.warn('Error in human behavior simulation, continuing:', error.message);
   }
-};
+}
 
 // Enhanced request headers
 const generateEnhancedHeaders = (fingerprint, cookies) => {
@@ -2267,8 +2382,14 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
 
 async function cleanup(browser, context) {
   try {
-    if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    // Only close the context, never close the browser
+    if (context) {
+      try {
+        // await context.close();
+      } catch (error) {
+        console.warn("Error closing context:", error);
+      }
+    }
   } catch (error) {
     console.warn("Cleanup error:", error);
   }
@@ -2318,6 +2439,7 @@ async function refreshCookiesPeriodically() {
   const RETRY_DELAY = 5000; // 5 seconds between retries
   let retryCount = 0;
   let lastError = null;
+  let localContext = null;
 
   while (retryCount < MAX_RETRIES) {
     try {
@@ -2356,6 +2478,16 @@ async function refreshCookiesPeriodically() {
         
         // Save to file
         await cookieManager.saveCookiesToFile(newState.cookies);
+        
+        // Only close the context if it exists, never close the browser
+        if (localContext) {
+          try {
+            await localContext.close();
+          } catch (e) {
+            console.error("Error closing context:", e);
+          }
+        }
+        
         return; // Success, exit the retry loop
       } else {
         console.warn('Failed to refresh cookies in periodic refresh - no cookies returned');
@@ -2364,6 +2496,15 @@ async function refreshCookiesPeriodically() {
     } catch (error) {
       console.error(`Error in periodic cookie refresh (attempt ${retryCount + 1}):`, error.message);
       lastError = error;
+      
+      // Only close the context on error, not the browser
+      if (localContext) {
+        try {
+          await localContext.close();
+        } catch (e) {
+          console.error("Error closing context:", e);
+        }
+      }
     }
 
     // If we get here, we need to retry
