@@ -879,9 +879,71 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       });
 
       // Only capture cookies if the page URL still contains the event ID (i.e., real event data)
-      const currentUrl = page.url();
-      if (!currentUrl.includes(`/event/${eventId}`)) {
-        console.warn(`Page did not load event data for ${eventId}, URL: ${currentUrl}`);
+      let currentUrl = page.url();
+      let pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+      
+      // Try reloading the page if it didn't load correctly the first time
+      if (!pageLoadSuccessful) {
+        console.warn(`Page did not load event data for ${eventId} on first attempt, URL: ${currentUrl}. Trying page reload...`);
+        
+        try {
+          // Attempt to reload the page
+          await page.reload({ 
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+          });
+          
+          // Check if the reload worked
+          currentUrl = page.url();
+          pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+          
+          if (pageLoadSuccessful) {
+            console.log(`Page successfully loaded after reload for event ${eventId}`);
+          } else {
+            console.warn(`Page reload did not fix the issue for event ${eventId}, URL: ${currentUrl}`);
+          }
+        } catch (reloadError) {
+          console.error(`Error reloading page for event ${eventId}:`, reloadError.message);
+        }
+      }
+      
+      // If reload didn't work, try with a new tab
+      if (!pageLoadSuccessful) {
+        console.warn(`Trying with a new tab for event ${eventId}...`);
+        
+        try {
+          // Create a new tab in the same context
+          const newPage = await localContext.newPage();
+          
+          // Navigate to the URL in the new tab
+          await newPage.goto(url, {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+          });
+          
+          // Check if the new tab worked
+          currentUrl = newPage.url();
+          pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+          
+          if (pageLoadSuccessful) {
+            console.log(`Successfully loaded in new tab for event ${eventId}`);
+            // Use the new page instead
+            await page.close().catch(e => console.error("Error closing old page:", e));
+            page = newPage;
+            cookieManager.persistedPage = newPage;
+          } else {
+            // Close the new page if it didn't work
+            console.warn(`New tab did not fix the issue for event ${eventId}, URL: ${currentUrl}`);
+            await newPage.close().catch(e => console.error("Error closing new page:", e));
+          }
+        } catch (newTabError) {
+          console.error(`Error using new tab for event ${eventId}:`, newTabError.message);
+        }
+      }
+      
+      // If both reload and new tab didn't work, return fallback state
+      if (!pageLoadSuccessful) {
+        console.warn(`Failed to load event data after multiple attempts for ${eventId}`);
         // Abort and return fallback state without cookies
         cookieManager.capturedState = {
           cookies: null,
