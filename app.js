@@ -11,6 +11,7 @@ import eventRoutes from "./routes/eventRoutes.js";
 import statsRoutes from "./routes/statsRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import inventoryRoutes from "./routes/inventoryRoutes.js";
+import cookieRefreshRoutes from "./routes/cookieRefreshRoutes.js";
 
 // Import global setup
 import setupGlobals from "./setup.js";
@@ -61,6 +62,7 @@ app.use("/api/scraper", scraperRoutes);
 app.use("/api/events", eventRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/inventory", inventoryRoutes);
+app.use("/api/cookies", cookieRefreshRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

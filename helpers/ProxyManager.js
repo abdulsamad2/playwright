@@ -128,11 +128,105 @@ class ProxyManager {
    * @returns {Object} Object containing the proxy mappings
    */
   getProxyForBatch(eventIds) {
+    // Check if any events were provided
+    if (!eventIds || eventIds.length === 0) {
+      this.log('No events provided for proxy batch processing', "warning");
+      // Return empty result rather than throwing an error
+      return {
+        proxyAgent: null,
+        proxy: null,
+        eventProxyMap: new Map(),
+        firstEventId: null
+      };
+    }
+    
+    // Get current available proxy count
+    const availableCount = this.getAvailableProxyCount();
+    
+    // Log the current proxy state for debugging
+    this.log(`Proxy availability: ${availableCount}/${this.proxies.length} healthy proxies for ${eventIds.length} events`);
+    
+    // If we have no healthy proxies, attempt to reset some for emergency use
+    if (availableCount === 0 && this.proxies.length > 0) {
+      this.log('No healthy proxies available, attempting to reset a few for emergency use', "warning");
+      if (this.healthManager) {
+        // Force reset some proxies for emergency use
+        this.healthManager.resetHealthMetrics(true);
+        
+        // Check if we've recovered any proxies
+        const recoveredCount = this.getAvailableProxyCount();
+        this.log(`Emergency reset recovered ${recoveredCount} proxies`);
+      }
+    }
+    
+    // Recheck available count after potential recovery
+    const updatedAvailableCount = this.getAvailableProxyCount();
+    
+    // Second-level fallback: If still no healthy proxies, reset ALL proxies in emergency mode
+    if (updatedAvailableCount === 0 && this.proxies.length > 0) {
+      this.log(`Still no healthy proxies available, forcing FULL RESET of all proxies for emergency use`, "warning");
+      
+      // Temporarily consider all proxies healthy for this operation
+      if (this.healthManager) {
+        // Force full reset of ALL proxies as last resort
+        this.healthManager.resetAllProxies();
+        
+        // Recheck available count
+        const emergencyCount = this.getAvailableProxyCount();
+        this.log(`Emergency FULL RESET recovered ${emergencyCount} proxies`);
+        
+        // If we've recovered proxies, proceed with these emergency proxies
+        if (emergencyCount > 0) {
+          // Continue with the processing below
+        } else {
+          // If still no proxies after full reset, pick ONE proxy randomly as absolute last resort
+          if (this.proxies.length > 0) {
+            const randomIndex = Math.floor(Math.random() * this.proxies.length);
+            const fallbackProxy = this.proxies[randomIndex];
+            
+            try {
+              const proxyAgentData = this.createProxyAgent(fallbackProxy);
+              this.log(`Using last-resort emergency proxy for batch processing`, "warning");
+              
+              // Return a minimal result with just this one proxy
+              return {
+                proxyAgent: proxyAgentData.proxyAgent,
+                proxy: proxyAgentData.proxy,
+                eventProxyMap: new Map(),
+                firstEventId: eventIds[0],
+                isEmergencyMode: true
+              };
+            } catch (error) {
+              this.log(`Failed to create emergency proxy agent: ${error.message}`, "error");
+            }
+          }
+        }
+      }
+    }
+    
+    // Final check if we truly have no healthy proxies
+    const finalAvailableCount = this.getAvailableProxyCount();
+    if (finalAvailableCount === 0) {
+      this.log(`No healthy proxies available for batch with ${eventIds.length} events`, "error");
+      
+      // Instead of throwing an error, return an empty result
+      // This lets the calling code handle the situation more gracefully
+      return {
+        proxyAgent: null,
+        proxy: null,
+        eventProxyMap: new Map(),
+        firstEventId: eventIds[0] || null,
+        noHealthyProxies: true  // Flag to indicate no proxies were available
+      };
+    }
+    
     // Ensure we don't process too many events per proxy
-    if (eventIds.length > this.MAX_EVENTS_PER_PROXY * this.getAvailableProxyCount()) {
-      this.log(`Warning: Requested batch size ${eventIds.length} exceeds available proxy capacity`, "warning");
+    // Limit the batch size to what we can handle
+    const maxBatchSize = this.MAX_EVENTS_PER_PROXY * finalAvailableCount;
+    if (eventIds.length > maxBatchSize) {
+      this.log(`Warning: Requested batch size ${eventIds.length} exceeds available proxy capacity (${maxBatchSize})`, "warning");
       // Only process as many events as we have proxies for
-      eventIds = eventIds.slice(0, this.MAX_EVENTS_PER_PROXY * this.getAvailableProxyCount());
+      eventIds = eventIds.slice(0, maxBatchSize);
     }
     
     // Create a map to store proxy assignments for each event
@@ -176,10 +270,16 @@ class ProxyManager {
       };
     }
     
-    // If we couldn't get any proxies, throw an error
+    // If we couldn't assign any proxies, return an empty result but don't throw an error
     if (proxyMap.size === 0) {
-      this.log(`No healthy proxies available for batch with ${eventIds.length} events`, "error");
-      throw new Error(`No healthy proxies available for batch (${this.getAvailableProxyCount()} healthy proxies, ${this.proxies.length} total)`);
+      this.log(`Warning: Failed to assign any proxies for batch with ${eventIds.length} events despite healthy proxies being available`, "warning");
+      return {
+        proxyAgent: null,
+        proxy: null,
+        eventProxyMap: new Map(),
+        firstEventId: eventIds[0] || null,
+        assignmentFailed: true  // Flag to indicate proxy assignment failed
+      };
     }
     
     return { 
@@ -361,6 +461,14 @@ class ProxyManager {
     }
     
     return stats;
+  }
+
+  /**
+   * Get the total number of proxies in the system (healthy or not)
+   * @returns {number} The total number of proxies
+   */
+  getTotalProxies() {
+    return this.proxies.length;
   }
 }
 

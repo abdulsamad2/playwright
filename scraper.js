@@ -16,8 +16,11 @@ import delay from 'delay-async';
 import pRetry from 'p-retry';
 import { CookieManager } from './helpers/CookieManager.js';
 import scraperManager from './scraperManager.js';
+import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 // Initialize CookieManager instance
 const cookieManager = new CookieManager();
+cookieManager.persistedPage = null;
+cookieManager.persistedContext = null;
 
 const iphone13 = devices["iPhone 13"];
 
@@ -340,80 +343,23 @@ async function simulateMobileInteractions(page) {
 
 // Enhanced browser initialization
 async function initBrowser(proxy) {
+  let context = null;
+  
   try {
+    // Get randomized human-like properties
     const location = getRandomLocation();
     
-    // If browser is already open, just create a new context
-    if (browser) {
-      console.log('Reusing existing browser instance');
-      try {
-        context = await browser.newContext({
-          ...iphone13,
-          userAgent: getRealisticIphoneUserAgent(),
-          locale: location.locale,
-          colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
-          timezoneId: location.timezone,
-          geolocation: {
-            latitude: location.latitude,
-            longitude: location.longitude,
-            accuracy: 100 * Math.random() + 50,
-          },
-          permissions: [
-            "geolocation",
-            "notifications",
-            "microphone",
-            "camera",
-          ],
-          deviceScaleFactor: 2 + Math.random() * 0.5,
-          hasTouch: true,
-          isMobile: true,
-          javaScriptEnabled: true,
-          acceptDownloads: true,
-          ignoreHTTPSErrors: true,
-          bypassCSP: true,
-          extraHTTPHeaders: {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-            "Accept-Language": `${location.locale},en;q=0.9`,
-            "Accept-Encoding": "gzip, deflate, br",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "DNT": Math.random() > 0.5 ? "1" : "0",
-            "Upgrade-Insecure-Requests": "1",
-            "Pragma": "no-cache"
-          },
-          viewport: {
-            width: [375, 390, 414][Math.floor(Math.random() * 3)],
-            height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
-          }
-        });
-        return { context, fingerprint: enhancedFingerprint(), page: await context.newPage() };
-      } catch (error) {
-        console.error('Error creating new context:', error);
-        // If context creation fails, try to create a new context but don't close browser
-        context = null;
-      }
-    }
-    
-    // If no browser exists, launch a new one
-    if (!browser) {
-      // Try to launch browser with proxy if available
-      let launchOptions = {
-        headless: true,
+    // For persisting browser sessions, use same browser if possible
+    if (!browser || !browser.isConnected()) {
+      // Launch options
+      const launchOptions = {
+        headless: false,
         args: [
           '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins',
-          '--disable-site-isolation-trials',
+          '--disable-features=IsolateOrigins,site-per-process',
           '--disable-web-security',
-          '--disable-features=BlockInsecurePrivateNetworkRequests',
-          '--disable-features=SameSiteByDefaultCookies',
-          `--user-agent=${getRealisticIphoneUserAgent()}`,
-          '--disable-dev-shm-usage',
           '--no-sandbox',
           '--disable-setuid-sandbox',
-          '--ignore-certificate-errors',
-          '--disable-accelerated-2d-canvas',
           '--no-first-run',
           '--no-default-browser-check',
           '--disable-infobars',
@@ -422,14 +368,31 @@ async function initBrowser(proxy) {
         timeout: 60000,
       };
 
-      if (proxy?.proxy) {
+      if (proxy && typeof proxy === 'object' && proxy.proxy) {
         try {
-          const proxyUrl = new URL(`http://${proxy.proxy}`);
+          // Extract hostname and port from proxy string
+          const proxyString = proxy.proxy;
+          
+          // Ensure proxyString is a string before using string methods
+          if (typeof proxyString !== 'string') {
+            throw new Error('Invalid proxy format: proxy.proxy must be a string, got ' + typeof proxyString);
+          }
+          
+          // Check if proxy string is in correct format (host:port)
+          if (!proxyString.includes(':')) {
+            throw new Error('Invalid proxy format: ' + proxyString);
+          }
+          
+          const [hostname, portStr] = proxyString.split(':');
+          const port = parseInt(portStr) || 80;
+          
           launchOptions.proxy = {
-            server: `http://${proxyUrl.hostname}:${proxyUrl.port || 80}`,
+            server: `http://${hostname}:${port}`,
             username: proxy.username,
             password: proxy.password,
           };
+          
+          console.log(`Configuring browser with proxy: ${hostname}:${port}`);
         } catch (error) {
           console.warn('Invalid proxy configuration, launching without proxy:', error);
         }
@@ -439,7 +402,7 @@ async function initBrowser(proxy) {
       browser = await chromium.launch(launchOptions);
     }
     
-    // Create new context with same options as above
+    // Create new context with enhanced fingerprinting
     context = await browser.newContext({
       ...iphone13,
       userAgent: getRealisticIphoneUserAgent(),
@@ -490,10 +453,10 @@ async function initBrowser(proxy) {
     return { context, fingerprint: enhancedFingerprint(), page };
   } catch (error) {
     console.error("Error initializing browser:", error.message);
-    // Only close context on error, not browser
-    if (context) {
-      await context.close().catch(e => console.error("Error closing context:", e));
-    }
+    
+    // Cleanup on error
+    if (context) await context.close().catch(() => {});
+    
     throw error;
   }
 }
@@ -525,6 +488,12 @@ async function captureCookies(page, fingerprint) {
           retryCount++;
           continue;
         }
+      }
+
+      // Get context from page's browser context
+      const context = page.context();
+      if (!context) {
+        throw new Error("Cannot access browser context from page");
       }
 
       let cookies = await context.cookies().catch(() => []);
@@ -770,14 +739,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         }
       }
       
-      // Only close the context if it exists, never close the browser
-      if (localContext) {
-        try {
-          // await localContext.close();
-        } catch (e) {
-          console.error("Error closing context:", e);
-        }
-      }
+      // Don't close context or page to keep the browser session alive
     };
     
     // Add a global timeout for the entire refresh process
@@ -849,51 +811,56 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     // Generate fallback headers if we can't get proper ones
     const fallbackHeaders = generateFallbackHeaders();
     
-    // Initialize browser with improved error handling
-    let initAttempts = 0;
-    let initSuccess = false;
-    let initError = null;
-    
-    while (initAttempts < 3 && !initSuccess) {
-      try {
-        const { context: newContext, fingerprint } = await initBrowser(proxy, true); // Pass true for cookie capture
-        if (!newContext || !fingerprint) {
-          throw new Error("Failed to initialize browser or generate fingerprint");
+    // Check if we have a persisted page and context first
+    if (cookieManager.persistedPage && cookieManager.persistedContext) {
+      console.log('Using existing browser page for refresh');
+      page = cookieManager.persistedPage;
+      localContext = cookieManager.persistedContext;
+    } else {
+      // Initialize browser with improved error handling
+      let initAttempts = 0;
+      let initSuccess = false;
+      let initError = null;
+      
+      while (initAttempts < 3 && !initSuccess) {
+        try {
+          const { context: newContext, fingerprint, page: newPage } = await initBrowser(proxy, true); // Pass true for cookie capture
+          if (!newContext || !fingerprint) {
+            throw new Error("Failed to initialize browser or generate fingerprint");
+          }
+          
+          localContext = newContext;
+          page = newPage;
+          
+          // Store the page and context for future use
+          cookieManager.persistedPage = page;
+          cookieManager.persistedContext = localContext;
+          
+          initSuccess = true;
+        } catch (error) {
+          initAttempts++;
+          initError = error;
+          console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
+          await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
         }
-        
-        localContext = newContext;
-        initSuccess = true;
-      } catch (error) {
-        initAttempts++;
-        initError = error;
-        console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
-        await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
       }
-    }
-    
-    if (!initSuccess) {
-      console.error("All browser initialization attempts failed");
       
-      // Return fallback headers since we couldn't initialize browser
-      cookieManager.capturedState = {
-        cookies: null,
-        fingerprint: BrowserFingerprint.generate(),
-        lastRefresh: Date.now(),
-        headers: fallbackHeaders,
-        proxy: cookieManager.capturedState.proxy || proxy,
-      };
-      
-      clearTimeout(globalTimeoutId);
-      cleanupRefreshProcess();
-      return cookieManager.capturedState;
-    }
-
-    // Create page in try-catch block
-    try {
-      page = await localContext.newPage();
-    } catch (pageError) {
-      console.error("Failed to create new page:", pageError);
-      throw new Error("Failed to create new page: " + pageError.message);
+      if (!initSuccess) {
+        console.error("All browser initialization attempts failed");
+        
+        // Return fallback headers since we couldn't initialize browser
+        cookieManager.capturedState = {
+          cookies: null,
+          fingerprint: BrowserFingerprint.generate(),
+          lastRefresh: Date.now(),
+          headers: fallbackHeaders,
+          proxy: cookieManager.capturedState.proxy || proxy,
+        };
+        
+        clearTimeout(globalTimeoutId);
+        cleanupRefreshProcess();
+        return cookieManager.capturedState;
+      }
     }
 
     if (!page) {
@@ -1013,37 +980,12 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       
       throw error;
     } finally {
-      if (page) {
-        try {
-          // await page.close();
-        } catch (e) {
-          console.error("Error closing page:", e);
-        }
-      }
-      
-      // Only close the context, never close the browser
-      if (localContext) {
-        try {
-          await localContext.close();
-        } catch (e) {
-          console.error("Error closing context:", e);
-        }
-      }
-      
+      // Don't close page or context - keep them for reuse
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
-    
-    // Make sure we clean up on error - only close context, not browser
-    if (localContext) {
-      try {
-        await localContext.close();
-      } catch (e) {
-        console.error("Error closing context:", e);
-      }
-    }
     
     // Reset the flag to allow new requests
     cookieManager.isRefreshingCookies = false;
@@ -1295,6 +1237,21 @@ const GetProxy = async () => {
       let attempts = 0;
       const maxAttempts = 3;
       let lastError = null;
+
+      // Add diagnostic information about proxy health
+      const healthyCount = global.proxyManager.getAvailableProxyCount();
+      const totalProxies = global.proxyManager.proxies.length;
+      console.log(`Proxy health status: ${healthyCount}/${totalProxies} healthy proxies available`);
+      
+      // If no healthy proxies but we have total proxies, try to reset some
+      if (healthyCount === 0 && totalProxies > 0) {
+        console.log('No healthy proxies available, attempting to reset a few for emergency use');
+        // Try to reset health of a few proxies for emergency use without changing core logic
+        if (global.proxyManager.healthManager) {
+          global.proxyManager.healthManager.resetHealthMetrics(true); // Force reset some proxies
+          console.log(`After emergency reset: ${global.proxyManager.getAvailableProxyCount()}/${totalProxies} healthy proxies`);
+        }
+      }
 
       while (attempts < maxAttempts) {
         try {
@@ -2462,14 +2419,8 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
 
 async function cleanup(browser, context) {
   try {
-    // Only close the context, never close the browser
-    if (context) {
-      try {
-        // await context.close();
-      } catch (error) {
-        console.warn("Error closing context:", error);
-      }
-    }
+    // Never close the browser or context to maintain persistent session
+    console.log("Keeping browser and context open for reuse");
   } catch (error) {
     console.warn("Cleanup error:", error);
   }
@@ -2484,7 +2435,7 @@ function resetCapturedState() {
   };
 }
 
-export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders };
+export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders, refreshCookiesPeriodically };
 
 // Function to periodically refresh cookies
 async function startPeriodicCookieRefresh() {
@@ -2516,36 +2467,49 @@ async function startPeriodicCookieRefresh() {
 
 async function refreshCookiesPeriodically() {
   const MAX_RETRIES = 3;
-  const RETRY_DELAY = 5000; // 5 seconds between retries
+  const RETRY_DELAY = 30000; // 30 seconds
+  
   let retryCount = 0;
   let lastError = null;
   let localContext = null;
-
+  let refreshRecord = null;
+  
   while (retryCount < MAX_RETRIES) {
     try {
-      console.log(`Starting periodic cookie refresh (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+      console.log("Starting periodic cookie refresh...");
       
-      // Get a random active event ID
-      const activeEvents = await scraperManager.getEventsToProcess();
-      if (!activeEvents || activeEvents.length === 0) {
-        console.warn('No active events found for cookie refresh');
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-        retryCount++;
-        continue;
+      // Get a stable event ID to use for refreshing - choose one from active scrapes or use a default
+      let eventId = null;
+      
+      // Try to find an active event ID from scraper manager
+      if (typeof ScraperManager !== 'undefined' && ScraperManager.getActiveEvents) {
+        const activeEvents = ScraperManager.getActiveEvents();
+        if (activeEvents.length > 0) {
+          // Choose a random event from active ones
+          eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
+          console.log(`Using active event ${eventId} for periodic refresh`);
+        }
       }
       
-      const eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
+      // If no active events, use a default event ID
+      if (!eventId) {
+        // Default to a known stable event ID for refreshing cookies
+        // Using a popular event that's likely to stay active
+        eventId = "0400619496250E05";
+        console.log(`Using default event ${eventId} for periodic refresh`);
+      }
       
-      // Get a fresh proxy
-      const { proxy } = await GetProxy();
+      // Get the proxy to use for refresh
+      const proxyData = await GetProxy();
       
-      // Force refresh cookies with timeout
-      const newState = await Promise.race([
-        refreshHeaders(eventId, proxy, null),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Cookie refresh timeout')), 60000)
-        )
-      ]);
+      // Start tracking this refresh operation
+      if (!refreshRecord) {
+        refreshRecord = await CookieRefreshTracker.startRefresh(eventId, proxyData.proxy);
+      }
+      
+      // Call refreshHeaders to get fresh cookies
+      // Pass only the proxy object, not the entire proxyData object
+      const newState = await refreshHeaders(eventId, proxyData.proxy);
       
       if (newState?.cookies?.length) {
         console.log('Successfully refreshed cookies in periodic refresh');
@@ -2559,32 +2523,27 @@ async function refreshCookiesPeriodically() {
         // Save to file
         await cookieManager.saveCookiesToFile(newState.cookies);
         
-        // Only close the context if it exists, never close the browser
-        if (localContext) {
-          try {
-            await localContext.close();
-          } catch (e) {
-            console.error("Error closing context:", e);
-          }
-        }
+        // Don't close context - keep browser session alive
+        
+        // Track successful refresh in database
+        await CookieRefreshTracker.markSuccess(
+          refreshRecord.refreshId, 
+          newState.cookies.length, 
+          retryCount
+        );
         
         return; // Success, exit the retry loop
       } else {
         console.warn('Failed to refresh cookies in periodic refresh - no cookies returned');
         lastError = new Error('No cookies returned from refresh');
+        
+        // Don't mark as failed yet, we'll retry
       }
     } catch (error) {
       console.error(`Error in periodic cookie refresh (attempt ${retryCount + 1}):`, error.message);
       lastError = error;
       
-      // Only close the context on error, not the browser
-      if (localContext) {
-        try {
-          await localContext.close();
-        } catch (e) {
-          console.error("Error closing context:", e);
-        }
-      }
+      // Don't close context - keep browser session alive
     }
 
     // If we get here, we need to retry
@@ -2597,6 +2556,16 @@ async function refreshCookiesPeriodically() {
 
   // If we've exhausted all retries, log the final error
   console.error('Failed to refresh cookies after all retries:', lastError?.message);
+  
+  // Track failed refresh in database
+  if (refreshRecord) {
+    await CookieRefreshTracker.markFailed(
+      refreshRecord.refreshId, 
+      lastError?.message || 'Unknown error', 
+      retryCount
+    );
+  }
+  
   throw lastError; // Re-throw to be handled by the interval
 }
 

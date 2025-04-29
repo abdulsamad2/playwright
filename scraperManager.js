@@ -27,7 +27,7 @@ const LONG_COOLDOWN_MINUTES = 3; // Reduced to 3 minutes for persistently failin
 const LOG_LEVEL = 1; // Default to warnings and errors only
 
 // Cookie expiration threshold: only refresh cookies when expired (default 1 hour)
-const COOKIE_EXPIRATION_MS = 60 * 60 * 1000;
+const COOKIE_EXPIRATION_MS = 30 * 60 * 1000;
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const USER_AGENT_POOL = [
@@ -1123,11 +1123,57 @@ export class ScraperManager {
           // Get proxies for this specific batch with improved proxy assignment
           const proxyData = this.proxyManager.getProxyForBatch(chunk);
           
+          // Handle case where no healthy proxies are available
+          if (proxyData.noHealthyProxies || proxyData.assignmentFailed) {
+            // Log detailed error based on the specific issue
+            if (proxyData.noHealthyProxies) {
+              this.logWithTime(`No healthy proxies available for batch ${batchId}`, "error");
+            } else if (proxyData.assignmentFailed) {
+              this.logWithTime(`Failed to assign proxies for batch ${batchId}`, "error");
+            }
+            
+            // Check if we should retry later or fail now based on proxy availability
+            const shouldRetryBatch = this.proxyManager.getAvailableProxyCount() > 0 || 
+                                     this.proxyManager.getTotalProxies() > 0;
+            
+            if (shouldRetryBatch) {
+              // Add to retry queue rather than failing immediately
+              chunk.forEach(eventId => {
+                // Check if the event is already in the retry queue
+                const existingRetry = this.retryQueue.find(item => item.eventId === eventId);
+                if (!existingRetry) {
+                  this.retryQueue.push({
+                    eventId,
+                    retryCount: 0,
+                    nextRetry: moment().add(5000 + Math.random() * 5000, 'milliseconds'),
+                    lastError: new Error("Proxy availability issue, scheduled for retry")
+                  });
+                }
+              });
+              
+              this.logWithTime(`Scheduled ${chunk.length} events from batch ${batchId} for retry due to proxy issues`, "info");
+              return { results: [], failed: [] };
+            }
+            
+            // If we shouldn't retry, mark all as failed
+            this.logWithTime(`Failed all ${chunk.length} events in batch ${batchId} due to proxy unavailability`, "error");
+            return { 
+              results: [], 
+              failed: chunk.map(eventId => ({ 
+                eventId, 
+                error: new Error(proxyData.noHealthyProxies ? 
+                  "No healthy proxies available" : 
+                  "Failed to assign proxies")
+              }))
+            };
+          }
+          
           // Store the proxy assignment for this batch
           this.batchProxies.set(batchId, { proxy: proxyData.proxy, chunk });
           
           if (LOG_LEVEL >= 3) {
-            this.logWithTime(`Using ${proxyData.eventProxyMap.size} proxies for batch ${batchId} (${chunk.length} events)`, "debug");
+            const proxyMapSize = proxyData.eventProxyMap ? proxyData.eventProxyMap.size : 0;
+            this.logWithTime(`Using ${proxyMapSize} proxies for batch ${batchId} (${chunk.length} events)`, "debug");
           }
 
           // Process the entire chunk efficiently as a batch using unique proxies per event
@@ -1137,13 +1183,13 @@ export class ScraperManager {
           results.push(...result.results);
           failed.push(...result.failed);
           
-          // Mark this proxy as successful
-          if (result.results.length > 0) {
+          // Mark this proxy as successful if we have results
+          if (result.results.length > 0 && proxyData.proxy) {
             this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, true);
           }
           
           // If we had failures, and they outnumber successes, mark proxy as having issues
-          if (result.failed.length > result.results.length && result.failed.length > 0) {
+          if (result.failed.length > result.results.length && result.failed.length > 0 && proxyData.proxy) {
             this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, false);
           }
         } catch (error) {
@@ -1152,8 +1198,10 @@ export class ScraperManager {
           // If there's a proxy error, mark the proxy as unhealthy
           if (this.batchProxies.has(batchId)) {
             const { proxy, chunk } = this.batchProxies.get(batchId);
-            this.proxyManager.updateProxyHealth(proxy.proxy, false);
-            this.proxyManager.releaseProxyBatch(chunk);
+            if (proxy && proxy.proxy) {
+              this.proxyManager.updateProxyHealth(proxy.proxy, false);
+              this.proxyManager.releaseProxyBatch(chunk);
+            }
           }
           
           // Add these events to failed list

@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import fetch from 'node-fetch';
 
 const execAsync = promisify(exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,7 +17,9 @@ class ProxyHealthManager {
     this.healthStore = {
       unhealthyProxies: new Map(),  // Maps proxy string to health data
       bannedProxies: new Set(),      // Set of permanently banned proxies
-      lastReset: Date.now()
+      lastReset: Date.now(),
+      activeProxyIndex: 0,           // For rotation tracking
+      activeProxies: []              // List of currently active proxies
     };
     
     this.healthFilePath = path.join(__dirname, 'proxy-health-status.json');
@@ -24,37 +27,45 @@ class ProxyHealthManager {
     // Health status configuration
     this.config = {
       // How many consecutive failures before marking a proxy as potentially unhealthy
-      failureThreshold: 8,
+      failureThreshold: 15,          // Increased from 8
 
       // How many potential health issues before marking as unhealthy
-      unhealthyThreshold: 15,
+      unhealthyThreshold: 25,        // Increased from 15
 
       // How many 403 errors before banning a proxy
-      ban403Threshold: 8,
+      ban403Threshold: 12,           // Increased from 8
 
-      // Initial cooldown time (15 minutes)
-      initialCooldown: 15 * 60 * 1000,
+      // Initial cooldown time (10 minutes)
+      initialCooldown: 10 * 60 * 1000, // Reduced from 15 minutes
 
-      // Maximum cooldown time (12 hours)
-      maxCooldown: 12 * 60 * 60 * 1000,
+      // Maximum cooldown time (6 hours)
+      maxCooldown: 6 * 60 * 60 * 1000, // Reduced from 12 hours
 
       // Minimum time to test a proxy before final health decision
-      minTestPeriod: 3 * 60 * 1000,
+      minTestPeriod: 5 * 60 * 1000,  // Increased from 3 minutes
 
       // Reset health metrics interval
-      resetInterval: 4 * 60 * 60 * 1000,
+      resetInterval: 2 * 60 * 60 * 1000, // Reduced from 4 hours to 2 hours
 
-      // Secondary test website for proxy validation
-      secondaryTestUrl: "https://www.bing.com/",
+      // Secondary test websites for proxy validation
+      secondaryTestUrls: [
+        "https://www.bing.com/",
+        "https://www.reddit.com/",
+        "https://www.youtube.com/"
+      ],
 
       // Number of successful secondary tests required to rehabilitate
-      secondaryTestSuccessThreshold: 2,
+      secondaryTestSuccessThreshold: 1, // Reduced from 2 to 1
 
       // Ping configuration
-      pingCount: 10,                    // Number of pings to send
-      pingTimeout: 2000,                // Timeout for each ping in milliseconds
-      pingFailureThreshold: 10,         // Number of failed pings before banning
-      pingInterval: 60 * 1000,          // Interval between ping checks in milliseconds
+      pingCount: 5,                     // Reduced from 10
+      pingTimeout: 3000,                // Increased from 2000
+      pingFailureThreshold: 4,          // Reduced from 10
+      pingInterval: 3 * 60 * 1000,      // Increased from 1 minute to 3 minutes
+      
+      // Rotation settings
+      rotationInterval: 30 * 60 * 1000, // Rotate proxies every 30 minutes
+      rotationEnabled: true,            // Enable rotation by default
     };
   }
   
@@ -69,6 +80,11 @@ class ProxyHealthManager {
     
     // Start ping monitoring
     this.startPingMonitoring();
+    
+    // Start proxy rotation if enabled
+    if (this.config.rotationEnabled) {
+      this.startProxyRotation();
+    }
     
     this.log(`ProxyHealthManager initialized with ${this.healthStore.unhealthyProxies.size} unhealthy proxies and ${this.healthStore.bannedProxies.size} banned proxies`);
     return this;
@@ -103,6 +119,8 @@ class ProxyHealthManager {
         // Convert the banned proxies array back to a Set
         this.healthStore.bannedProxies = new Set(parsed.bannedProxies || []);
         this.healthStore.lastReset = parsed.lastReset || Date.now();
+        this.healthStore.activeProxyIndex = parsed.activeProxyIndex || 0;
+        this.healthStore.activeProxies = parsed.activeProxies || [];
         
         this.log(`Loaded health data from ${this.healthFilePath}: ${this.healthStore.unhealthyProxies.size} unhealthy, ${this.healthStore.bannedProxies.size} banned`);
       } else {
@@ -122,7 +140,9 @@ class ProxyHealthManager {
       const data = {
         unhealthyProxies: Object.fromEntries(this.healthStore.unhealthyProxies),
         bannedProxies: Array.from(this.healthStore.bannedProxies),
-        lastReset: this.healthStore.lastReset
+        lastReset: this.healthStore.lastReset,
+        activeProxyIndex: this.healthStore.activeProxyIndex,
+        activeProxies: this.healthStore.activeProxies
       };
       
       await fs.writeFile(this.healthFilePath, JSON.stringify(data, null, 2), 'utf8');
@@ -175,8 +195,12 @@ class ProxyHealthManager {
       // If we're past the retry time, give it another chance
       this.log(`Proxy ${proxyString} cooldown period ended, marking for retry`);
       
+      // Auto-reset some metrics when giving a proxy another chance
+      healthData.failureCount = Math.max(0, healthData.failureCount - 5);
+      healthData.successCount = 0;
+      
       // Don't immediately remove from unhealthy list, but let it be retried
-      // We'll track success/failure in the success/failure recording methods
+      this.healthStore.unhealthyProxies.set(proxyString, healthData);
       return true;
     }
     
@@ -201,8 +225,13 @@ class ProxyHealthManager {
       healthData.successCount = (healthData.successCount || 0) + 1;
       healthData.lastCheck = new Date();
       
+      // Decrease failure count with each success
+      if (healthData.failureCount > 0) {
+        healthData.failureCount--;
+      }
+      
       // If we've had several successes in a row, rehabilitate the proxy
-      if (healthData.successCount >= 2) {
+      if (healthData.successCount >= 3) {
         this.log(`Proxy ${proxyString} has been successfully rehabilitated after ${healthData.successCount} successful uses`);
         this.healthStore.unhealthyProxies.delete(proxyString);
         this.saveHealthData();
@@ -210,9 +239,18 @@ class ProxyHealthManager {
         // Update the health data
         this.healthStore.unhealthyProxies.set(proxyString, healthData);
       }
+      
+      // Make sure this proxy is in the active proxies list
+      if (!this.healthStore.activeProxies.includes(proxyString)) {
+        this.healthStore.activeProxies.push(proxyString);
+      }
+    } else {
+      // If proxy was already healthy, make sure it's in the active proxies list
+      if (!this.healthStore.activeProxies.includes(proxyString)) {
+        this.healthStore.activeProxies.push(proxyString);
+        this.saveHealthData();
+      }
     }
-    
-    // If proxy was healthy and stays healthy, no need to update persistent storage
   }
   
   /**
@@ -220,7 +258,7 @@ class ProxyHealthManager {
    * @param {string} proxyString - The proxy string
    * @param {Object} error - The error object (optional)
    */
-  recordProxyFailure(proxyString, error = null) {
+  async recordProxyFailure(proxyString, error = null) {
     // If the proxy is already banned, don't update
     if (this.healthStore.bannedProxies.has(proxyString)) {
       return;
@@ -242,7 +280,8 @@ class ProxyHealthManager {
       lastCheck: now,
       cooldownMultiplier: 1,
       failureSequences: 0,
-      secondaryTestSuccess: 0
+      secondaryTestSuccess: 0,
+      verifiedFailing: false
     };
     
     // Update failure counts
@@ -255,14 +294,22 @@ class ProxyHealthManager {
       healthData.count403 = (healthData.count403 || 0) + 1;
       this.log(`Proxy ${proxyString} received 403 error (total: ${healthData.count403})`, "warning");
       
-      // Check if we should ban this proxy due to excessive 403 errors
-      if (healthData.count403 >= this.config.ban403Threshold) {
-        // Before banning, try secondary test
-        if (healthData.secondaryTestSuccess < this.config.secondaryTestSuccessThreshold) {
-          this.log(`Proxy ${proxyString} will be tested with secondary website before banning`, "warning");
-          return;
+      // Check if we should test this proxy with secondary sites due to 403 errors
+      if (healthData.count403 >= this.config.ban403Threshold / 2) {
+        const verified = await this.verifyProxyWithSecondarySites(proxyString);
+        if (verified) {
+          // If secondary tests passed, reduce 403 count as it might be site-specific
+          healthData.count403 = Math.max(0, healthData.count403 - 2);
+          healthData.failureCount = Math.max(0, healthData.failureCount - 2);
+          this.log(`Proxy ${proxyString} passed secondary site tests, reducing failure count`, "info");
+        } else {
+          healthData.verifiedFailing = true;
         }
-        this.banProxy(proxyString, "Excessive 403 errors");
+      }
+      
+      // Check if we should ban this proxy due to excessive 403 errors and verified failing
+      if (healthData.count403 >= this.config.ban403Threshold && healthData.verifiedFailing) {
+        this.banProxy(proxyString, "Excessive 403 errors verified with secondary sites");
         return;
       }
     }
@@ -274,18 +321,26 @@ class ProxyHealthManager {
     if (healthData.failureCount >= this.config.unhealthyThreshold && 
         timeSinceFirstFailure >= this.config.minTestPeriod) {
       
-      // Before marking as unhealthy, try secondary test
-      if (healthData.secondaryTestSuccess < this.config.secondaryTestSuccessThreshold) {
-        this.log(`Proxy ${proxyString} will be tested with secondary website before marking unhealthy`, "warning");
-        return;
+      // Before marking as unhealthy, verify with secondary sites
+      if (!healthData.verifiedFailing) {
+        const verified = await this.verifyProxyWithSecondarySites(proxyString);
+        if (verified) {
+          // If secondary tests passed, reduce failure count
+          healthData.failureCount = Math.max(0, healthData.failureCount - 5);
+          this.log(`Proxy ${proxyString} passed secondary site tests, reducing failure count`, "info");
+          this.healthStore.unhealthyProxies.set(proxyString, healthData);
+          return;
+        } else {
+          healthData.verifiedFailing = true;
+        }
       }
       
       // Calculate cooldown period based on failure sequence
       healthData.failureSequences = (healthData.failureSequences || 0) + 1;
       
-      // Exponential backoff for repeated failures, capped at maxCooldown
+      // Exponential backoff for repeated failures, but with a gentler curve
       const cooldownTime = Math.min(
-        this.config.initialCooldown * Math.pow(1.5, healthData.failureSequences - 1),
+        this.config.initialCooldown * Math.pow(1.3, healthData.failureSequences - 1),
         this.config.maxCooldown
       );
       
@@ -293,9 +348,10 @@ class ProxyHealthManager {
       const jitter = Math.floor(Math.random() * 30000);
       healthData.nextRetryTime = new Date(now.getTime() + cooldownTime + jitter);
       
-      if (healthData.failureSequences >= 4) {
+      // Only ban after many consecutive failures and verification
+      if (healthData.failureSequences >= 6 && healthData.verifiedFailing) {
         this.log(`Proxy ${proxyString} has failed ${healthData.failureSequences} consecutive cooldown periods, permanently banning`, "error");
-        this.banProxy(proxyString, "Multiple consecutive failure sequences");
+        this.banProxy(proxyString, "Multiple consecutive failure sequences verified with secondary sites");
         return;
       } else {
         this.log(`Proxy ${proxyString} marked unhealthy (attempt ${healthData.failureSequences}). Will retry after ${healthData.nextRetryTime.toLocaleString()}`, "warning");
@@ -304,11 +360,66 @@ class ProxyHealthManager {
       // Reset failure count for next attempt
       healthData.failureCount = 0;
       healthData.successCount = 0;
+      
+      // Remove from active proxies list temporarily
+      const index = this.healthStore.activeProxies.indexOf(proxyString);
+      if (index !== -1) {
+        this.healthStore.activeProxies.splice(index, 1);
+      }
     }
     
     // Update the health data
     this.healthStore.unhealthyProxies.set(proxyString, healthData);
     this.saveHealthData();
+  }
+  
+  /**
+   * Verify a proxy with secondary test sites
+   * @param {string} proxyString - The proxy to test
+   * @returns {Promise<boolean>} Whether the proxy passed secondary tests
+   */
+  async verifyProxyWithSecondarySites(proxyString) {
+    this.log(`Testing proxy ${proxyString} with secondary sites for verification`, "info");
+    
+    // Parse proxy for fetch options
+    let proxyOptions = {};
+    try {
+      const proxyUrl = new URL(proxyString);
+      proxyOptions = {
+        proxy: proxyString,
+        timeout: 10000 // 10 second timeout
+      };
+    } catch (error) {
+      this.log(`Invalid proxy URL format: ${proxyString}`, "error");
+      return false;
+    }
+    
+    // Test with multiple sites
+    let successCount = 0;
+    
+    for (const testUrl of this.config.secondaryTestUrls) {
+      try {
+        this.log(`Testing proxy ${proxyString} with ${testUrl}`, "info");
+        
+        // Using node-fetch with proxy
+        const response = await fetch(testUrl, proxyOptions);
+        
+        if (response.ok) {
+          successCount++;
+          this.log(`Proxy ${proxyString} successfully connected to ${testUrl}`, "info");
+        } else {
+          this.log(`Proxy ${proxyString} got status ${response.status} from ${testUrl}`, "warning");
+        }
+      } catch (error) {
+        this.log(`Proxy ${proxyString} failed to connect to ${testUrl}: ${error.message}`, "warning");
+      }
+    }
+    
+    const verified = successCount >= this.config.secondaryTestSuccessThreshold;
+    this.log(`Proxy ${proxyString} verification result: ${verified ? 'PASSED' : 'FAILED'} (${successCount}/${this.config.secondaryTestUrls.length} successful)`, 
+      verified ? "info" : "warning");
+    
+    return verified;
   }
   
   /**
@@ -318,74 +429,113 @@ class ProxyHealthManager {
    */
   banProxy(proxyString, reason = "Unknown") {
     if (!this.healthStore.bannedProxies.has(proxyString)) {
+      this.log(`Banning proxy ${proxyString} permanently: ${reason}`, 'warning');
       this.healthStore.bannedProxies.add(proxyString);
-      this.healthStore.unhealthyProxies.delete(proxyString); // No need to track it twice
-      this.log(`Proxy ${proxyString} PERMANENTLY BANNED. Reason: ${reason}`, "error");
+      
+      // Remove from unhealthy set if it's there
+      this.healthStore.unhealthyProxies.delete(proxyString);
+      
+      // Save the banned status
       this.saveHealthData();
+      
+      return true;
     }
+    return false;
   }
   
   /**
-   * Reset health metrics periodically
+   * Reset health metrics for all proxies - emergency method
+   * This completely resets all proxy health metrics in emergency situations
+   * @returns {number} The number of proxies reset
    */
-  resetHealthMetrics() {
-    const now = Date.now();
+  resetAllProxies() {
+    const unhealthyCount = this.healthStore.unhealthyProxies.size;
+    this.log(`EMERGENCY: Resetting ALL proxy health metrics (${unhealthyCount} unhealthy proxies)`, 'warning');
     
-    // Don't reset too frequently
-    if (now - this.healthStore.lastReset < this.config.resetInterval) {
+    // Clear all unhealthy proxies
+    this.healthStore.unhealthyProxies.clear();
+    
+    // Temporarily clear banned proxies as well
+    const bannedCount = this.healthStore.bannedProxies.size;
+    const bannedProxies = Array.from(this.healthStore.bannedProxies);
+    this.healthStore.bannedProxies.clear();
+    
+    // Save this change to the file immediately
+    this.saveHealthData().catch(err => {
+      this.log(`Error saving emergency proxy reset: ${err.message}`, 'error');
+    });
+    
+    // Set a timeout to restore banned proxies after 5 minutes
+    setTimeout(() => {
+      this.log(`Restoring ${bannedCount} banned proxies after emergency reset period`, 'warning');
+      bannedProxies.forEach(proxy => {
+        this.healthStore.bannedProxies.add(proxy);
+      });
+      this.saveHealthData().catch(err => {
+        this.log(`Error restoring banned proxies: ${err.message}`, 'error');
+      });
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    return unhealthyCount + bannedCount;
+  }
+  
+  /**
+   * Reset health metrics periodically to prevent permanently marking proxies as unhealthy
+   * @param {boolean} forceReset - Whether to force reset some proxies for emergency use
+   */
+  resetHealthMetrics(forceReset = false) {
+    // If force reset is requested, reset some proxies no matter what
+    if (forceReset && this.healthStore.unhealthyProxies.size > 0) {
+      this.log(`Force resetting some proxies due to emergency request`);
+      
+      // Get all unhealthy proxies
+      const unhealthyProxies = Array.from(this.healthStore.unhealthyProxies.keys());
+      
+      // Reset up to 5 proxies (or 25% of unhealthy ones, whichever is more)
+      const resetCount = Math.max(5, Math.ceil(unhealthyProxies.length * 0.25));
+      const proxiesToReset = unhealthyProxies.slice(0, resetCount);
+      
+      this.log(`Emergency resetting ${proxiesToReset.length} proxies out of ${unhealthyProxies.length} unhealthy proxies`);
+      
+      // Reset these proxies
+      for (const proxy of proxiesToReset) {
+        this.healthStore.unhealthyProxies.delete(proxy);
+      }
+      
+      // Save the updated health data
+      this.saveHealthData();
       return;
     }
     
-    this.healthStore.lastReset = now;
-    this.log("Resetting proxy health metrics");
+    // Only reset metrics periodically
+    const timeSinceLastReset = Date.now() - this.healthStore.lastReset;
+    if (timeSinceLastReset < this.config.resetInterval) {
+      return;
+    }
     
-    // Give some banned proxies another chance after a long time
-    // Note: this only applies to proxies banned for reasons other than 403s
-    const bannedCount = this.healthStore.bannedProxies.size;
-    let forgivenCount = 0;
+    this.log('Resetting proxy health metrics...');
     
-    for (const proxyString of this.healthStore.bannedProxies) {
-      const healthData = this.healthStore.unhealthyProxies.get(proxyString);
-      
-      // Only unban proxies that don't have 403 issues
-      if (healthData && (!healthData.count403 || healthData.count403 < this.config.ban403Threshold)) {
-        // Random chance to forgive a banned proxy after reset interval
-        if (Math.random() < 0.1) { // 10% chance
-          this.healthStore.bannedProxies.delete(proxyString);
-          
-          // Reset its health record but keep track that it was previously banned
-          this.healthStore.unhealthyProxies.set(proxyString, {
-            failureCount: 0,
-            successCount: 0,
-            count403: healthData.count403 || 0,
-            firstFailure: new Date(),
-            lastFailure: new Date(),
-            lastCheck: new Date(),
-            cooldownMultiplier: 1,
-            failureSequences: healthData.failureSequences || 0,
-            previouslyBanned: true
-          });
-          
-          forgivenCount++;
-        }
+    // Record the reset time
+    this.healthStore.lastReset = Date.now();
+    
+    // Add some unhealthy proxies that might be ready for retry
+    const proxiesToRehabilitate = [];
+    
+    for (const [proxy, data] of this.healthStore.unhealthyProxies.entries()) {
+      // If this proxy has been unhealthy for a long time, give it another chance
+      const unhealthyTime = Date.now() - data.lastFailure.getTime();
+      if (unhealthyTime > this.config.maxCooldown) {
+        proxiesToRehabilitate.push(proxy);
+        this.log(`Rehabilitating proxy ${proxy} after ${Math.round(unhealthyTime/3600000)} hours in unhealthy state`);
       }
     }
     
-    if (forgivenCount > 0) {
-      this.log(`Reset forgave ${forgivenCount} out of ${bannedCount} banned proxies`);
+    // Remove rehabilitated proxies from unhealthy list
+    for (const proxy of proxiesToRehabilitate) {
+      this.healthStore.unhealthyProxies.delete(proxy);
     }
     
-    // Also reduce the cooldown times for proxies in recovery
-    for (const [proxyString, healthData] of this.healthStore.unhealthyProxies.entries()) {
-      // If a proxy has been in recovery for a long time, speed up its retry
-      if (healthData.nextRetryTime && healthData.nextRetryTime.getTime() > now) {
-        // Reduce the remaining cooldown time by half
-        const remainingTime = healthData.nextRetryTime.getTime() - now;
-        healthData.nextRetryTime = new Date(now + remainingTime / 2);
-        this.log(`Reduced cooldown time for proxy ${proxyString}, new retry time: ${healthData.nextRetryTime.toLocaleString()}`);
-      }
-    }
-    
+    // Save the updated health data
     this.saveHealthData();
   }
   
@@ -397,6 +547,8 @@ class ProxyHealthManager {
     return {
       totalUnhealthy: this.healthStore.unhealthyProxies.size,
       totalBanned: this.healthStore.bannedProxies.size,
+      totalActive: this.healthStore.activeProxies.length,
+      currentRotationIndex: this.healthStore.activeProxyIndex,
       lastReset: new Date(this.healthStore.lastReset).toLocaleString(),
       unhealthyDetails: Array.from(this.healthStore.unhealthyProxies.entries()).map(([proxy, data]) => ({
         proxy,
@@ -406,9 +558,11 @@ class ProxyHealthManager {
         firstFailure: data.firstFailure ? data.firstFailure.toLocaleString() : 'N/A',
         lastFailure: data.lastFailure ? data.lastFailure.toLocaleString() : 'N/A',
         nextRetryTime: data.nextRetryTime ? data.nextRetryTime.toLocaleString() : 'N/A',
-        failureSequences: data.failureSequences || 0
+        failureSequences: data.failureSequences || 0,
+        verifiedFailing: data.verifiedFailing || false
       })),
-      bannedProxies: Array.from(this.healthStore.bannedProxies)
+      bannedProxies: Array.from(this.healthStore.bannedProxies),
+      activeProxies: this.healthStore.activeProxies
     };
   }
 
@@ -434,17 +588,33 @@ class ProxyHealthManager {
       
       this.log(`Ping results for ${proxyString}: ${successfulPings} successful, ${failedPings} failed`);
       
+      // More permissive ping failure threshold
       if (failedPings >= this.config.pingFailureThreshold) {
-        this.log(`Proxy ${proxyString} failed ${failedPings} pings, marking as unhealthy`, 'warning');
-        this.recordProxyFailure(proxyString, { message: `Failed ${failedPings} pings` });
-        return false;
+        // Before marking as unhealthy, verify with secondary sites
+        const verified = await this.verifyProxyWithSecondarySites(proxyString);
+        if (!verified) {
+          this.log(`Proxy ${proxyString} failed ${failedPings} pings and secondary site tests, marking as unhealthy`, 'warning');
+          this.recordProxyFailure(proxyString, { message: `Failed ${failedPings} pings and secondary tests` });
+          return false;
+        } else {
+          this.log(`Proxy ${proxyString} failed pings but passed secondary site tests, keeping healthy`, 'info');
+          return true;
+        }
       }
       
       return true;
     } catch (error) {
       this.log(`Error pinging proxy ${proxyString}: ${error.message}`, 'error');
-      this.recordProxyFailure(proxyString, error);
-      return false;
+      
+      // Before marking as unhealthy, verify with secondary sites
+      const verified = await this.verifyProxyWithSecondarySites(proxyString);
+      if (!verified) {
+        this.recordProxyFailure(proxyString, error);
+        return false;
+      } else {
+        this.log(`Proxy ${proxyString} failed ping but passed secondary site tests, keeping healthy`, 'info');
+        return true;
+      }
     }
   }
 
@@ -453,13 +623,72 @@ class ProxyHealthManager {
    */
   startPingMonitoring() {
     setInterval(async () => {
-      const proxies = Array.from(this.healthStore.unhealthyProxies.keys());
-      for (const proxy of proxies) {
+      // Check a random sample of proxies, not all at once
+      const allProxies = [...this.healthStore.activeProxies];
+      
+      // Add some unhealthy proxies that might be ready for retry
+      const unhealthyReadyForRetry = Array.from(this.healthStore.unhealthyProxies.entries())
+        .filter(([proxy, data]) => {
+          return !this.healthStore.bannedProxies.has(proxy) && 
+                 (!data.nextRetryTime || data.nextRetryTime.getTime() <= Date.now());
+        })
+        .map(([proxy]) => proxy);
+      
+      allProxies.push(...unhealthyReadyForRetry);
+      
+      // Shuffle and take a subset
+      const shuffled = allProxies.sort(() => 0.5 - Math.random());
+      const samplesToCheck = shuffled.slice(0, Math.min(5, shuffled.length));
+      
+      for (const proxy of samplesToCheck) {
         if (!this.healthStore.bannedProxies.has(proxy)) {
           await this.checkProxyWithPing(proxy);
         }
       }
     }, this.config.pingInterval);
+  }
+  
+  /**
+   * Get the next proxy in rotation
+   * @returns {string|null} The next proxy to use or null if none available
+   */
+  getNextProxy() {
+    if (!this.healthStore.activeProxies.length) {
+      return null;
+    }
+    
+    // Update index
+    this.healthStore.activeProxyIndex = (this.healthStore.activeProxyIndex + 1) % this.healthStore.activeProxies.length;
+    
+    // Get proxy at current index
+    return this.healthStore.activeProxies[this.healthStore.activeProxyIndex];
+  }
+  
+  /**
+   * Add a new proxy to the rotation
+   * @param {string} proxyString - The proxy to add
+   */
+  addProxyToRotation(proxyString) {
+    if (!this.healthStore.activeProxies.includes(proxyString) && 
+        !this.healthStore.bannedProxies.has(proxyString)) {
+      this.healthStore.activeProxies.push(proxyString);
+      this.log(`Added proxy ${proxyString} to rotation`, 'info');
+      this.saveHealthData();
+      return true;
+    }
+    return false;
+  }
+  
+  /**
+   * Start the automatic proxy rotation
+   */
+  startProxyRotation() {
+    setInterval(() => {
+      if (this.healthStore.activeProxies.length > 1) {
+        const nextProxy = this.getNextProxy();
+        this.log(`Rotating to next proxy: ${nextProxy}`, 'info');
+      }
+    }, this.config.rotationInterval);
   }
 }
 
