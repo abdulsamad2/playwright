@@ -28,7 +28,7 @@ const mongoUri =
 
 // Middleware
 const allowedOrigins = [
-  "http://18.234.29.129", // Production
+  "http://34.204.86.74", // Production
   "http://localhost:5173", // Local development
 ];
 
