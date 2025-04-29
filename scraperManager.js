@@ -348,30 +348,25 @@ export class ScraperManager {
           { 
             $match: { 
               Skip_Scraping: { $ne: true },
-              // Ensure event has a valid URL
               url: { $exists: true, $ne: "" }
             } 
           },
-          // Add a random sorting
-          { $sample: { size: 5 } }, // Get 5 random events
-          // Project only needed fields
+          { $sample: { size: 5 } },
           { $project: { Event_ID: 1, url: 1 } }
         ]);
 
         if (randomEvent && randomEvent.length > 0) {
-          // Randomly select one from the 5 events
           const selectedEvent = randomEvent[Math.floor(Math.random() * randomEvent.length)];
           eventToUse = selectedEvent.Event_ID;
           if (LOG_LEVEL >= 2) {
             this.logWithTime(`Using random event ${eventToUse} for cookie refresh`, "debug");
           }
         } else {
-          throw new Error("No suitable events found in database for cookie refresh");
+          eventToUse = eventId; // Fallback to provided eventId
         }
       } catch (dbError) {
         this.logWithTime(`Error getting random event: ${dbError.message}`, "warning");
-        // If we can't get a random event, use the provided eventId as fallback
-        eventToUse = eventId;
+        eventToUse = eventId; // Fallback to provided eventId
       }
 
       const eventDoc = await Event.findOne({ Event_ID: eventToUse }).select("url").lean();
@@ -379,7 +374,7 @@ export class ScraperManager {
       const requestId = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
       const lastRefresh = this.headerRefreshTimestamps.get(eventToUse);
       
-      // Generate a new X-Forwarded-For and X-Request-Id for each request, even if using cached headers
+      // Generate a new X-Forwarded-For and X-Request-Id for each request
       const refreshedIpAndId = {
         'X-Forwarded-For': generateRandomIp(),
         'X-Request-Id': Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36)
@@ -388,93 +383,88 @@ export class ScraperManager {
       // Check for stale cached headers - enforce 20-minute refresh interval
       const effectiveExpirationTime = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL;
       
-      // Only refresh cookies/headers if they have expired or it's a subsequent request
+      // Only refresh cookies/headers if they have expired
       if (!lastRefresh || moment().diff(lastRefresh) > effectiveExpirationTime) {
-        // Only log at higher verbosity levels
         if (LOG_LEVEL >= 2) {
           this.logWithTime(`Refreshing headers for ${eventToUse}`, "debug");
         }
         
-        // Clear any stale headers from the cache for this event
+        // Clear any stale headers from the cache
         this.headersCache.delete(eventToUse);
         
-        // Get a random proxy for refreshing headers - use a different one for each request
+        // Try to get fresh headers from rotation pool first
+        if (this.headerRotationPool.length > 0) {
+          const headerIndex = Math.floor(Math.random() * this.headerRotationPool.length);
+          const cachedHeaders = {...this.headerRotationPool[headerIndex]};
+          
+          // Update dynamic anti-bot fields
+          if (cachedHeaders.headers) {
+            cachedHeaders.headers = {...cachedHeaders.headers, ...refreshedIpAndId};
+          }
+          
+          // Update timestamp but don't overwrite the original headers
+          this.headerRefreshTimestamps.set(eventToUse, moment());
+          return cachedHeaders;
+        }
+        
+        // Get a random proxy for refreshing headers
         const { proxy: cookieProxy } = this.proxyManager.getProxyForEvent(eventToUse);
         
         // Try to refresh headers with the proxy
         let capturedState = null;
         try {
-          // Initialize browser and page
-          const { context, page } = await this.initBrowser(cookieProxy);
-          
-          // Navigate to the event page
-          const url = `https://www.ticketmaster.com/event/${eventToUse}`;
-          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-          
-          // Wait for a short time to ensure page loads
-          await page.waitForTimeout(2000);
-          
-          // Reload the page to ensure fresh state
-          await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
-          
-          // Wait for additional time after reload
-          await page.waitForTimeout(2000);
-          
-          // Check for and handle any challenges
-          const challengePresent = await this.checkForTicketmasterChallenge(page);
-          if (challengePresent) {
-            await this.handleTicketmasterChallenge(page);
-          }
-          
-          // Simulate human behavior
-          await this.simulateHumanBehavior(page);
-          
-          // Capture cookies and fingerprint
-          capturedState = await this.captureCookies(page, this.capturedState?.fingerprint);
-          
-          // Don't close the page/context - keep them for reuse
+          capturedState = await refreshHeaders(eventToUse, cookieProxy);
         } catch (error) {
           this.logWithTime(`Error refreshing headers with proxy: ${error.message}`, "warning");
-          
-          // If this event fails, try another random event
+        }
+        
+        // If no valid state captured, try without proxy as last resort
+        if (!capturedState || !capturedState.cookies || capturedState.cookies.length < MIN_VALID_COOKIES) {
+          this.logWithTime(`Trying to refresh headers without proxy for ${eventToUse}`, "warning");
           try {
-            const alternativeEvent = await Event.aggregate([
-              { 
-                $match: { 
-                  Skip_Scraping: { $ne: true },
-                  url: { $exists: true, $ne: "" },
-                  Event_ID: { $ne: eventToUse } // Exclude the failed event
-                } 
-              },
-              { $sample: { size: 1 } }
-            ]);
-
-            if (alternativeEvent && alternativeEvent.length > 0) {
-              eventToUse = alternativeEvent[0].Event_ID;
-              this.logWithTime(`Retrying with alternative event ${eventToUse}`, "info");
-              
-              // Try again with the new event
-              const { context: newContext, page: newPage } = await this.initBrowser(cookieProxy);
-              const newUrl = `https://www.ticketmaster.com/event/${eventToUse}`;
-              await newPage.goto(newUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-              await newPage.waitForTimeout(2000);
-              await newPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
-              await newPage.waitForTimeout(2000);
-              
-              const newChallengePresent = await this.checkForTicketmasterChallenge(newPage);
-              if (newChallengePresent) {
-                await this.handleTicketmasterChallenge(newPage);
-              }
-              
-              await this.simulateHumanBehavior(newPage);
-              capturedState = await this.captureCookies(newPage, this.capturedState?.fingerprint);
-            }
-          } catch (retryError) {
-            this.logWithTime(`Error during retry with alternative event: ${retryError.message}`, "warning");
+            capturedState = await refreshHeaders(eventToUse);
+          } catch (error) {
+            this.logWithTime(`Error refreshing headers without proxy: ${error.message}`, "warning");
           }
         }
         
-        // Rest of the function remains the same...
+        if (capturedState && capturedState.cookies && capturedState.cookies.length >= MIN_VALID_COOKIES) {
+          // Build enhanced headers using the shared generator
+          const cookieString = capturedState.cookies
+            .map(c => `${c.name}=${c.value}`)
+            .join("; ");
+          const poolFp = randomFingerprint();
+          const mergedFp = { ...capturedState.fingerprint, ...poolFp };
+          // Generate varied headers
+          const enhanced = generateEnhancedHeaders(mergedFp, cookieString);
+          // Inject anti-bot fields
+          enhanced['Referer'] = refererUrl;
+          enhanced['X-Forwarded-For'] = refreshedIpAndId['X-Forwarded-For'];
+          enhanced['X-Request-Id'] = refreshedIpAndId['X-Request-Id'];
+          const standardizedHeaders = {
+            headers: enhanced,
+            cookies: capturedState.cookies,
+            fingerprint: mergedFp,
+            timestamp: Date.now()
+          };
+          
+          // Cache and rotate
+          this.headersCache.set(eventToUse, standardizedHeaders);
+          this.headerRefreshTimestamps.set(eventToUse, moment());
+          
+          // Add to rotation pool if not already present
+          if (!this.headerRotationPool.some(h => h.headers.Cookie === cookieString)) {
+            this.headerRotationPool.push(standardizedHeaders);
+            if (this.headerRotationPool.length > 10) this.headerRotationPool.shift();
+          }
+          
+          return standardizedHeaders;
+        } else {
+          this.logWithTime(
+            `Failed to get valid cookies for ${eventToUse}`,
+            "warning"
+          );
+        }
       } else {
         // Use cached headers but refresh dynamic fields
         const cachedHeaders = this.headersCache.get(eventToUse);
