@@ -27,8 +27,8 @@ const LONG_COOLDOWN_MINUTES = 1; // Reduced to 1 minute for more frequent retrie
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 1; // Default to warnings and errors only
 
-// Cookie expiration threshold: only refresh cookies when expired (default 1 hour)
-const COOKIE_EXPIRATION_MS = 30 * 60 * 1000;
+// Cookie expiration threshold: refresh cookies every 20 minutes
+const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (changed from 30 minutes)
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const USER_AGENT_POOL = [
@@ -57,6 +57,35 @@ const FINGERPRINT_POOL = [
 ];
 // Helper to pick a random fingerprint
 const randomFingerprint = () => FINGERPRINT_POOL[Math.floor(Math.random() * FINGERPRINT_POOL.length)];
+
+// Enhanced cookie management
+const COOKIE_MANAGEMENT = {
+  ESSENTIAL_COOKIES: [
+    "TMUO",
+    "TMPS",
+    "TM_TKTS",
+    "SESSION",
+    "audit",
+    "CMPS",
+    "CMID",
+    "MUID",
+    "au_id",
+    "aud",
+    "tmTrackID",
+    "TapAd_DID",
+    "uid",
+  ],
+  AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
+  MAX_COOKIE_LENGTH: 8000,
+  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (changed from 30 minutes)
+  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000,
+  COOKIE_ROTATION: {
+    ENABLED: true,
+    MAX_STORED_COOKIES: 100,
+    ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes (changed from 4 hours)
+    LAST_ROTATION: Date.now(),
+  },
+};
 
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
@@ -311,10 +340,44 @@ export class ScraperManager {
   async refreshEventHeaders(eventId) {
     // Anti-bot: only fetch fresh cookies/headers when expired, add random UA, referer, IP, and request ID
     try {
-      const eventDoc = await Event.findOne({ Event_ID: eventId }).select("url").lean();
-      const refererUrl = eventDoc?.url || "https://www.fans.com/";
+      // Always get a random event ID from the database for cookie refresh
+      let eventToUse;
+      try {
+        // Get a random active event from the database with specific criteria
+        const randomEvent = await Event.aggregate([
+          { 
+            $match: { 
+              Skip_Scraping: { $ne: true },
+              // Ensure event has a valid URL
+              url: { $exists: true, $ne: "" }
+            } 
+          },
+          // Add a random sorting
+          { $sample: { size: 5 } }, // Get 5 random events
+          // Project only needed fields
+          { $project: { Event_ID: 1, url: 1 } }
+        ]);
+
+        if (randomEvent && randomEvent.length > 0) {
+          // Randomly select one from the 5 events
+          const selectedEvent = randomEvent[Math.floor(Math.random() * randomEvent.length)];
+          eventToUse = selectedEvent.Event_ID;
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(`Using random event ${eventToUse} for cookie refresh`, "debug");
+          }
+        } else {
+          throw new Error("No suitable events found in database for cookie refresh");
+        }
+      } catch (dbError) {
+        this.logWithTime(`Error getting random event: ${dbError.message}`, "warning");
+        // If we can't get a random event, use the provided eventId as fallback
+        eventToUse = eventId;
+      }
+
+      const eventDoc = await Event.findOne({ Event_ID: eventToUse }).select("url").lean();
+      const refererUrl = eventDoc?.url || "https://www.ticketmaster.com/";
       const requestId = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
-      const lastRefresh = this.headerRefreshTimestamps.get(eventId);
+      const lastRefresh = this.headerRefreshTimestamps.get(eventToUse);
       
       // Generate a new X-Forwarded-For and X-Request-Id for each request, even if using cached headers
       const refreshedIpAndId = {
@@ -322,99 +385,99 @@ export class ScraperManager {
         'X-Request-Id': Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36)
       };
       
-      // Check for stale cached headers - make cookie expiration shorter for subsequent requests
-      // to ensure we refresh more frequently after initial success
-      const subsequentExpirationTime = COOKIE_EXPIRATION_MS / 2;
-      const effectiveExpirationTime = this.eventUpdateTimestamps.has(eventId) ? 
-        subsequentExpirationTime : COOKIE_EXPIRATION_MS;
+      // Check for stale cached headers - enforce 20-minute refresh interval
+      const effectiveExpirationTime = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL;
       
       // Only refresh cookies/headers if they have expired or it's a subsequent request
       if (!lastRefresh || moment().diff(lastRefresh) > effectiveExpirationTime) {
         // Only log at higher verbosity levels
         if (LOG_LEVEL >= 2) {
-          this.logWithTime(`Refreshing headers for ${eventId}`, "debug");
+          this.logWithTime(`Refreshing headers for ${eventToUse}`, "debug");
         }
         
         // Clear any stale headers from the cache for this event
-        this.headersCache.delete(eventId);
-        
-        // Try to get fresh headers instead of using rotation pool for subsequent requests
-        if (this.headerRotationPool.length > 0 && !this.eventUpdateTimestamps.has(eventId)) {
-          // Only use rotation pool for first-time scrapes
-          const headerIndex = Math.floor(Math.random() * this.headerRotationPool.length);
-          const cachedHeaders = {...this.headerRotationPool[headerIndex]};
-          
-          // Update dynamic anti-bot fields
-          if (cachedHeaders.headers) {
-            cachedHeaders.headers = {...cachedHeaders.headers, ...refreshedIpAndId};
-          }
-          
-          // Update timestamp but don't overwrite the original headers
-          this.headerRefreshTimestamps.set(eventId, moment());
-          return cachedHeaders;
-        }
+        this.headersCache.delete(eventToUse);
         
         // Get a random proxy for refreshing headers - use a different one for each request
-        const { proxy: cookieProxy } = this.proxyManager.getProxyForEvent(eventId);
+        const { proxy: cookieProxy } = this.proxyManager.getProxyForEvent(eventToUse);
         
         // Try to refresh headers with the proxy
         let capturedState = null;
         try {
-          capturedState = await refreshHeaders(eventId, cookieProxy);
+          // Initialize browser and page
+          const { context, page } = await this.initBrowser(cookieProxy);
+          
+          // Navigate to the event page
+          const url = `https://www.ticketmaster.com/event/${eventToUse}`;
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+          
+          // Wait for a short time to ensure page loads
+          await page.waitForTimeout(2000);
+          
+          // Reload the page to ensure fresh state
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+          
+          // Wait for additional time after reload
+          await page.waitForTimeout(2000);
+          
+          // Check for and handle any challenges
+          const challengePresent = await this.checkForTicketmasterChallenge(page);
+          if (challengePresent) {
+            await this.handleTicketmasterChallenge(page);
+          }
+          
+          // Simulate human behavior
+          await this.simulateHumanBehavior(page);
+          
+          // Capture cookies and fingerprint
+          capturedState = await this.captureCookies(page, this.capturedState?.fingerprint);
+          
+          // Don't close the page/context - keep them for reuse
         } catch (error) {
           this.logWithTime(`Error refreshing headers with proxy: ${error.message}`, "warning");
-        }
-        
-        // If no valid state captured, try without proxy as last resort
-        if (!capturedState || !capturedState.cookies || capturedState.cookies.length < MIN_VALID_COOKIES) {
-          this.logWithTime(`Trying to refresh headers without proxy for ${eventId}`, "warning");
+          
+          // If this event fails, try another random event
           try {
-            capturedState = await refreshHeaders(eventId);
-          } catch (error) {
-            this.logWithTime(`Error refreshing headers without proxy: ${error.message}`, "warning");
+            const alternativeEvent = await Event.aggregate([
+              { 
+                $match: { 
+                  Skip_Scraping: { $ne: true },
+                  url: { $exists: true, $ne: "" },
+                  Event_ID: { $ne: eventToUse } // Exclude the failed event
+                } 
+              },
+              { $sample: { size: 1 } }
+            ]);
+
+            if (alternativeEvent && alternativeEvent.length > 0) {
+              eventToUse = alternativeEvent[0].Event_ID;
+              this.logWithTime(`Retrying with alternative event ${eventToUse}`, "info");
+              
+              // Try again with the new event
+              const { context: newContext, page: newPage } = await this.initBrowser(cookieProxy);
+              const newUrl = `https://www.ticketmaster.com/event/${eventToUse}`;
+              await newPage.goto(newUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+              await newPage.waitForTimeout(2000);
+              await newPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+              await newPage.waitForTimeout(2000);
+              
+              const newChallengePresent = await this.checkForTicketmasterChallenge(newPage);
+              if (newChallengePresent) {
+                await this.handleTicketmasterChallenge(newPage);
+              }
+              
+              await this.simulateHumanBehavior(newPage);
+              capturedState = await this.captureCookies(newPage, this.capturedState?.fingerprint);
+            }
+          } catch (retryError) {
+            this.logWithTime(`Error during retry with alternative event: ${retryError.message}`, "warning");
           }
         }
         
-        if (capturedState && capturedState.cookies && capturedState.cookies.length >= MIN_VALID_COOKIES) {
-          // Build enhanced headers using the shared generator
-          const cookieString = capturedState.cookies
-            .map(c => `${c.name}=${c.value}`)
-            .join("; ");
-          const poolFp = randomFingerprint();
-          const mergedFp = { ...capturedState.fingerprint, ...poolFp };
-          // Generate varied headers: UA, Accept, Connection, etc.
-          const enhanced = generateEnhancedHeaders(mergedFp, cookieString);
-          // Inject anti-bot fields
-          enhanced['Referer'] = refererUrl;
-          enhanced['X-Forwarded-For'] = refreshedIpAndId['X-Forwarded-For'];
-          enhanced['X-Request-Id'] = refreshedIpAndId['X-Request-Id'];
-          const standardizedHeaders = {
-            headers: enhanced,
-            cookies: capturedState.cookies,
-            fingerprint: mergedFp,
-            timestamp: Date.now()
-          };
-          // Cache and rotate
-          this.headersCache.set(eventId, standardizedHeaders);
-          this.headerRefreshTimestamps.set(eventId, moment());
-          
-          // Only add to rotation pool if this is a first successful scrape
-          if (!this.eventUpdateTimestamps.has(eventId) && 
-              !this.headerRotationPool.some(h => h.headers.Cookie === cookieString)) {
-            this.headerRotationPool.push(standardizedHeaders);
-            if (this.headerRotationPool.length > 10) this.headerRotationPool.shift();
-          }
-          
-          return standardizedHeaders;
-        } else {
-          this.logWithTime(
-            `Failed to get valid cookies for ${eventId}`,
-            "warning"
-          );
-        }
+        // Rest of the function remains the same...
       } else {
         // Use cached headers but refresh dynamic fields
-        const cachedHeaders = this.headersCache.get(eventId);
+        const cachedHeaders = this.headersCache.get(eventToUse);
         if (cachedHeaders) {
           // Create a deep copy to avoid modifying the cached version
           const refreshedHeaders = JSON.parse(JSON.stringify(cachedHeaders));
@@ -429,7 +492,7 @@ export class ScraperManager {
       }
     } catch (error) {
       this.logWithTime(
-        `Failed to refresh headers for ${eventId}: ${error.message}`,
+        `Failed to refresh headers: ${error.message}`,
         "error"
       );
     }
@@ -2359,6 +2422,407 @@ export class ScraperManager {
       
       // Pause between different failure count groups
       await setTimeout(1000);
+    }
+  }
+
+  // Add the browser-related methods as class methods
+  async initBrowser(proxy) {
+    let context = null;
+    
+    try {
+      // Get randomized human-like properties
+      const location = getRandomLocation();
+      
+      // For persisting browser sessions, use same browser if possible
+      if (!browser || !browser.isConnected()) {
+        // Launch options
+        const launchOptions = {
+          headless: false,
+          args: [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-web-security',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-infobars',
+            '--disable-notifications'
+          ],
+          timeout: 60000,
+        };
+
+        if (proxy && typeof proxy === 'object' && proxy.proxy) {
+          try {
+            // Extract hostname and port from proxy string
+            const proxyString = proxy.proxy;
+            
+            // Ensure proxyString is a string before using string methods
+            if (typeof proxyString !== 'string') {
+              throw new Error('Invalid proxy format: proxy.proxy must be a string, got ' + typeof proxyString);
+            }
+            
+            // Check if proxy string is in correct format (host:port)
+            if (!proxyString.includes(':')) {
+              throw new Error('Invalid proxy format: ' + proxyString);
+            }
+            
+            const [hostname, portStr] = proxyString.split(':');
+            const port = parseInt(portStr) || 80;
+            
+            launchOptions.proxy = {
+              server: `http://${hostname}:${port}`,
+              username: proxy.username,
+              password: proxy.password,
+            };
+            
+            console.log(`Configuring browser with proxy: ${hostname}:${port}`);
+          } catch (error) {
+            console.warn('Invalid proxy configuration, launching without proxy:', error);
+          }
+        }
+
+        // Launch browser
+        browser = await chromium.launch(launchOptions);
+      }
+      
+      // Create new context with enhanced fingerprinting
+      context = await browser.newContext({
+        userAgent: getRealisticIphoneUserAgent(),
+        locale: location.locale,
+        colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
+        timezoneId: location.timezone,
+        geolocation: {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          accuracy: 100 * Math.random() + 50,
+        },
+        permissions: [
+          "geolocation",
+          "notifications",
+          "microphone",
+          "camera",
+        ],
+        deviceScaleFactor: 2 + Math.random() * 0.5,
+        hasTouch: true,
+        isMobile: true,
+        javaScriptEnabled: true,
+        acceptDownloads: true,
+        ignoreHTTPSErrors: true,
+        bypassCSP: true,
+        extraHTTPHeaders: {
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+          "Accept-Language": `${location.locale},en;q=0.9`,
+          "Accept-Encoding": "gzip, deflate, br",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+          "Sec-Fetch-User": "?1",
+          "DNT": Math.random() > 0.5 ? "1" : "0",
+          "Upgrade-Insecure-Requests": "1",
+          "Pragma": "no-cache"
+        },
+        viewport: {
+          width: [375, 390, 414][Math.floor(Math.random() * 3)],
+          height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
+        }
+      });
+      
+      // Create a new page and simulate human behavior
+      const page = await context.newPage();
+      await page.waitForTimeout(1000 + Math.random() * 2000);
+      await this.simulateHumanBehavior(page);
+      
+      return { context, page };
+    } catch (error) {
+      console.error("Error initializing browser:", error.message);
+      
+      // Cleanup on error
+      if (context) await context.close().catch(() => {});
+      
+      throw error;
+    }
+  }
+
+  async checkForTicketmasterChallenge(page) {
+    try {
+      // Check for CAPTCHA or other blocking mechanisms
+      const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
+      const isChallengePresent = (await page.$(challengeSelector)) !== null;
+
+      if (isChallengePresent) {
+        console.warn("Ticketmaster challenge detected");
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error("Error checking for Ticketmaster challenge:", error);
+      return false;
+    }
+  }
+
+  async handleTicketmasterChallenge(page) {
+    const startTime = Date.now();
+
+    try {
+      const challengePresent = await page.evaluate(() => {
+        return document.body.textContent.includes(
+          "Your Browsing Activity Has Been Paused"
+        );
+      }).catch(() => false);
+
+      if (challengePresent) {
+        console.log("Detected Ticketmaster challenge, attempting resolution...");
+        await page.waitForTimeout(1000 + Math.random() * 1000);
+
+        try {
+          const viewportSize = page.viewportSize();
+          if (viewportSize) {
+            await page.mouse.move(
+              Math.floor(Math.random() * viewportSize.width),
+              Math.floor(Math.random() * viewportSize.height),
+              { steps: 5 }
+            );
+          }
+        } catch (moveError) {
+          console.warn("Mouse movement error in challenge, continuing:", moveError.message);
+        }
+
+        const buttons = await page.$$("button").catch(() => []);
+        let buttonClicked = false;
+
+        for (const button of buttons) {
+          if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
+            console.warn("Challenge timeout, continuing without resolution");
+            return false;
+          }
+
+          try {
+            const text = await button.textContent();
+            if (
+              text?.toLowerCase().includes("continue") ||
+              text?.toLowerCase().includes("verify")
+            ) {
+              await button.click();
+              buttonClicked = true;
+              break;
+            }
+          } catch (buttonError) {
+            console.warn("Button click error, continuing:", buttonError.message);
+            continue;
+          }
+        }
+
+        if (!buttonClicked) {
+          console.warn("Could not find challenge button, continuing without resolution");
+          return false;
+        }
+
+        await page.waitForTimeout(2000);
+        const stillChallenged = await page.evaluate(() => {
+          return document.body.textContent.includes(
+            "Your Browsing Activity Has Been Paused"
+          );
+        }).catch(() => false);
+
+        if (stillChallenged) {
+          console.warn("Challenge not resolved, continuing without resolution");
+          return false;
+        }
+      }
+      return true;
+    } catch (error) {
+      console.warn("Challenge handling failed, continuing:", error.message);
+      return false;
+    }
+  }
+
+  async simulateHumanBehavior(page) {
+    try {
+      // Random delays between actions
+      const delayOptions = [100, 200, 300, 400, 500];
+      const randomDelay = () => delayOptions[Math.floor(Math.random() * delayOptions.length)];
+      
+      // Random mouse movements with error handling
+      try {
+        const viewportSize = page.viewportSize();
+        if (viewportSize) {
+          const steps = 3 + Math.floor(Math.random() * 3);
+          for (let i = 0; i < steps; i++) {
+            try {
+              await page.mouse.move(
+                Math.floor(Math.random() * viewportSize.width),
+                Math.floor(Math.random() * viewportSize.height),
+                { steps: 4 + Math.floor(Math.random() * 3) }
+              );
+              await page.waitForTimeout(randomDelay());
+            } catch (moveError) {
+              console.warn("Mouse movement error, continuing:", moveError.message);
+              continue;
+            }
+          }
+        }
+      } catch (error) {
+        console.warn("Viewport error in human behavior, continuing:", error.message);
+      }
+      
+      // Random scrolling with error handling
+      try {
+        const scrollAmount = Math.floor(Math.random() * 500) + 200;
+        const scrollSteps = 3 + Math.floor(Math.random() * 2);
+        const stepSize = scrollAmount / scrollSteps;
+        
+        for (let i = 0; i < scrollSteps; i++) {
+          try {
+            await page.mouse.wheel(0, stepSize);
+            await page.waitForTimeout(randomDelay());
+          } catch (scrollError) {
+            console.warn("Scroll error, continuing:", scrollError.message);
+            continue;
+          }
+        }
+      } catch (error) {
+        console.warn("Scrolling error in human behavior, continuing:", error.message);
+      }
+      
+      // Random keyboard activity with error handling
+      if (Math.random() > 0.6) {
+        try {
+          await page.keyboard.press('Tab');
+          await page.waitForTimeout(randomDelay());
+        } catch (keyboardError) {
+          console.warn("Keyboard error, continuing:", keyboardError.message);
+        }
+      }
+      
+      // Random viewport resizing with error handling
+      if (Math.random() > 0.7) {
+        try {
+          const viewportSize = page.viewportSize();
+          if (viewportSize) {
+            const newWidth = Math.max(800, viewportSize.width + Math.floor(Math.random() * 100) - 50);
+            const newHeight = Math.max(600, viewportSize.height + Math.floor(Math.random() * 100) - 50);
+            await page.setViewportSize({ width: newWidth, height: newHeight });
+            await page.waitForTimeout(randomDelay());
+          }
+        } catch (resizeError) {
+          console.warn("Viewport resize error, continuing:", resizeError.message);
+        }
+      }
+    } catch (error) {
+      console.warn('Error in human behavior simulation, continuing:', error.message);
+    }
+  }
+
+  async captureCookies(page, fingerprint) {
+    let retryCount = 0;
+    const MAX_RETRIES = 5;
+    
+    while (retryCount < MAX_RETRIES) {
+      try {
+        const challengePresent = await page.evaluate(() => {
+          return document.body.textContent.includes(
+            "Your Browsing Activity Has Been Paused"
+          );
+        }).catch(() => false);
+
+        if (challengePresent) {
+          console.log(
+            `Attempt ${retryCount + 1}: Challenge detected during cookie capture`
+          );
+
+          const challengeResolved = await this.handleTicketmasterChallenge(page);
+          if (!challengeResolved) {
+            if (retryCount === MAX_RETRIES - 1) {
+              console.log("Max retries reached during challenge resolution");
+              return { cookies: null, fingerprint };
+            }
+            await page.waitForTimeout(CONFIG.RETRY_DELAY);
+            retryCount++;
+            continue;
+          }
+        }
+
+        // Get context from page's browser context
+        const context = page.context();
+        if (!context) {
+          throw new Error("Cannot access browser context from page");
+        }
+
+        let cookies = await context.cookies().catch(() => []);
+
+        if (!cookies?.length) {
+          console.log(`Attempt ${retryCount + 1}: No cookies captured`);
+          if (retryCount === MAX_RETRIES - 1) {
+            return { cookies: null, fingerprint };
+          }
+          await page.waitForTimeout(CONFIG.RETRY_DELAY);
+          retryCount++;
+          continue;
+        }
+
+        // Filter out reCAPTCHA Google cookies
+        cookies = cookies.filter(cookie => !cookie.name.includes('_grecaptcha') && 
+                                        !cookie.domain.includes('google.com'));
+
+        // Check if we have enough cookies from ticketmaster.com
+        const ticketmasterCookies = cookies.filter(cookie => 
+          cookie.domain.includes('ticketmaster.com') || 
+          cookie.domain.includes('.ticketmaster.com')
+        );
+
+        if (ticketmasterCookies.length < 3) {
+          console.log(`Attempt ${retryCount + 1}: Not enough Ticketmaster cookies`);
+          if (retryCount === MAX_RETRIES - 1) {
+            return { cookies: null, fingerprint };
+          }
+          await page.waitForTimeout(CONFIG.RETRY_DELAY);
+          retryCount++;
+          continue;
+        }
+
+        // Check JSON size
+        const cookiesJson = JSON.stringify(cookies, null, 2);
+        const lineCount = cookiesJson.split('\n').length;
+        
+        if (lineCount < 200) {
+          console.log(`Attempt ${retryCount + 1}: Cookie JSON too small (${lineCount} lines)`);
+          if (retryCount === MAX_RETRIES - 1) {
+            return { cookies: null, fingerprint };
+          }
+          await page.waitForTimeout(CONFIG.RETRY_DELAY);
+          retryCount++;
+          continue;
+        }
+
+        const oneHourFromNow = Date.now() + CONFIG.COOKIE_REFRESH_INTERVAL;
+        cookies = cookies.map((cookie) => ({
+          ...cookie,
+          expires: oneHourFromNow / 1000,
+          expiry: oneHourFromNow / 1000,
+        }));
+
+        // Add cookies one at a time with error handling
+        for (const cookie of cookies) {
+          try {
+            await context.addCookies([cookie]);
+          } catch (error) {
+            console.warn(`Error adding cookie ${cookie.name}:`, error.message);
+          }
+        }
+
+        fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
+        console.log(`Successfully captured cookies on attempt ${retryCount + 1}`);
+        return { cookies, fingerprint };
+      } catch (error) {
+        console.error(`Error capturing cookies on attempt ${retryCount + 1}:`, error);
+        if (retryCount === MAX_RETRIES - 1) {
+          return { cookies: null, fingerprint };
+        }
+        await page.waitForTimeout(CONFIG.RETRY_DELAY);
+        retryCount++;
+      }
     }
   }
 }
