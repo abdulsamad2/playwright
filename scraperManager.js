@@ -310,60 +310,72 @@ export class ScraperManager {
 
   async refreshEventHeaders(eventId) {
     // Anti-bot: only fetch fresh cookies/headers when expired, add random UA, referer, IP, and request ID
-    const eventDoc = await Event.findOne({ Event_ID: eventId }).select("url").lean();
-    const refererUrl = eventDoc?.url || "https://www.fans.com/";
-    const requestId = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
-    const lastRefresh = this.headerRefreshTimestamps.get(eventId);
-    // Only refresh cookies/headers if they have expired
-    if (!lastRefresh || moment().diff(lastRefresh) > COOKIE_EXPIRATION_MS) {
-      try {
+    try {
+      const eventDoc = await Event.findOne({ Event_ID: eventId }).select("url").lean();
+      const refererUrl = eventDoc?.url || "https://www.fans.com/";
+      const requestId = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
+      const lastRefresh = this.headerRefreshTimestamps.get(eventId);
+      
+      // Generate a new X-Forwarded-For and X-Request-Id for each request, even if using cached headers
+      const refreshedIpAndId = {
+        'X-Forwarded-For': generateRandomIp(),
+        'X-Request-Id': Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36)
+      };
+      
+      // Check for stale cached headers - make cookie expiration shorter for subsequent requests
+      // to ensure we refresh more frequently after initial success
+      const subsequentExpirationTime = COOKIE_EXPIRATION_MS / 2;
+      const effectiveExpirationTime = this.eventUpdateTimestamps.has(eventId) ? 
+        subsequentExpirationTime : COOKIE_EXPIRATION_MS;
+      
+      // Only refresh cookies/headers if they have expired or it's a subsequent request
+      if (!lastRefresh || moment().diff(lastRefresh) > effectiveExpirationTime) {
         // Only log at higher verbosity levels
         if (LOG_LEVEL >= 2) {
           this.logWithTime(`Refreshing headers for ${eventId}`, "debug");
         }
         
-        // New: Check if we have successful headers in the rotation pool first
-        if (this.headerRotationPool.length > 0) {
-          // Use headers that have been successful recently
+        // Clear any stale headers from the cache for this event
+        this.headersCache.delete(eventId);
+        
+        // Try to get fresh headers instead of using rotation pool for subsequent requests
+        if (this.headerRotationPool.length > 0 && !this.eventUpdateTimestamps.has(eventId)) {
+          // Only use rotation pool for first-time scrapes
           const headerIndex = Math.floor(Math.random() * this.headerRotationPool.length);
-          const cachedHeaders = this.headerRotationPool[headerIndex];
+          const cachedHeaders = {...this.headerRotationPool[headerIndex]};
+          
+          // Update dynamic anti-bot fields
+          if (cachedHeaders.headers) {
+            cachedHeaders.headers = {...cachedHeaders.headers, ...refreshedIpAndId};
+          }
           
           // Update timestamp but don't overwrite the original headers
           this.headerRefreshTimestamps.set(eventId, moment());
           return cachedHeaders;
         }
         
-        let capturedState;
-        // Rotate proxies to fetch fresh cookies; skip proxies that result in no cookies (e.g. challenge pages)
-        for (let attempt = 0; attempt < PROXY_ROTATION_ATTEMPTS; attempt++) {
-          const { proxyAgent: cookieProxyAgent, proxy: cookieProxy } = this.proxyManager.getProxyForBatch([eventId]);
-          try {
-            capturedState = await refreshHeaders(eventId, cookieProxy);
-          } catch (e) {
-            capturedState = null;
-          }
-          // If we got a valid cookie set (not a challenge), stop rotating
-          if (capturedState && capturedState.cookies && capturedState.cookies.length >= MIN_VALID_COOKIES) {
-            break;
-          }
-          // Otherwise blacklist proxy and retry
-          this.proxyManager.blacklistCurrentProxy(eventId);
-          this.logWithTime(`Proxy rotation (attempt ${attempt + 1}) failed to fetch cookies for ${eventId}, rotating proxy`, "warning");
-        }
-        // If still no capturedState, try without proxy as last resort
-        if (!capturedState) {
-          capturedState = await refreshHeaders(eventId);
+        // Get a random proxy for refreshing headers - use a different one for each request
+        const { proxy: cookieProxy } = this.proxyManager.getProxyForEvent(eventId);
+        
+        // Try to refresh headers with the proxy
+        let capturedState = null;
+        try {
+          capturedState = await refreshHeaders(eventId, cookieProxy);
+        } catch (error) {
+          this.logWithTime(`Error refreshing headers with proxy: ${error.message}`, "warning");
         }
         
-        if (capturedState) {
-          // Only proceed if we have a valid cookies set (avoid challenge/bot pages)
-          if (!capturedState.cookies || capturedState.cookies.length < MIN_VALID_COOKIES) {
-            this.logWithTime(
-              `Skipping header refresh for ${eventId}: invalid or insufficient cookies`,
-              "warning"
-            );
-            return null;
+        // If no valid state captured, try without proxy as last resort
+        if (!capturedState || !capturedState.cookies || capturedState.cookies.length < MIN_VALID_COOKIES) {
+          this.logWithTime(`Trying to refresh headers without proxy for ${eventId}`, "warning");
+          try {
+            capturedState = await refreshHeaders(eventId);
+          } catch (error) {
+            this.logWithTime(`Error refreshing headers without proxy: ${error.message}`, "warning");
           }
+        }
+        
+        if (capturedState && capturedState.cookies && capturedState.cookies.length >= MIN_VALID_COOKIES) {
           // Build enhanced headers using the shared generator
           const cookieString = capturedState.cookies
             .map(c => `${c.name}=${c.value}`)
@@ -374,31 +386,90 @@ export class ScraperManager {
           const enhanced = generateEnhancedHeaders(mergedFp, cookieString);
           // Inject anti-bot fields
           enhanced['Referer'] = refererUrl;
-          enhanced['X-Forwarded-For'] = generateRandomIp();
-          enhanced['X-Request-Id'] = requestId;
+          enhanced['X-Forwarded-For'] = refreshedIpAndId['X-Forwarded-For'];
+          enhanced['X-Request-Id'] = refreshedIpAndId['X-Request-Id'];
           const standardizedHeaders = {
             headers: enhanced,
             cookies: capturedState.cookies,
             fingerprint: mergedFp,
+            timestamp: Date.now()
           };
           // Cache and rotate
           this.headersCache.set(eventId, standardizedHeaders);
           this.headerRefreshTimestamps.set(eventId, moment());
-          if (!this.headerRotationPool.some(h => h.headers.Cookie === cookieString)) {
+          
+          // Only add to rotation pool if this is a first successful scrape
+          if (!this.eventUpdateTimestamps.has(eventId) && 
+              !this.headerRotationPool.some(h => h.headers.Cookie === cookieString)) {
             this.headerRotationPool.push(standardizedHeaders);
             if (this.headerRotationPool.length > 10) this.headerRotationPool.shift();
           }
+          
           return standardizedHeaders;
+        } else {
+          this.logWithTime(
+            `Failed to get valid cookies for ${eventId}`,
+            "warning"
+          );
         }
-      } catch (error) {
-        this.logWithTime(
-          `Failed to refresh headers for ${eventId}: ${error.message}`,
-          "error"
-        );
+      } else {
+        // Use cached headers but refresh dynamic fields
+        const cachedHeaders = this.headersCache.get(eventId);
+        if (cachedHeaders) {
+          // Create a deep copy to avoid modifying the cached version
+          const refreshedHeaders = JSON.parse(JSON.stringify(cachedHeaders));
+          
+          // Update dynamic anti-bot fields
+          if (refreshedHeaders.headers) {
+            refreshedHeaders.headers = {...refreshedHeaders.headers, ...refreshedIpAndId};
+          }
+          
+          return refreshedHeaders;
+        }
       }
+    } catch (error) {
+      this.logWithTime(
+        `Failed to refresh headers for ${eventId}: ${error.message}`,
+        "error"
+      );
     }
 
-    return this.headersCache.get(eventId);
+    // As a fallback, try to use any previously cached headers
+    const cachedHeaders = this.headersCache.get(eventId);
+    if (cachedHeaders) {
+      // Update dynamic anti-bot fields here too
+      const refreshedHeaders = JSON.parse(JSON.stringify(cachedHeaders));
+      refreshedHeaders.headers['X-Forwarded-For'] = generateRandomIp();
+      refreshedHeaders.headers['X-Request-Id'] = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
+      return refreshedHeaders;
+    }
+    
+    // If all else fails, try to use headers from rotation pool
+    if (this.headerRotationPool.length > 0) {
+      const headerIndex = Math.floor(Math.random() * this.headerRotationPool.length);
+      const poolHeaders = JSON.parse(JSON.stringify(this.headerRotationPool[headerIndex]));
+      
+      // Update dynamic anti-bot fields
+      if (poolHeaders.headers) {
+        poolHeaders.headers['X-Forwarded-For'] = generateRandomIp();
+        poolHeaders.headers['X-Request-Id'] = Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36);
+      }
+      
+      return poolHeaders;
+    }
+    
+    // Ultimate fallback: generate basic headers
+    this.logWithTime(`Using fallback headers for ${eventId}`, "warning");
+    return {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://www.ticketmaster.com/',
+        'X-Forwarded-For': generateRandomIp(),
+        'X-Request-Id': Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36)
+      }
+    };
   }
 
   async resetCookiesAndHeaders() {
@@ -1356,10 +1427,55 @@ export class ScraperManager {
     try {
       sharedHeaders = await this.refreshEventHeaders(validEventDetails[0].eventId);
       if (!sharedHeaders) {
-        throw new Error("Failed to obtain shared headers for batch");
+        this.logWithTime("Primary header retrieval failed, trying alternative events", "warning");
+        
+        // Try up to 3 other events in case the first one fails
+        for (let i = 1; i < Math.min(validEventDetails.length, 4); i++) {
+          try {
+            sharedHeaders = await this.refreshEventHeaders(validEventDetails[i].eventId);
+            if (sharedHeaders) {
+              this.logWithTime(`Successfully obtained headers from alternative event ${validEventDetails[i].eventId}`, "info");
+              break;
+            }
+          } catch (err) {
+            this.logWithTime(`Alternative header attempt ${i} failed: ${err.message}`, "warning");
+          }
+        }
+        
+        // If still no headers, create basic fallback headers
+        if (!sharedHeaders) {
+          this.logWithTime("Creating fallback headers for batch", "warning");
+          sharedHeaders = {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.5',
+              'Referer': 'https://www.ticketmaster.com/',
+              'X-Forwarded-For': generateRandomIp(),
+              'X-Request-Id': Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36)
+            },
+            cookies: [],
+            fingerprint: {}
+          };
+        }
       }
     } catch (error) {
       this.logWithTime(`Failed to obtain shared headers for batch: ${error.message}`, "error");
+      
+      // Create emergency fallback headers instead of failing the whole batch
+      this.logWithTime("Creating emergency fallback headers after error", "warning");
+      sharedHeaders = {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Referer': 'https://www.ticketmaster.com/',
+          'X-Forwarded-For': generateRandomIp(),
+          'X-Request-Id': Math.random().toString(36).substring(2,10) + "-" + Date.now().toString(36)
+        },
+        cookies: [],
+        fingerprint: {}
+      };
     }
     
     // Process domains in parallel for better efficiency
@@ -1369,8 +1485,13 @@ export class ScraperManager {
       if (domain !== 'default' && domainEvents.length > 0) {
         try {
           domainHeaders = await this.refreshEventHeaders(domainEvents[0]);
+          if (!domainHeaders) {
+            // Fall back to shared headers
+            domainHeaders = sharedHeaders;
+          }
         } catch (error) {
           // Fall back to shared headers
+          this.logWithTime(`Failed to get domain-specific headers: ${error.message}`, "warning");
           domainHeaders = sharedHeaders;
         }
       }
