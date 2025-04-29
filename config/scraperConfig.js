@@ -4,7 +4,7 @@ import { cpus } from "os";
 export default {
   // Time limits
   MAX_UPDATE_INTERVAL: 120000, // Strict 2-minute update requirement
-  SCRAPE_TIMEOUT: 30000, // Timeout for each scrape operation
+  SCRAPE_TIMEOUT: 45000, // Timeout for each scrape operation (increased from 30000)
   MIN_TIME_BETWEEN_EVENT_SCRAPES: 10000, // Minimum time between scrapes of the same event
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
   
@@ -13,7 +13,7 @@ export default {
   BATCH_SIZE: Math.max(Math.floor(cpus().length * 0.9) * 2, 10), // Dynamic batch size based on CPU
   
   // Retry settings
-  MAX_RETRIES: 3,
+  MAX_RETRIES: 5, // Increased from 3
   RETRY_BACKOFF_MS: 5000, // Base backoff time for retries
   
   // Batch processing

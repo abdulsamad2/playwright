@@ -14,8 +14,8 @@ class ProxyManager {
     this.logger = logger;
     this.proxyUsage = new Map(); // Maps proxy IP to set of eventIds using it
     this.eventToProxy = new Map(); // Maps eventId to assigned proxy
-    this.MAX_EVENTS_PER_PROXY = 1; // Ensuring each event gets a dedicated proxy
-    this.BATCH_SIZE = 3; // Maximum batch size
+    this.MAX_EVENTS_PER_PROXY = 2; // Increased from 1 to allow more events per proxy
+    this.BATCH_SIZE = 25; // Significantly increased for maximum batch throughput
     this.proxies = [...proxyArray.proxies];
     this.lastAssignedProxyIndex = -1;
     this.proxyLastUsed = new Map(); // Track when proxies were last used
@@ -232,10 +232,17 @@ class ProxyManager {
     // Create a map to store proxy assignments for each event
     const proxyMap = new Map();
     
+    // Get a list of all healthy proxies
+    const healthyProxyOptions = this.proxies.filter(proxy => this.isProxyHealthy(proxy));
+    this.log(`Using ${healthyProxyOptions.length} healthy proxies for batch of ${eventIds.length} events`);
+    
+    // Shuffle proxies to avoid always using the same ones
+    const shuffledProxies = [...healthyProxyOptions].sort(() => 0.5 - Math.random());
+    
     // Assign separate proxy for each event in the batch
     for (const eventId of eventIds) {
-      // Find a healthy available proxy for this specific event
-      const proxy = this.getProxyForEvent(eventId);
+      // Find the most suitable proxy for this specific event
+      const proxy = this.findBestProxyForEvent(eventId, shuffledProxies);
       
       if (!proxy) {
         this.log(`No healthy proxy available for event ${eventId} in batch`, "warning");
@@ -282,12 +289,60 @@ class ProxyManager {
       };
     }
     
+    // Log the number of unique proxies used
+    this.log(`Assigned ${proxyMap.size} unique proxies for ${eventIds.length} events`);
+    
     return { 
       proxyAgent: firstProxyAgent ? firstProxyAgent.proxyAgent : null,
       proxy: firstProxyAgent ? firstProxyAgent.proxy : null,
       eventProxyMap: proxyMap,  // Include the full map for more advanced usage
       firstEventId
     };
+  }
+
+  /**
+   * Find the best proxy for a specific event from a list of available proxies
+   * @param {string} eventId - The event ID
+   * @param {Array} availableProxies - List of available proxies
+   * @returns {Object} The selected proxy object
+   */
+  findBestProxyForEvent(eventId, availableProxies) {
+    if (!availableProxies || availableProxies.length === 0) {
+      return null;
+    }
+    
+    // First, check if any proxies are not being used at all
+    const unusedProxies = availableProxies.filter(proxy => {
+      const usageSet = this.proxyUsage.get(proxy.proxy);
+      return !usageSet || usageSet.size === 0;
+    });
+    
+    if (unusedProxies.length > 0) {
+      // Randomly select one of the unused proxies to distribute load
+      const randomIndex = Math.floor(Math.random() * unusedProxies.length);
+      return unusedProxies[randomIndex];
+    }
+    
+    // If all proxies are in use, find the one with the least usage
+    let bestProxy = null;
+    let minUsage = Infinity;
+    
+    for (const proxy of availableProxies) {
+      const usageSet = this.proxyUsage.get(proxy.proxy);
+      const usageCount = usageSet ? usageSet.size : 0;
+      
+      // Make sure this event isn't already using this proxy
+      if (usageSet && usageSet.has(eventId)) {
+        continue;
+      }
+      
+      if (usageCount < minUsage) {
+        minUsage = usageCount;
+        bestProxy = proxy;
+      }
+    }
+    
+    return bestProxy;
   }
 
   /**

@@ -27,8 +27,8 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 30000,
-  MAX_RETRIES: 5,
+  PAGE_TIMEOUT: 45000, // Increased from 30000
+  MAX_RETRIES: 8, // Increased from 5
   RETRY_DELAY: 10000,
   CHALLENGE_TIMEOUT: 10000,
 };
@@ -404,7 +404,7 @@ async function initBrowser(proxy) {
     
     // Create new context with enhanced fingerprinting
     context = await browser.newContext({
-      ...iphone13,
+      
       userAgent: getRealisticIphoneUserAgent(),
       locale: location.locale,
       colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
@@ -1256,7 +1256,7 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
           request: CONFIG.PAGE_TIMEOUT
         },
         retry: {
-          limit: 2,
+          limit: 3, // Increased from 2
           methods: ['GET'],
           statusCodes: [408, 413, 429, 500, 502, 503, 504],
           errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'ENETUNREACH', 'EAI_AGAIN']
@@ -1264,7 +1264,7 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
         throwHttpErrors: false,
         signal: abortController.signal
       }), {
-        retries: 3,
+        retries: 5, // Increased from 3
         onFailedAttempt: error => {
           console.log(`Request attempt ${error.attemptNumber} failed for ${eventId}. ${error.retriesLeft} retries left.`);
           // Longer delays between retries
@@ -1734,8 +1734,8 @@ const ScrapeEvent = async (
       ScrapeEvent.failedAttempts.set(eventId, attempts);
 
       // Only retry if we haven't exceeded max attempts
-      if (attempts <= 3) {
-        // Max 4 total attempts (1 original + 3 retries)
+      if (attempts <= 5) { // Increased from 3
+        // Max 6 total attempts (1 original + 5 retries)
         console.log(
           `Retrying event ${eventId} after recoverable error (attempt ${attempts})`
         );
@@ -1938,11 +1938,11 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         },
         headers: safeHeaders,
         timeout: {
-          request: 30000
+          request: 45000 // Increased from 30000
         },
         responseType: 'json',
         retry: {
-          limit: 1, // We handle retries ourselves
+          limit: 2, // We handle retries ourselves
           methods: ['GET'],
           statusCodes: [408, 413, 429, 500, 502, 503, 504],
           errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND']
