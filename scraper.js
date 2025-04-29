@@ -1295,124 +1295,48 @@ const GetProxy = async () => {
   try {
     // Use ProxyManager global instance if available
     if (global.proxyManager) {
-      // Try multiple times to get a healthy proxy
-      let attempts = 0;
-      const maxAttempts = 3;
-      let lastError = null;
-
-      // Add diagnostic information about proxy health
-      const healthyCount = global.proxyManager.getAvailableProxyCount();
+      // Add diagnostic information about proxy count
+      const availableCount = global.proxyManager.getAvailableProxyCount();
       const totalProxies = global.proxyManager.proxies.length;
-      console.log(`Proxy health status: ${healthyCount}/${totalProxies} healthy proxies available`);
+      console.log(`Proxy status: ${availableCount}/${totalProxies} proxies available`);
       
-      // If no healthy proxies but we have total proxies, try to reset some
-      if (healthyCount === 0 && totalProxies > 0) {
-        console.log('No healthy proxies available, attempting to reset a few for emergency use');
-        // Try to reset health of a few proxies for emergency use without changing core logic
-        if (global.proxyManager.healthManager) {
-          global.proxyManager.healthManager.resetHealthMetrics(true); // Force reset some proxies
-          console.log(`After emergency reset: ${global.proxyManager.getAvailableProxyCount()}/${totalProxies} healthy proxies`);
-        }
-      }
-
-      while (attempts < maxAttempts) {
-        try {
-          const proxyData = global.proxyManager.getProxyForEvent('random');
-          if (proxyData) {
-            // Test the proxy with a simple connection before returning
-            try {
-              const proxyUrl = new URL(`http://${proxyData.proxy}`);
-              const testUrl = `http://${proxyData.username}:${proxyData.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
-              const testAgent = new HttpsProxyAgent(testUrl);
-              
-              // Quick test connection with short timeout
-              await new Promise((resolve, reject) => {
-                const testReq = require('https').get({
-                  host: 'www.ticketmaster.com',
-                  port: 443,
-                  agent: testAgent,
-                  timeout: 5000 // Short 5s timeout for test
-                }, resolve);
-                testReq.on('error', reject);
-                testReq.on('timeout', () => reject(new Error('Proxy test timeout')));
-              });
-              
-              // If we get here, the proxy is responsive
-              const proxyAgent = new HttpsProxyAgent(testUrl);
-              return { proxyAgent, proxy: proxyData };
-            } catch (testError) {
-              console.warn(`Proxy test failed for ${proxyData.proxy}: ${testError.message}`);
-              global.proxyManager.recordProxyFailure(proxyData.proxy, testError);
-              attempts++;
-              lastError = testError;
-              continue;
-            }
-          }
-        } catch (error) {
-          console.warn(`Failed to get proxy (attempt ${attempts + 1}): ${error.message}`);
-          attempts++;
-          lastError = error;
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
-          continue;
-        }
-      }
-
-      console.error(`Failed to get healthy proxy after ${maxAttempts} attempts:`, lastError?.message);
-    }
-    
-    // Fallback to old method with similar health checks
-    let _proxy = [...proxyArray?.proxies];
-    let attempts = 0;
-    const maxAttempts = 3;
-
-    while (attempts < maxAttempts) {
       try {
-        const randomProxy = Math.floor(Math.random() * _proxy.length);
-        const selectedProxy = _proxy[randomProxy];
-
-        if (!selectedProxy?.proxy || !selectedProxy?.username || !selectedProxy?.password) {
-          throw new Error("Invalid proxy configuration");
-        }
-
-        const proxyUrl = new URL(`http://${selectedProxy.proxy}`);
-        const proxyURl = `http://${selectedProxy.username}:${selectedProxy.password}@${
-          proxyUrl.hostname
-        }:${proxyUrl.port || 80}`;
-        
-        // Test the proxy before returning
-        try {
-          const testAgent = new HttpsProxyAgent(proxyURl);
-          await new Promise((resolve, reject) => {
-            const testReq = require('https').get({
-              host: 'www.ticketmaster.com',
-              port: 443,
-              agent: testAgent,
-              timeout: 5000
-            }, resolve);
-            testReq.on('error', reject);
-            testReq.on('timeout', () => reject(new Error('Proxy test timeout')));
-          });
-          
-          // If we get here, proxy is good
-          const proxyAgent = new HttpsProxyAgent(proxyURl);
-          return { proxyAgent, proxy: selectedProxy };
-        } catch (testError) {
-          console.warn(`Proxy test failed for ${selectedProxy.proxy}: ${testError.message}`);
-          // Remove failed proxy from the list for this session
-          _proxy = _proxy.filter(p => p.proxy !== selectedProxy.proxy);
-          attempts++;
-          continue;
+        const proxyData = global.proxyManager.getProxyForEvent('random');
+        if (proxyData) {
+          const proxyUrl = new URL(`http://${proxyData.proxy}`);
+          const testUrl = `http://${proxyData.username}:${proxyData.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
+          const proxyAgent = new HttpsProxyAgent(testUrl);
+          return { proxyAgent, proxy: proxyData };
         }
       } catch (error) {
-        console.warn(`Failed to get proxy (attempt ${attempts + 1}): ${error.message}`);
-        attempts++;
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
-        continue;
+        console.warn(`Failed to get proxy: ${error.message}`);
       }
+    }
+    
+    // Fallback to old method without health checks
+    let _proxy = [...proxyArray?.proxies];
+    
+    try {
+      const randomProxy = Math.floor(Math.random() * _proxy.length);
+      const selectedProxy = _proxy[randomProxy];
+
+      if (!selectedProxy?.proxy || !selectedProxy?.username || !selectedProxy?.password) {
+        throw new Error("Invalid proxy configuration");
+      }
+
+      const proxyUrl = new URL(`http://${selectedProxy.proxy}`);
+      const proxyURl = `http://${selectedProxy.username}:${selectedProxy.password}@${
+        proxyUrl.hostname
+      }:${proxyUrl.port || 80}`;
+      
+      const proxyAgent = new HttpsProxyAgent(proxyURl);
+      return { proxyAgent, proxy: selectedProxy };
+    } catch (error) {
+      console.warn(`Failed to get proxy: ${error.message}`);
     }
 
     // Last resort fallback
-    console.warn("Using fallback proxy after all attempts failed");
+    console.warn("Using fallback proxy");
     const fallbackProxy = proxyArray.proxies[0];
     const proxyUrl = new URL(`http://${fallbackProxy.proxy}`);
     const proxyURl = `http://${fallbackProxy.username}:${fallbackProxy.password}@${
