@@ -9,7 +9,7 @@ import ProxyManager from "./helpers/ProxyManager.js";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 
 // Updated constants for stricter update intervals and high performance on 32GB system
-const MAX_UPDATE_INTERVAL = 160000; // Strict 2-minute update requirement
+const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = Math.max(60, Math.floor(cpus().length * 5)); // Dramatically increased for maximum parallel processing
 const MAX_RETRIES = 15; // Updated from 10 per request of user
 const SCRAPE_TIMEOUT = 60000; // Increased from 35000 to 60 seconds
@@ -1191,122 +1191,77 @@ export class ScraperManager {
     
     // Get available proxy count to better determine batch sizing
     const availableProxies = this.proxyManager.getAvailableProxyCount();
-    // Determine optimal batch size based on available proxies and system resources
-    const maxEventsPerProxy = this.proxyManager.MAX_EVENTS_PER_PROXY * 2; // Doubled from original to process more events per proxy
     
-    // Dynamic chunk sizing - even larger chunks for maximum throughput
-    const chunkSize = Math.min(
-      maxEventsPerProxy * 2, 
-      Math.max(25, Math.min(Math.ceil(eventIds.length / Math.max(1, availableProxies/2)), 50))
+    // Dynamic chunk sizing based on available resources and event count
+    const optimalChunkSize = Math.min(
+      Math.max(25, Math.ceil(eventIds.length / Math.max(1, availableProxies))),
+      50 // Maximum chunk size to prevent memory issues
     );
     
     if (LOG_LEVEL >= 1) {
       this.logWithTime(
-        `Processing ${eventIds.length} events using ${availableProxies} proxies with chunk size ${chunkSize}`,
+        `Processing ${eventIds.length} events using ${availableProxies} proxies with chunk size ${optimalChunkSize}`,
         "info"
       );
     }
     
     // Split into chunks for better control
     const chunks = [];
-    
-    for (let i = 0; i < eventIds.length; i += chunkSize) {
-      chunks.push(eventIds.slice(i, i + chunkSize));
+    for (let i = 0; i < eventIds.length; i += optimalChunkSize) {
+      chunks.push(eventIds.slice(i, i + optimalChunkSize));
     }
     
     // Process chunks with controlled parallelism and better error handling
     let successCount = 0;
     let failureCount = 0;
     
-    // Process in batches with maximum parallelism - increased from 8 to 16 chunks in parallel
-    const batchCount = Math.ceil(chunks.length / 16);
+    // Process in batches with maximum parallelism
+    const batchSize = Math.min(16, Math.ceil(chunks.length / 4)); // Process up to 16 chunks in parallel
+    const batchCount = Math.ceil(chunks.length / batchSize);
     
     for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
-      const batchStart = batchIndex * 16;
-      const batchEnd = Math.min(batchStart + 16, chunks.length);
+      const batchStart = batchIndex * batchSize;
+      const batchEnd = Math.min(batchStart + batchSize, chunks.length);
       const batchChunks = chunks.slice(batchStart, batchEnd);
       
-      // Generate unique batch IDs for each chunk
+      // Process each chunk in the batch
       const batchProcesses = batchChunks.map(async (chunk) => {
         const batchId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         
         try {
-          // Get proxies for this specific batch with improved proxy assignment
-          const proxyData = this.proxyManager.getProxyForBatch(chunk);
+          // Get proxy data for this chunk
+          const proxyData = await this.proxyManager.getProxyForBatch(chunk);
           
-          // Handle case where no healthy proxies are available
-          if (proxyData.noHealthyProxies || proxyData.assignmentFailed) {
-            // Log detailed error based on the specific issue
-            if (proxyData.noHealthyProxies) {
-              this.logWithTime(`No healthy proxies available for batch ${batchId}`, "error");
-            } else if (proxyData.assignmentFailed) {
-              this.logWithTime(`Failed to assign proxies for batch ${batchId}`, "error");
-            }
-            
-            // Check if we should retry later or fail now based on proxy availability
-            const shouldRetryBatch = this.proxyManager.getAvailableProxyCount() > 0 || 
-                                     this.proxyManager.getTotalProxies() > 0;
-            
-            if (shouldRetryBatch) {
-              // Add to retry queue rather than failing immediately
-              chunk.forEach(eventId => {
-                // Check if the event is already in the retry queue
-                const existingRetry = this.retryQueue.find(item => item.eventId === eventId);
-                if (!existingRetry) {
-                  this.retryQueue.push({
-                    eventId,
-                    retryCount: 0,
-                    retryAfter: moment().add(5000 + Math.random() * 5000, 'milliseconds'),
-                    lastError: new Error("Proxy availability issue, scheduled for retry")
-                  });
-                }
-              });
-              
-              this.logWithTime(`Scheduled ${chunk.length} events from batch ${batchId} for retry due to proxy issues`, "info");
-              return { results: [], failed: [] };
-            }
-            
-            // If we shouldn't retry, mark all as failed
-            this.logWithTime(`Failed all ${chunk.length} events in batch ${batchId} due to proxy unavailability`, "error");
-            return { 
-              results: [], 
-              failed: chunk.map(eventId => ({ 
-                eventId, 
-                error: new Error(proxyData.noHealthyProxies ? 
-                  "No healthy proxies available" : 
-                  "Failed to assign proxies")
-              }))
-            };
+          if (!proxyData || !proxyData.proxyAgent) {
+            throw new Error("Failed to obtain proxy for batch");
           }
           
-          // Store the proxy assignment for this batch
-          this.batchProxies.set(batchId, { proxy: proxyData.proxy, chunk });
+          // Process the chunk efficiently
+          const result = await this.processBatchEfficiently(
+            chunk,
+            batchId,
+            proxyData.proxyAgent,
+            proxyData.proxy,
+            proxyData.eventProxyMap
+          );
           
-          if (LOG_LEVEL >= 3) {
-            const proxyMapSize = proxyData.eventProxyMap ? proxyData.eventProxyMap.size : 0;
-            this.logWithTime(`Using ${proxyMapSize} proxies for batch ${batchId} (${chunk.length} events)`, "debug");
-          }
-
-          // Process the entire chunk efficiently as a batch using unique proxies per event
-          const result = await this.processBatchEfficiently(chunk, batchId, proxyData.proxyAgent, proxyData.proxy, proxyData.eventProxyMap);
           successCount += result.results.length;
           failureCount += result.failed.length;
           results.push(...result.results);
           failed.push(...result.failed);
           
-          // Mark this proxy as successful if we have results
+          // Update proxy health based on results
           if (result.results.length > 0 && proxyData.proxy) {
             this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, true);
           }
           
-          // If we had failures, and they outnumber successes, mark proxy as having issues
           if (result.failed.length > result.results.length && result.failed.length > 0 && proxyData.proxy) {
             this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, false);
           }
         } catch (error) {
           this.logWithTime(`Error processing batch ${batchId}: ${error.message}`, "error");
           
-          // If there's a proxy error, mark the proxy as unhealthy
+          // Handle proxy errors
           if (this.batchProxies.has(batchId)) {
             const { proxy, chunk } = this.batchProxies.get(batchId);
             if (proxy && proxy.proxy) {
@@ -1315,7 +1270,7 @@ export class ScraperManager {
             }
           }
           
-          // Add these events to failed list
+          // Add failed events to retry queue
           failed.push(...chunk.map(eventId => ({ 
             eventId, 
             error: new Error(`Batch processing error: ${error.message}`) 
@@ -1327,17 +1282,21 @@ export class ScraperManager {
         }
       });
       
-      // Wait for this batch of chunks to complete before moving to next batch
+      // Wait for this batch of chunks to complete
       await Promise.all(batchProcesses);
       
       // Add a small delay between batches to prevent rate limiting
       if (batchIndex < batchCount - 1) {
-        await setTimeout(200);
+        await setTimeout(500); // Increased delay between batches
       }
     }
     
-    if (LOG_LEVEL >= 1 && eventIds.length > 10) {
-      this.logWithTime(`Completed processing ${eventIds.length} events: ${successCount} successful, ${failureCount} failed`, "info");
+    // Log final statistics
+    if (LOG_LEVEL >= 1) {
+      this.logWithTime(
+        `Completed processing ${eventIds.length} events: ${successCount} successful, ${failureCount} failed`,
+        "info"
+      );
     }
     
     return { results, failed };
@@ -1350,10 +1309,10 @@ export class ScraperManager {
     
     // Define sharedHeaders at the top level of the function
     let sharedHeaders = null;
-
+    
     // Skip excessive logging for small batches to reduce log noise
     const shouldLogDetails = LOG_LEVEL >= 2 && eventIds.length > 5;
-
+    
     // Pre-filter events that should be skipped to avoid unnecessary DB lookups
     const filteredIds = eventIds.filter(eventId => !this.shouldSkipEvent(eventId));
     
@@ -1363,27 +1322,27 @@ export class ScraperManager {
       }
       return { results, failed };
     }
-
+    
     // Group events by domain for better efficiency
     const eventsByDomain = {};
-
+    
     // Preload all event validations in parallel to save time
     const validationPromises = filteredIds.map(async (eventId) => {
       try {
         const event = await Event.findOne({ Event_ID: eventId })
           .select("Skip_Scraping inHandDate url")
           .lean();
-
+        
         if (!event) {
           this.cooldownEvents.set(eventId, moment().add(60, "minutes"));
           return { eventId, valid: false, reason: "not_found" };
         }
-
+        
         if (event.Skip_Scraping) {
           this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
           return { eventId, valid: false, reason: "flagged" };
         }
-
+        
         // Group by domain
         if (event.url) {
           try {
@@ -1801,15 +1760,13 @@ export class ScraperManager {
   async getEventsToProcess() {
     try {
       const now = moment();
-      const twoMinutesFromNow = now.clone().add(2, 'minutes').toDate();
       
-      // Prioritize events needing update soon
       // Find all active events due for update - massively increased limit for batch processing
       const urgentEvents = await Event.find({
         Skip_Scraping: { $ne: true },
         $or: [
           { Last_Updated: { $exists: false } },
-          { Last_Updated: { $lt: now.clone().subtract(1, 'minute').toDate() } }
+          { Last_Updated: { $lt: now.clone().subtract(45, 'seconds').toDate() } } // Reduced from 1 minute to 45 seconds
         ]
       })
       .select('Event_ID url Last_Updated')
@@ -1835,20 +1792,20 @@ export class ScraperManager {
         let priorityScore = timeSinceLastUpdate / 1000; // Convert to seconds
         
         // CRITICAL - Events approaching 3-minute maximum threshold (absolute deadline)
-        if (timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 10000) { // Within 10 seconds of 3-minute max
-          priorityScore = priorityScore * 20; // 20x priority boost for events approaching max allowed time
+        if (timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000) { // Within 20 seconds of 3-minute max
+          priorityScore = priorityScore * 50; // 50x priority boost for events approaching max allowed time
         }
-        // Critical priority for events approaching 2-minute deadline
-        else if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 10000) { // Within 10 seconds of 2-minute deadline
-          priorityScore = priorityScore * 10; // 10x priority boost for critical events
+        // VERY HIGH - Events approaching 2-minute target
+        else if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 15000) { // Within 15 seconds of 2-minute target
+          priorityScore = priorityScore * 20; // 20x priority boost for events approaching target
         }
-        // High priority for events approaching deadline
-        else if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 30000) { // Within 30 seconds of deadline
-          priorityScore = priorityScore * 5; // 5x priority boost for urgent events
+        // HIGH - Events over 1.5 minutes
+        else if (timeSinceLastUpdate > 90000) { // Over 1.5 minutes
+          priorityScore = priorityScore * 10; // 10x priority boost
         }
-        // Medium priority for events getting close to deadline
-        else if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 60000) { // Within 60 seconds of deadline
-          priorityScore = priorityScore * 2; // 2x priority boost for upcoming events
+        // MEDIUM - Events over 1 minute
+        else if (timeSinceLastUpdate > 60000) { // Over 1 minute
+          priorityScore = priorityScore * 5; // 5x priority boost
         }
         
         return {
@@ -1894,18 +1851,29 @@ export class ScraperManager {
       const optimizedEventList = [];
       
       // First add all near-maximum events (approaching 3-minute deadline)
-      const nearMaxEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 10000);
+      const nearMaxEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000);
       nearMaxEvents.forEach(event => {
         optimizedEventList.push(event.eventId);
       });
       
-      // Then add critical events (approaching 2-minute deadline)
-      const criticalEvents = prioritizedEvents.filter(event => 
-        event.timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 10000 && 
-        event.timeSinceLastUpdate <= MAX_ALLOWED_UPDATE_INTERVAL - 10000 &&
+      // Then add events approaching 2-minute target
+      const approachingTargetEvents = prioritizedEvents.filter(event => 
+        event.timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 15000 && 
+        event.timeSinceLastUpdate <= MAX_ALLOWED_UPDATE_INTERVAL - 20000 &&
         !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId)
       );
-      criticalEvents.forEach(event => {
+      approachingTargetEvents.forEach(event => {
+        optimizedEventList.push(event.eventId);
+      });
+      
+      // Then add events over 1.5 minutes
+      const over90SecEvents = prioritizedEvents.filter(event =>
+        event.timeSinceLastUpdate > 90000 &&
+        event.timeSinceLastUpdate <= MAX_UPDATE_INTERVAL - 15000 &&
+        !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId) &&
+        !approachingTargetEvents.some(targetEvent => targetEvent.eventId === event.eventId)
+      );
+      over90SecEvents.forEach(event => {
         optimizedEventList.push(event.eventId);
       });
       
@@ -1914,7 +1882,8 @@ export class ScraperManager {
         // Skip events already added
         const remainingEvents = domainEvents.filter(event => 
           !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId) &&
-          !criticalEvents.some(criticalEvent => criticalEvent.eventId === event.eventId)
+          !approachingTargetEvents.some(targetEvent => targetEvent.eventId === event.eventId) &&
+          !over90SecEvents.some(overEvent => overEvent.eventId === event.eventId)
         );
         
         // Add all remaining events from this domain/group
@@ -1923,10 +1892,10 @@ export class ScraperManager {
         });
       }
       
-      // For 1000+ events, use a larger batch size to ensure we keep up
+      // For large batches, use a larger batch size to ensure we keep up
       const dynamicBatchSize = Math.min(
         optimizedEventList.length,
-        Math.max(BATCH_SIZE, Math.ceil(optimizedEventList.length / 3)) // Process at least 33% of events per cycle (increased from 20%)
+        Math.max(BATCH_SIZE, Math.ceil(optimizedEventList.length / 2)) // Process at least 50% of events per cycle (increased from 33%)
       );
       
       // Limit to the maximum batch size but make sure we don't exceed our processing capacity
@@ -1935,7 +1904,8 @@ export class ScraperManager {
       // Log stats about the events we're processing - only at appropriate log level
       if (LOG_LEVEL >= 2) {
         const nearMaxCount = nearMaxEvents.length;
-        const criticalCount = criticalEvents.length;
+        const approachingTargetCount = approachingTargetEvents.length;
+        const over90SecCount = over90SecEvents.length;
         const oldestEvent = prioritizedEvents[0];
         if (oldestEvent) {
           const ageInSeconds = oldestEvent.timeSinceLastUpdate / 1000;

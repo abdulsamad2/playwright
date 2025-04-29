@@ -1356,12 +1356,25 @@ const ScrapeEvent = async (
   externalProxy = null
 ) => {
   try {
+    // Check memory usage at the start
+    const memUsage = process.memoryUsage();
+    if (memUsage.heapUsed > 1024 * 1024 * 1024) {
+      // Over 1GB
+      console.warn(
+        `High memory usage (${Math.round(
+          memUsage.heapUsed / 1024 / 1024
+        )}MB) during event processing`
+      );
+    }
+
     // Determine event ID from either object or simple ID
     const eventId = event?.eventId || event;
     const startTime = Date.now();
     const correlationId = generateCorrelationId();
     let proxyAgent = externalProxyAgent;
     let proxy = externalProxy;
+    let cookieString, userAgent, fingerprint;
+    let useProvidedHeaders = false;
 
     // Ensure we have a valid event ID
     if (!eventId) {
@@ -1373,13 +1386,15 @@ const ScrapeEvent = async (
       `Starting event ${eventId} processing with correlation ID: ${correlationId}`
     );
 
-    // Initialize rate limiting tracking
+    // Initialize rate limiting tracking with improved limits
     if (!ScrapeEvent.rateLimits) {
       ScrapeEvent.rateLimits = {
         hourlyCount: 0,
         lastHour: new Date().getHours(),
-        maxPerHour: 1000,
+        maxPerHour: 2000, // Increased from 1000 to handle more events
         blockedUntil: 0,
+        domainLimits: new Map(), // Track limits per domain
+        lastRequestTime: new Map(), // Track last request time per domain
       };
     }
 
@@ -1388,18 +1403,54 @@ const ScrapeEvent = async (
     if (currentHour !== ScrapeEvent.rateLimits.lastHour) {
       ScrapeEvent.rateLimits.hourlyCount = 0;
       ScrapeEvent.rateLimits.lastHour = currentHour;
+      ScrapeEvent.rateLimits.domainLimits.clear();
     }
 
-    if (
-      ScrapeEvent.rateLimits.hourlyCount >= ScrapeEvent.rateLimits.maxPerHour
-    ) {
+    // Get domain for rate limiting
+    let domain = 'default';
+    if (event?.url) {
+      try {
+        const url = new URL(event.url);
+        domain = url.hostname;
+      } catch (e) {
+        // Invalid URL, use default domain
+      }
+    }
+
+    // Initialize domain-specific rate limits if needed
+    if (!ScrapeEvent.rateLimits.domainLimits.has(domain)) {
+      ScrapeEvent.rateLimits.domainLimits.set(domain, {
+        count: 0,
+        maxPerMinute: 100, // Limit requests per minute per domain
+        lastMinute: new Date().getMinutes(),
+      });
+    }
+
+    const domainLimits = ScrapeEvent.rateLimits.domainLimits.get(domain);
+    const currentMinute = new Date().getMinutes();
+
+    // Check domain-specific rate limits
+    if (currentMinute !== domainLimits.lastMinute) {
+      domainLimits.count = 0;
+      domainLimits.lastMinute = currentMinute;
+    }
+
+    if (domainLimits.count >= domainLimits.maxPerMinute) {
+      console.warn(
+        `Domain rate limit reached for ${domain} (${domainLimits.count}/${domainLimits.maxPerMinute})`
+      );
+      throw new Error(`Rate limit exceeded for domain ${domain}`);
+    }
+
+    // Check global rate limits
+    if (ScrapeEvent.rateLimits.hourlyCount >= ScrapeEvent.rateLimits.maxPerHour) {
       console.warn(
         `Hourly rate limit reached (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour})`
       );
-      throw new Error("Rate limit exceeded");
+      throw new Error("Global rate limit exceeded");
     }
 
-    // Check global block (if we've detected we're being blocked by the server)
+    // Check global block
     if (ScrapeEvent.rateLimits.blockedUntil > Date.now()) {
       const waitTime = Math.ceil(
         (ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000
@@ -1410,66 +1461,50 @@ const ScrapeEvent = async (
       );
     }
 
-    // Use provided proxy if available, otherwise get a new one
-    try {
-      if (proxyAgent && proxy) {
-        console.log(
-          `Using provided proxy ${
-            proxy.proxy || "unknown"
-          } for event ${eventId}`
-        );
-      } else {
-        // If we have a ProxyManager instance, use it to get an event-specific proxy
-        if (global.proxyManager) {
-          const proxyData = global.proxyManager.getProxyForEvent(eventId);
-          if (proxyData) {
-            const proxyAgentData =
-              global.proxyManager.createProxyAgent(proxyData);
-            proxyAgent = proxyAgentData.proxyAgent;
-            proxy = proxyData;
-            console.log(
-              `Using dedicated proxy ${proxy.proxy} for event ${eventId} from ProxyManager`
-            );
-          } else {
-            // Fallback to random proxy selection
-            const proxyData = await GetProxy();
-            proxyAgent = proxyData.proxyAgent;
-            proxy = proxyData.proxy;
-          }
+    // If headers are provided (for batch processing), use them directly
+    if (event?.headers) {
+      console.log(`Processing headers for event ${eventId} (batch processing)`);
+
+      // Check different header formats for compatibility
+      if (typeof event.headers === "object") {
+        // If it's a complete headers object with all required fields
+        if (event.headers.headers) {
+          // Extract from nested headers property if available
+          cookieString =
+            event.headers.headers.Cookie || event.headers.headers.cookie;
+          userAgent =
+            event.headers.headers["User-Agent"] ||
+            event.headers.headers["user-agent"];
         } else {
-          // Fallback to old method if no proxy manager is available
-          const proxyData = await GetProxy();
-          proxyAgent = proxyData.proxyAgent;
-          proxy = proxyData.proxy;
+          // Try direct properties
+          cookieString = event.headers.Cookie || event.headers.cookie;
+          userAgent =
+            event.headers["User-Agent"] || event.headers["user-agent"];
+        }
+
+        // For backwards compatibility, check if headers contains capturedState format
+        if (event.headers.cookies && Array.isArray(event.headers.cookies)) {
+          cookieString = event.headers.cookies
+            .map((cookie) => `${cookie.name}=${cookie.value}`)
+            .join("; ");
         }
       }
-    } catch (proxyError) {
-      console.error(`Proxy error for event ${eventId}:`, proxyError.message);
-      // Try again with a different proxy selection mechanism
-      console.log(
-        `Attempting alternative proxy selection for event ${eventId}`
-      );
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      useProvidedHeaders = true;
+    }
+
+    // Update rate limits
+    ScrapeEvent.rateLimits.hourlyCount++;
+    domainLimits.count++;
+
+    // Use provided proxy if available, otherwise get a new one
+    if (!proxyAgent || !proxy) {
       const proxyData = await GetProxy();
       proxyAgent = proxyData.proxyAgent;
       proxy = proxyData.proxy;
     }
 
-    // Log memory usage as needed
-    const memUsage = process.memoryUsage();
-    if (memUsage.heapUsed > 1024 * 1024 * 1024) {
-      // Over 1GB
-      console.warn(
-        `High memory usage (${Math.round(
-          memUsage.heapUsed / 1024 / 1024
-        )}MB) during event ${eventId} processing`
-      );
-    }
-
     // If headers are provided (for batch processing), use them directly
-    let cookieString, userAgent, fingerprint;
-    let useProvidedHeaders = false;
-
     if (event?.headers) {
       console.log(`Processing headers for event ${eventId} (batch processing)`);
 
@@ -1551,27 +1586,9 @@ const ScrapeEvent = async (
           randomUseragent.getRandom(
             (ua) => ua.browserName === fingerprint.browser?.name
           ) ||
-          BrowserFingerprint.generateUserAgent(fingerprint);
+          getRealisticIphoneUserAgent();
       } catch (error) {
-        console.error(
-          `Error getting cookies for event ${eventId}:`,
-          error.message
-        );
-        // Use fallback headers if available
-        const fallbackHeaders = generateFallbackHeaders();
-        if (fallbackHeaders) {
-          console.log(
-            `Using fallback headers for event ${eventId} after error`
-          );
-          return callTicketmasterAPI(
-            fallbackHeaders,
-            proxyAgent,
-            eventId,
-            event,
-            0,
-            startTime
-          );
-        }
+        console.error(`Error getting captured data: ${error.message}`);
         throw error;
       }
     }
