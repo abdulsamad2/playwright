@@ -1642,13 +1642,13 @@ export class ScraperManager {
       // Log only at appropriate levels
       if (LOG_LEVEL >= 1) {
         this.logWithTime(
-          `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Short cooldown for ${backoffTime/1000}s`,
+          `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Aggressive retry in ${backoffTime/1000}s`,
           "warning"
         );
       }
     } else {
-      // For persistent failures, use a longer cooldown
-      backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // Convert minutes to ms
+      // For persistent failures, use a shorter cooldown
+      backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // 1 minute cooldown
       
       if (shouldMarkStopped) {
       this.logWithTime(
@@ -1657,13 +1657,13 @@ export class ScraperManager {
       );
       } else {
         this.logWithTime(
-          `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. ${LONG_COOLDOWN_MINUTES} minute cooldown before retry.`,
+          `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. Aggressive retry in ${LONG_COOLDOWN_MINUTES} minute.`,
           "warning"
         );
       }
       
-      // Log long cooldown to error logs
-      await this.logError(eventId, "LONG_COOLDOWN", new Error(`Event put in ${LONG_COOLDOWN_MINUTES} minute cooldown after persistent failures`), {
+      // Log long cooldown to error logs if needed
+      await this.logError(eventId, "AGGRESSIVE_RETRY", new Error(`Event put in ${LONG_COOLDOWN_MINUTES} minute aggressive retry after persistent failures`), {
         cooldownDuration: LONG_COOLDOWN_MINUTES * 60 * 1000,
         isApiError,
         originalError: error.message,
@@ -1672,10 +1672,10 @@ export class ScraperManager {
       });
     }
     
-    // If we've had 3 consecutive API errors, trigger a cookie reset
+    // If we've had 2 consecutive API errors, trigger a cookie reset (reduced from 3)
     if (isApiError) {
       this.globalConsecutiveErrors++;
-      if (this.globalConsecutiveErrors >= 3) {
+      if (this.globalConsecutiveErrors >= 2) {
         // Don't await here to prevent blocking the current event processing
         this.resetCookiesAndHeaders().catch(e => 
           console.error("Error during cookie reset:", e)
@@ -1711,7 +1711,7 @@ export class ScraperManager {
     }
     
     // Still update the event schedule for 2-minute compliance
-    this.eventUpdateSchedule.set(eventId, moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, 'milliseconds'));
+    this.eventUpdateSchedule.set(eventId, moment().add(Math.min(backoffTime, 60000), 'milliseconds'));
 
     // Only add to retry queue if we haven't hit the failure threshold
     if (!shouldMarkStopped) {
@@ -1719,11 +1719,12 @@ export class ScraperManager {
         eventId,
         retryCount: retryCount + 1,
         retryAfter: cooldownUntil,
+        priority: Math.min(retryCount + 1, 10), // Higher priority for fewer retries
       });
       
       if (LOG_LEVEL >= 2) {
         this.logWithTime(
-          `Queued for retry: ${eventId} (after ${
+          `Queued for aggressive retry: ${eventId} (after ${
             backoffTime / 1000
           }s cooldown)`,
           "info"
@@ -1819,12 +1820,12 @@ export class ScraperManager {
         Skip_Scraping: { $ne: true },
         $or: [
           { Last_Updated: { $exists: false } },
-          { Last_Updated: { $lt: now.clone().subtract(45, 'seconds').toDate() } } // Reduced from 1 minute to 45 seconds
+          { Last_Updated: { $lt: now.clone().subtract(30, 'seconds').toDate() } } // Reduced from 45 seconds to 30 seconds
         ]
       })
       .select('Event_ID url Last_Updated')
       .sort({ Last_Updated: 1 }) // Oldest first
-      .limit(BATCH_SIZE * 40) // Get a much larger sample for comprehensive batch processing
+      .limit(BATCH_SIZE * 50) // Get a much larger sample for comprehensive batch processing
       .lean();
     
       // No events needing update
@@ -1844,21 +1845,21 @@ export class ScraperManager {
         // Give more weight to events that haven't been updated in a long time
         let priorityScore = timeSinceLastUpdate / 1000; // Convert to seconds
         
-        // CRITICAL - Events approaching 3-minute maximum threshold (absolute deadline)
-        if (timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000) { // Within 20 seconds of 3-minute max
-          priorityScore = priorityScore * 50; // 50x priority boost for events approaching max allowed time
+        // CRITICAL - Events approaching 2-minute maximum threshold (absolute deadline)
+        if (timeSinceLastUpdate > 110000) { // Within 10 seconds of 2-minute max
+          priorityScore = priorityScore * 100; // 100x priority boost for events approaching max allowed time
         }
-        // VERY HIGH - Events approaching 2-minute target
-        else if (timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 15000) { // Within 15 seconds of 2-minute target
-          priorityScore = priorityScore * 20; // 20x priority boost for events approaching target
+        // VERY HIGH - Events approaching 1.5 minutes
+        else if (timeSinceLastUpdate > 80000) { // Within 10 seconds of 1.5-minute target
+          priorityScore = priorityScore * 50; // 50x priority boost
         }
-        // HIGH - Events over 1.5 minutes
-        else if (timeSinceLastUpdate > 90000) { // Over 1.5 minutes
-          priorityScore = priorityScore * 10; // 10x priority boost
-        }
-        // MEDIUM - Events over 1 minute
+        // HIGH - Events over 1 minute
         else if (timeSinceLastUpdate > 60000) { // Over 1 minute
-          priorityScore = priorityScore * 5; // 5x priority boost
+          priorityScore = priorityScore * 20; // 20x priority boost
+        }
+        // MEDIUM - Events over 45 seconds
+        else if (timeSinceLastUpdate > 45000) { // Over 45 seconds
+          priorityScore = priorityScore * 10; // 10x priority boost
         }
         
         return {
@@ -1903,30 +1904,30 @@ export class ScraperManager {
       // Reassemble prioritized list, keeping domain groups together but prioritizing critical events
       const optimizedEventList = [];
       
-      // First add all near-maximum events (approaching 3-minute deadline)
-      const nearMaxEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000);
+      // First add all near-maximum events (approaching 2-minute deadline)
+      const nearMaxEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > 110000);
       nearMaxEvents.forEach(event => {
         optimizedEventList.push(event.eventId);
       });
       
-      // Then add events approaching 2-minute target
+      // Then add events approaching 1.5-minute target
       const approachingTargetEvents = prioritizedEvents.filter(event => 
-        event.timeSinceLastUpdate > MAX_UPDATE_INTERVAL - 15000 && 
-        event.timeSinceLastUpdate <= MAX_ALLOWED_UPDATE_INTERVAL - 20000 &&
+        event.timeSinceLastUpdate > 80000 && 
+        event.timeSinceLastUpdate <= 110000 &&
         !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId)
       );
       approachingTargetEvents.forEach(event => {
         optimizedEventList.push(event.eventId);
       });
       
-      // Then add events over 1.5 minutes
-      const over90SecEvents = prioritizedEvents.filter(event =>
-        event.timeSinceLastUpdate > 90000 &&
-        event.timeSinceLastUpdate <= MAX_UPDATE_INTERVAL - 15000 &&
+      // Then add events over 1 minute
+      const over60SecEvents = prioritizedEvents.filter(event =>
+        event.timeSinceLastUpdate > 60000 &&
+        event.timeSinceLastUpdate <= 80000 &&
         !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId) &&
         !approachingTargetEvents.some(targetEvent => targetEvent.eventId === event.eventId)
       );
-      over90SecEvents.forEach(event => {
+      over60SecEvents.forEach(event => {
         optimizedEventList.push(event.eventId);
       });
       
@@ -1936,7 +1937,7 @@ export class ScraperManager {
         const remainingEvents = domainEvents.filter(event => 
           !nearMaxEvents.some(maxEvent => maxEvent.eventId === event.eventId) &&
           !approachingTargetEvents.some(targetEvent => targetEvent.eventId === event.eventId) &&
-          !over90SecEvents.some(overEvent => overEvent.eventId === event.eventId)
+          !over60SecEvents.some(overEvent => overEvent.eventId === event.eventId)
         );
         
         // Add all remaining events from this domain/group
@@ -1948,7 +1949,7 @@ export class ScraperManager {
       // For large batches, use a larger batch size to ensure we keep up
       const dynamicBatchSize = Math.min(
         optimizedEventList.length,
-        Math.max(BATCH_SIZE, Math.ceil(optimizedEventList.length / 2)) // Process at least 50% of events per cycle (increased from 33%)
+        Math.max(BATCH_SIZE, Math.ceil(optimizedEventList.length / 1.5)) // Process at least 66% of events per cycle
       );
       
       // Limit to the maximum batch size but make sure we don't exceed our processing capacity
@@ -1958,13 +1959,13 @@ export class ScraperManager {
       if (LOG_LEVEL >= 2) {
         const nearMaxCount = nearMaxEvents.length;
         const approachingTargetCount = approachingTargetEvents.length;
-        const over90SecCount = over90SecEvents.length;
+        const over60SecCount = over60SecEvents.length;
         const oldestEvent = prioritizedEvents[0];
         if (oldestEvent) {
           const ageInSeconds = oldestEvent.timeSinceLastUpdate / 1000;
           this.logWithTime(
             `Processing ${finalEventsList.length} events. Oldest event is ${ageInSeconds.toFixed(1)}s old. ` +
-            `${nearMaxCount} events near 3min max, ${criticalCount} events near 2min deadline.`,
+            `${nearMaxCount} events near 2min max, ${approachingTargetCount} events near 1.5min, ${over60SecCount} over 1min.`,
             "info"
           );
         }
@@ -1980,7 +1981,7 @@ export class ScraperManager {
   async startContinuousScraping() {
     if (!this.isRunning) {
       this.isRunning = true;
-      this.logWithTime("Starting continuous scraping...", "info");
+      this.logWithTime("Starting aggressive continuous scraping...", "info");
       
       // Main scraping loop
       while (this.isRunning) {
@@ -1995,8 +1996,8 @@ export class ScraperManager {
             // Use larger batchSize for more efficient processing
             const { failed } = await this.processBatch(eventIds);
             
-            // If we have many failed events, process them immediately instead of waiting
-            if (failed.length > 10) {
+            // Process failed events immediately instead of waiting
+            if (failed.length > 0) {
               this.logWithTime(`Processing ${failed.length} failed events from previous batch immediately`, "info");
               await this.processFailedEventsBatch();
             }
@@ -2004,40 +2005,37 @@ export class ScraperManager {
             this.logWithTime("No events to process at this time", "info");
           }
           
-          // Process any accumulated failed events
-          await this.processFailedEventsBatch();
-          
           // Add a dynamic pause to avoid overloading - shorter pause for faster processing
-          const pauseTime = Math.min(this.getAdaptivePauseTime(), 1000); // Cap at 1 second max
+          const pauseTime = Math.min(this.getAdaptivePauseTime(), 300); // Cap at 300ms max
           await setTimeout(pauseTime);
         } catch (error) {
           console.error(`Error in scraping loop: ${error.message}`);
           // Brief pause on error to avoid spinning
-          await setTimeout(2000);
+          await setTimeout(1000);
         }
       }
     }
   }
-  
+
   /**
    * Calculate adaptive pause time based on system load
    * @returns {number} Pause time in milliseconds
    */
   getAdaptivePauseTime() {
     // Base pause time - significantly reduced for faster cycles
-    let pauseTime = 500; // Base of 500ms
+    let pauseTime = 200; // Base of 200ms for aggressive scraping
     
     // Add time based on active jobs and failed events
     const activeJobCount = this.activeJobs.size;
     const failedEventCount = this.failedEvents.size;
     
     // Scale pause with system load - keep minimal for maximum throughput
-    pauseTime += Math.min(activeJobCount * 10, 200); // Add at most 200ms for active jobs
-    pauseTime += Math.min(failedEventCount * 5, 200); // Add at most 200ms for failed events
+    pauseTime += Math.min(activeJobCount * 5, 100); // Add at most 100ms for active jobs
+    pauseTime += Math.min(failedEventCount * 2, 100); // Add at most 100ms for failed events
     
     // Additional time if circuit breaker tripped
     if (this.apiCircuitBreaker.tripped) {
-      pauseTime += 500;
+      pauseTime += 200;
     }
     
     return pauseTime;
@@ -2259,8 +2257,8 @@ export class ScraperManager {
   async processFailedEventsBatch() {
     const now = moment();
     
-    // Don't process too frequently
-    if (this.lastFailedBatchProcess && moment().diff(this.lastFailedBatchProcess) < this.failedEventsProcessingInterval) {
+    // Process more frequently - every 5 seconds max
+    if (this.lastFailedBatchProcess && moment().diff(this.lastFailedBatchProcess) < 5000) {
       return;
     }
     
@@ -2272,7 +2270,7 @@ export class ScraperManager {
     }
     
     if (LOG_LEVEL >= 2) {
-      this.logWithTime(`Processing ${this.failedEvents.size} failed events in batches`, "info");
+      this.logWithTime(`Aggressively processing ${this.failedEvents.size} failed events in batches`, "info");
     }
     
     // Group failed events by error types and failure count
@@ -2318,7 +2316,7 @@ export class ScraperManager {
         1, 
         Math.min(
           eventIds.length,
-          Math.ceil(CONCURRENT_LIMIT / (1 + failureCount)) // Decrease batch size as failure count increases
+          Math.ceil(CONCURRENT_LIMIT / (1 + failureCount * 0.5)) // Decrease batch size as failure count increases, but not as drastically
         )
       );
       
@@ -2407,11 +2405,11 @@ export class ScraperManager {
         }));
         
         // Brief pause between batches to avoid overwhelming system
-        await setTimeout(500);
+        await setTimeout(200); // Reduced from 500ms
       }
       
       // Pause between different failure count groups
-      await setTimeout(1000);
+      await setTimeout(300); // Reduced from 1000ms
     }
   }
 

@@ -2318,6 +2318,9 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
     if (!cookies) {
       cookies = '';
     }
+    
+    // Trim cookies to 569 characters if longer
+    cookies = trimCookieString(cookies, 569);
 
     // Get appropriate user agent - either from fingerprint or generate new one
     let userAgent;
@@ -2415,10 +2418,45 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
       'Referer': 'https://www.ticketmaster.com/',
       'Origin': 'https://www.ticketmaster.com',
       'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
-      'Cookie': cookies || '',
+      'Cookie': trimCookieString(cookies || '', 569),
     };
   }
 };
+
+/**
+ * Trims a cookie string to a specified maximum length while preserving complete cookies
+ * @param {string} cookieString - The cookie string to trim
+ * @param {number} maxLength - Maximum length for the cookie string
+ * @returns {string} - Trimmed cookie string
+ */
+function trimCookieString(cookieString, maxLength) {
+  // If string is already shorter than max length, return it unchanged
+  if (!cookieString || cookieString.length <= maxLength) {
+    return cookieString;
+  }
+  
+  // Split the cookie string into individual cookies
+  const cookies = cookieString.split('; ');
+  let result = '';
+  
+  // Add cookies until we reach the maximum length
+  for (const cookie of cookies) {
+    // Check if adding this cookie would exceed the max length
+    if ((result + cookie).length + (result ? 2 : 0) > maxLength) {
+      break;
+    }
+    
+    // Add cookie separator if needed
+    if (result) {
+      result += '; ';
+    }
+    
+    // Add the cookie
+    result += cookie;
+  }
+  
+  return result;
+}
 
 async function cleanup(browser, context) {
   try {
