@@ -12,11 +12,10 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
-import ProxyManager from './helpers/ProxyManager.js';
-import { Event } from './models/index.js';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
 import { CookieManager } from './helpers/CookieManager.js';
+import ProxyManager from './helpers/ProxyManager.js'; 
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 // Initialize CookieManager instance
