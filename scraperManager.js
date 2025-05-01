@@ -924,8 +924,28 @@ export class ScraperManager {
         return true;
       }
 
-      // Refresh headers with backoff/caching strategy
-      const headers = await this.refreshEventHeaders(eventId);
+      // Check if cookies have been refreshed recently
+      const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
+      const cookieAge = Date.now() - lastRefresh;
+      
+      // Force header refresh if cookies are more than 15 minutes old
+      // or if this is a retry attempt (to get fresh cookies)
+      const shouldRefreshHeaders = 
+        !this.headersCache.has(eventId) || 
+        cookieAge > COOKIE_EXPIRATION_MS / 2 ||
+        retryCount > 0;
+      
+      if (shouldRefreshHeaders) {
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(`Getting fresh headers for event ${eventId}${retryCount > 0 ? ' (retry attempt)' : ''}`, "debug");
+        }
+        await this.refreshEventHeaders(eventId);
+      } else if (LOG_LEVEL >= 3) {
+        this.logWithTime(`Using cached headers for event ${eventId} (age: ${Math.floor(cookieAge/1000)}s)`, "debug");
+      }
+
+      // Get the cached headers or defaults
+      const headers = this.headersCache.get(eventId) || await this.refreshEventHeaders(eventId);
       if (!headers) {
         throw new Error("Failed to obtain valid headers");
       }
@@ -1774,7 +1794,7 @@ export class ScraperManager {
     try {
       const now = moment();
       
-      // Find all active events due for update - massively increased limit for batch processing
+      // Find all active events due for update
       const urgentEvents = await Event.find({
         Skip_Scraping: { $ne: true },
         $or: [
@@ -1801,7 +1821,6 @@ export class ScraperManager {
         const timeSinceLastUpdate = currentTime - lastUpdated;
         
         // Higher score = higher priority
-        // Give more weight to events that haven't been updated in a long time
         let priorityScore = timeSinceLastUpdate / 1000; // Convert to seconds
         
         // CRITICAL - Events approaching 2-minute maximum threshold (absolute deadline)
@@ -1852,7 +1871,7 @@ export class ScraperManager {
             domains.get(event.eventId).push(event);
           }
         } else {
-          // No URL, just use the eventId as key
+          // No URL, use eventId as domain group
           if (!domains.has(event.eventId)) {
             domains.set(event.eventId, []);
           }
@@ -1863,7 +1882,7 @@ export class ScraperManager {
       // Reassemble prioritized list, keeping domain groups together but prioritizing critical events
       const optimizedEventList = [];
       
-      // First add all near-maximum events (approaching 2-minute deadline)
+      // First add all near-maximum events (approaching 2 min deadline)
       const nearMaxEvents = prioritizedEvents.filter(event => event.timeSinceLastUpdate > 110000);
       nearMaxEvents.forEach(event => {
         optimizedEventList.push(event.eventId);

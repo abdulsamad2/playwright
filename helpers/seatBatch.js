@@ -207,9 +207,9 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
       "cost": totalCost * (data?.seats?.length || 0),
       "seats": data?.seats || [],
       "eventId": event?.eventMappingId,
-        "stockType": "MOBILE_TRANSFER",
-        "lineType": "PURCHASE",
-        "seatType": "CONSECUTIVE",
+        "stockType": data?.stockType || "MOBILE_TRANSFER",
+        "lineType": data?.lineType || "PURCHASE",
+        "seatType": data?.SeatsType || "CONSECUTIVE",
         "inHandDate": moment(event?.inHandDate).format("YYYY-MM-DDTHH:mm:ss"), //"2023-06-09T16:48:09.99",
         // "notes": "+stub +geek +tnet +vivid +tevo +pick",
         "notes": "-tnow -tmplus -stub",
@@ -228,10 +228,10 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
            faceValue: faceValue,
            taxedCost: totalCost,
            sellPrice: totalCostWithPercentage,
-           stockType: "HARD",
+           stockType: data?.stockType || "HARD",
            eventId: 0,
            accountId: 0,
-           status: "AVAILABLE",
+           status: data?.status || "AVAILABLE",
            auditNote: "string",
          };})
     },
@@ -383,11 +383,19 @@ return returnData.map(x=>{
     {
       return undefined;
     }
-    else
-       {
-       
-        return CreateInventoryAndLine(x,offerGet,event,descriptions)
-       }
+    // exclude verizon offer
+    else if (offerGet.name == "Verizon" && offerGet.offerType !== "standard")
+    {
+       return undefined;
+    }
+    else if (
+      offerGet.name == "Verified Resale Ticket" &&
+      offerGet.offerType == "resale"
+    ) {
+      return undefined;
+    } else {
+      return CreateInventoryAndLine(x, offerGet, event, descriptions);
+    }
   }
   else
   {

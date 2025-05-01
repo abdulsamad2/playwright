@@ -1,0 +1,567 @@
+[
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6DC7BUHA",
+    "name": "Standard Admission",
+    "rank": 0,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "000000000001",
+    "auditPriceLevel": "1",
+    "priceLevelId": "48",
+    "priceLevelSecname": "P1",
+    "description": "Standard Admission",
+    "currency": "USD",
+    "listPrice": 106.25,
+    "faceValue": 106.25,
+    "totalPrice": 130.88,
+    "noChargesPrice": 99.75,
+    "charges": [
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 22.75
+      },
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 1.88
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6DC7BUHA"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/000000000001"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6DC7BUHE",
+    "name": "Standard Admission",
+    "rank": 0,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "000000000001",
+    "auditPriceLevel": "2",
+    "priceLevelId": "49",
+    "priceLevelSecname": "P2",
+    "description": "Standard Admission",
+    "currency": "USD",
+    "listPrice": 86.25,
+    "faceValue": 86.25,
+    "totalPrice": 106.28,
+    "noChargesPrice": 79.75,
+    "charges": [
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 18.5
+      },
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 1.53
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6DC7BUHE"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/000000000001"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6DC7BVGA",
+    "name": "Standard Admission",
+    "rank": 0,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "000000000001",
+    "auditPriceLevel": "3",
+    "priceLevelId": "50",
+    "priceLevelSecname": "P3",
+    "description": "Standard Admission",
+    "currency": "USD",
+    "listPrice": 66.25,
+    "faceValue": 66.25,
+    "totalPrice": 81.63,
+    "noChargesPrice": 59.75,
+    "charges": [
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 1.18
+      },
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 14.2
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6DC7BVGA"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/000000000001"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6DC7BVGE",
+    "name": "Standard Admission",
+    "rank": 0,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "000000000001",
+    "auditPriceLevel": "4",
+    "priceLevelId": "51",
+    "priceLevelSecname": "P4",
+    "description": "Standard Admission",
+    "currency": "USD",
+    "listPrice": 46.25,
+    "faceValue": 46.25,
+    "totalPrice": 57.03,
+    "noChargesPrice": 39.75,
+    "charges": [
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 0.83
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      },
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 9.95
+      }
+    ],
+    "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6DC7BVGE"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/000000000001"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6DEOBQGA3UGMBQGAYDO7BRGMYC4MBQPQZDOLRTGB6DMLRVGB6HYMROGI3HY7D4",
+    "name": "Official Platinum",
+    "rank": 0,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "028007C00007",
+    "ticketTypeUnsoldQualifier": "PLATINUMAVAIL",
+    "description": "Official Platinum",
+    "currency": "USD",
+    "listPrice": 136.5,
+    "faceValue": 136.5,
+    "totalPrice": 166.06,
+    "noChargesPrice": 130,
+    "charges": [
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 27.3
+      },
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 2.26
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6DEOBQGA3UGMBQGAYDO7BRGMYC4MBQPQZDOLRTGB6DMLRVGB6HYMROGI3HY7D4"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/028007C00007"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6EGMBQGA4DIMBQGAYDK7BUHE",
+    "name": "Aisle Seat Offer",
+    "rank": 1,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "0C0008400005",
+    "ticketTypeUnsoldQualifier": "AISLEHOLD",
+    "auditPriceLevel": "2",
+    "priceLevelId": "49",
+    "priceLevelSecname": "P2",
+    "description": "Aisle Seat Offer",
+    "currency": "USD",
+    "listPrice": 96.25,
+    "faceValue": 96.25,
+    "totalPrice": 118.61,
+    "noChargesPrice": 89.75,
+    "charges": [
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 20.65
+      },
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 1.71
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      2,
+      4,
+      6,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6EGMBQGA4DIMBQGAYDK7BUHE"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/0C0008400005"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6EGMBQGA4DIMBQGAYDK7BVGA",
+    "name": "Aisle Seat Offer",
+    "rank": 1,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "0C0008400005",
+    "ticketTypeUnsoldQualifier": "AISLEHOLD",
+    "auditPriceLevel": "3",
+    "priceLevelId": "50",
+    "priceLevelSecname": "P3",
+    "description": "Aisle Seat Offer",
+    "currency": "USD",
+    "listPrice": 76.25,
+    "faceValue": 76.25,
+    "totalPrice": 93.95,
+    "noChargesPrice": 69.75,
+    "charges": [
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 1.35
+      },
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 16.35
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      2,
+      4,
+      6,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6EGMBQGA4DIMBQGAYDK7BVGA"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/0C0008400005"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-01T20:21:18.542330481Z",
+      "expires": "2025-05-01T20:31:18.542330481Z"
+    },
+    "offerId": "GJ6EGMBQGA4DIMBQGAYDK7BVGE",
+    "name": "Aisle Seat Offer",
+    "rank": 1,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "0C0008400005",
+    "ticketTypeUnsoldQualifier": "AISLEHOLD",
+    "auditPriceLevel": "4",
+    "priceLevelId": "51",
+    "priceLevelSecname": "P4",
+    "description": "Aisle Seat Offer",
+    "currency": "USD",
+    "listPrice": 56.25,
+    "faceValue": 56.25,
+    "totalPrice": 69.3,
+    "noChargesPrice": 49.75,
+    "charges": [
+      {
+        "reason": "service_tax",
+        "type": "tax",
+        "amount": 1
+      },
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 12.05
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 5.45
+      }
+    ],
+    "sellableQuantities": [
+      2,
+      4,
+      6,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/0C006226C99119E6/offers/GJ6EGMBQGA4DIMBQGAYDK7BVGE"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/0C006226C99119E6"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/0C006226C99119E6/tickettypes/0C0008400005"
+        }
+      ]
+    }
+  }
+]

@@ -12,6 +12,8 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
+import ProxyManager from './helpers/ProxyManager.js';
+import { Event } from './models/index.js';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
 import { CookieManager } from './helpers/CookieManager.js';
@@ -708,6 +710,9 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
   let localContext = null;
   let page = null;
+  let mainBrowser = null;
+  let proxyToUse = proxy;
+  let eventIdToUse = eventId;
 
   try {
     cookieManager.isRefreshingCookies = true;
@@ -733,7 +738,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
             fingerprint: BrowserFingerprint.generate(),
             lastRefresh: Date.now(),
             headers: fallbackHeaders,
-            proxy: proxy
+            proxy: proxyToUse
           };
           resolve(fallbackState);
         }
@@ -744,7 +749,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     
     // Add a global timeout for the entire refresh process
     const globalTimeoutId = setTimeout(() => {
-      console.error(`Global timeout reached when refreshing cookies for event ${eventId}`);
+      console.error(`Global timeout reached when refreshing cookies for event ${eventIdToUse}`);
       cleanupRefreshProcess(new Error("Global timeout for cookie refresh"));
     }, 60000); // 60 second timeout for the entire process
 
@@ -762,7 +767,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
     // If specific cookies are provided, use them
     if (existingCookies !== null) {
-      console.log(`Using provided cookies for event ${eventId}`);
+      console.log(`Using provided cookies for event ${eventIdToUse}`);
 
       if (!cookieManager.capturedState.fingerprint) {
         cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
@@ -772,7 +777,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         cookies: existingCookies,
         fingerprint: cookieManager.capturedState.fingerprint,
         lastRefresh: Date.now(),
-        proxy: cookieManager.capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxyToUse,
       };
       
       clearTimeout(globalTimeoutId);
@@ -793,7 +798,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           cookies: cookiesFromFile,
           fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
-          proxy: cookieManager.capturedState.proxy || proxy,
+          proxy: cookieManager.capturedState.proxy || proxyToUse,
         };
         
         clearTimeout(globalTimeoutId);
@@ -804,37 +809,99 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       console.error("Error loading cookies from file:", err);
     }
 
+    // Get a random event ID from the database for cookie refreshing
+    try {
+      const randomEvent = await Event.aggregate([
+        { 
+          $match: { 
+            Skip_Scraping: { $ne: true },
+            url: { $exists: true, $ne: "" }
+          } 
+        },
+        { $sample: { size: 5 } },
+        { $project: { Event_ID: 1, url: 1 } }
+      ]);
+
+      if (randomEvent && randomEvent.length > 0) {
+        const selectedEvent = randomEvent[Math.floor(Math.random() * randomEvent.length)];
+        eventIdToUse = selectedEvent.Event_ID;
+        console.log(`Using random event ${eventIdToUse} for cookie refresh`);
+      } else {
+        console.log(`No random event found, using provided event ID ${eventIdToUse}`);
+      }
+    } catch (dbError) {
+      console.error(`Error getting random event: ${dbError.message}`);
+      // Continue with the provided event ID
+    }
+
+    // Get a new proxy for this refresh operation
+    const proxyManager = new ProxyManager(console);
+    const proxyData = proxyManager.getProxyForEvent(eventIdToUse);
+    if (proxyData && proxyData.proxy) {
+      proxyToUse = proxyData.proxy;
+      console.log(`Using new proxy for cookie refresh: ${proxyToUse.proxy}`);
+    }
+
     console.log(
-      `No valid cookies found, getting new cookies using event ${eventId}`
+      `No valid cookies found, getting new cookies using event ${eventIdToUse}`
     );
 
     // Generate fallback headers if we can't get proper ones
     const fallbackHeaders = generateFallbackHeaders();
     
-    // Check if we have a persisted page and context first
-    if (cookieManager.persistedPage && cookieManager.persistedContext) {
-      console.log('Using existing browser page for refresh');
-      page = cookieManager.persistedPage;
-      localContext = cookieManager.persistedContext;
+    // Check if we have an existing browser to use
+    if (browser) {
+      console.log('Using existing browser for refresh');
+      
+      try {
+        // Create a new context with the new proxy
+        localContext = await browser.newContext({
+          ...iphone13,
+          proxy: proxyToUse ? {
+            server: `http://${proxyToUse.proxy}`,
+            username: proxyToUse.username,
+            password: proxyToUse.password
+          } : undefined,
+          viewport: { width: 390, height: 844 },
+          deviceScaleFactor: 3,
+          isMobile: true,
+          hasTouch: true,
+          colorScheme: 'light',
+          locale: 'en-US',
+          timezoneId: 'America/Los_Angeles',
+          userAgent: getRealisticIphoneUserAgent()
+        });
+        
+        // Create a new page in this context
+        page = await localContext.newPage();
+        
+        console.log('Successfully created new tab with new proxy');
+      } catch (error) {
+        console.error('Error creating new context/tab:', error.message);
+        
+        // If creating a new context fails, try initializing a new browser
+        console.log('Falling back to initializing a new browser');
+        const { context: newContext, fingerprint, page: newPage, browser: newBrowser } = await initBrowser(proxyToUse, true);
+        browser = newPage.context().browser();
+        localContext = newContext;
+        page = newPage;
+      }
     } else {
-      // Initialize browser with improved error handling
+      // Initialize browser with improved error handling if no existing browser
       let initAttempts = 0;
       let initSuccess = false;
       let initError = null;
       
       while (initAttempts < 3 && !initSuccess) {
         try {
-          const { context: newContext, fingerprint, page: newPage } = await initBrowser(proxy, true); // Pass true for cookie capture
+          const { context: newContext, fingerprint, page: newPage, browser: newBrowser } = await initBrowser(proxyToUse, true);
           if (!newContext || !fingerprint) {
             throw new Error("Failed to initialize browser or generate fingerprint");
           }
           
+          browser = newBrowser;
           localContext = newContext;
           page = newPage;
-          
-          // Store the page and context for future use
-          cookieManager.persistedPage = page;
-          cookieManager.persistedContext = localContext;
           
           initSuccess = true;
         } catch (error) {
@@ -854,7 +921,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           fingerprint: BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
           headers: fallbackHeaders,
-          proxy: cookieManager.capturedState.proxy || proxy,
+          proxy: cookieManager.capturedState.proxy || proxyToUse,
         };
         
         clearTimeout(globalTimeoutId);
@@ -867,10 +934,10 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       throw new Error("Failed to create page");
     }
 
-    const url = `https://www.ticketmaster.com/event/${eventId}`;
+    const url = `https://www.ticketmaster.com/event/${eventIdToUse}`;
 
     try {
-      console.log(`Navigating to ${url} for event ${eventId}`);
+      console.log(`Navigating to ${url} for event ${eventIdToUse}`);
 
       // Use domcontentloaded instead of networkidle for faster, more reliable loading
       await page.goto(url, {
@@ -880,11 +947,11 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
       // Only capture cookies if the page URL still contains the event ID (i.e., real event data)
       let currentUrl = page.url();
-      let pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+      let pageLoadSuccessful = currentUrl.includes(`/event/${eventIdToUse}`);
       
       // Try reloading the page if it didn't load correctly the first time
       if (!pageLoadSuccessful) {
-        console.warn(`Page did not load event data for ${eventId} on first attempt, URL: ${currentUrl}. Trying page reload...`);
+        console.warn(`Page did not load event data for ${eventIdToUse} on first attempt, URL: ${currentUrl}. Trying page reload...`);
         
         try {
           // Attempt to reload the page
@@ -895,21 +962,21 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           
           // Check if the reload worked
           currentUrl = page.url();
-          pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+          pageLoadSuccessful = currentUrl.includes(`/event/${eventIdToUse}`);
           
           if (pageLoadSuccessful) {
-            console.log(`Page successfully loaded after reload for event ${eventId}`);
+            console.log(`Page successfully loaded after reload for event ${eventIdToUse}`);
           } else {
-            console.warn(`Page reload did not fix the issue for event ${eventId}, URL: ${currentUrl}`);
+            console.warn(`Page reload did not fix the issue for event ${eventIdToUse}, URL: ${currentUrl}`);
           }
         } catch (reloadError) {
-          console.error(`Error reloading page for event ${eventId}:`, reloadError.message);
+          console.error(`Error reloading page for event ${eventIdToUse}:`, reloadError.message);
         }
       }
       
-      // If reload didn't work, try with a new tab
+      // If reload didn't work, try with a new tab in the same context
       if (!pageLoadSuccessful) {
-        console.warn(`Trying with a new tab for event ${eventId}...`);
+        console.warn(`Trying with a new tab for event ${eventIdToUse}...`);
         
         try {
           // Create a new tab in the same context
@@ -923,41 +990,40 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           
           // Check if the new tab worked
           currentUrl = newPage.url();
-          pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+          pageLoadSuccessful = currentUrl.includes(`/event/${eventIdToUse}`);
           
           if (pageLoadSuccessful) {
-            console.log(`Successfully loaded in new tab for event ${eventId}`);
+            console.log(`Successfully loaded in new tab for event ${eventIdToUse}`);
             // Use the new page instead
             await page.close().catch(e => console.error("Error closing old page:", e));
             page = newPage;
-            cookieManager.persistedPage = newPage;
           } else {
             // Close the new page if it didn't work
-            console.warn(`New tab did not fix the issue for event ${eventId}, URL: ${currentUrl}`);
+            console.warn(`New tab did not fix the issue for event ${eventIdToUse}, URL: ${currentUrl}`);
             await newPage.close().catch(e => console.error("Error closing new page:", e));
           }
         } catch (newTabError) {
-          console.error(`Error using new tab for event ${eventId}:`, newTabError.message);
+          console.error(`Error using new tab for event ${eventIdToUse}:`, newTabError.message);
         }
       }
       
       // If both reload and new tab didn't work, return fallback state
       if (!pageLoadSuccessful) {
-        console.warn(`Failed to load event data after multiple attempts for ${eventId}`);
+        console.warn(`Failed to load event data after multiple attempts for ${eventIdToUse}`);
         // Abort and return fallback state without cookies
         cookieManager.capturedState = {
           cookies: null,
           fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
           headers: fallbackHeaders,
-          proxy: proxy
+          proxy: proxyToUse
         };
         clearTimeout(globalTimeoutId);
         cleanupRefreshProcess();
         return cookieManager.capturedState;
       }
 
-      console.log(`Successfully loaded page for event ${eventId}`);
+      console.log(`Successfully loaded page for event ${eventIdToUse}`);
 
       // Check for Ticketmaster challenge (e.g., CAPTCHA)
       const isChallengePresent = await checkForTicketmasterChallenge(page);
@@ -981,7 +1047,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       );
 
       if (!cookies || cookies.length === 0) {
-        console.error("Failed to capture cookies for event", eventId);
+        console.error("Failed to capture cookies for event", eventIdToUse);
         
         // Use fallback headers if we couldn't get cookies
         cookieManager.capturedState = {
@@ -989,7 +1055,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           fingerprint: newFingerprint,
           lastRefresh: Date.now(),
           headers: fallbackHeaders,
-          proxy: cookieManager.capturedState.proxy || proxy,
+          proxy: cookieManager.capturedState.proxy || proxyToUse,
         };
         
         // Process queued refresh requests with fallback data
@@ -1007,7 +1073,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         cookies,
         fingerprint: newFingerprint,
         lastRefresh: Date.now(),
-        proxy: cookieManager.capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxyToUse,
       };
 
       // Save cookies to file in the background
@@ -1031,7 +1097,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         fingerprint: BrowserFingerprint.generate(),
         lastRefresh: Date.now(),
         headers: fallbackHeaders,
-        proxy: cookieManager.capturedState.proxy || proxy,
+        proxy: cookieManager.capturedState.proxy || proxyToUse,
       };
       
       // Process queued refresh requests with fallback data
@@ -1042,7 +1108,24 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       
       throw error;
     } finally {
-      // Don't close page or context - keep them for reuse
+      // Close the page but keep the browser and context open
+      if (page) {
+        try {
+          await page.close().catch(e => console.error("Error closing page:", e));
+        } catch (e) {
+          console.error("Error closing page in finally block:", e);
+        }
+      }
+      
+      // Close the context but keep the browser
+      if (localContext && localContext !== cookieManager.persistedContext) {
+        try {
+          await localContext.close().catch(e => console.error("Error closing context:", e));
+        } catch (e) {
+          console.error("Error closing context in finally block:", e);
+        }
+      }
+      
       clearTimeout(globalTimeoutId);
       cleanupRefreshProcess();
     }
@@ -1918,15 +2001,24 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
           let newAgent;
           
           if (global.proxyManager) {
+            // Release the old proxy with error
+            if (externalProxy && externalProxy.proxy) {
+              global.proxyManager.releaseProxy(eventId, false, error);
+            }
+
+            // Get a fresh proxy from ProxyManager
             const proxyData = global.proxyManager.getProxyForEvent(eventId);
             if (proxyData) {
-              const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
+              const proxyAgentData =
+                global.proxyManager.createProxyAgent(proxyData);
               newAgent = proxyAgentData.proxyAgent;
             } else {
+              // Fallback
               const proxyData = await GetProxy();
               newAgent = proxyData.proxyAgent;
             }
           } else {
+            // Fallback to old method
             const proxyData = await GetProxy();
             newAgent = proxyData.proxyAgent;
           }
