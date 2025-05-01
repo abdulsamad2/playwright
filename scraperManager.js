@@ -25,7 +25,7 @@ const SHORT_COOLDOWNS = [1000, 2000, 4000]; // Shortened cooldowns: 1s, 2s, 4s f
 const LONG_COOLDOWN_MINUTES = 1; // Reduced to 1 minute for more frequent retries within the 10 minute window
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
-const LOG_LEVEL = 1; // Default to warnings and errors only
+const LOG_LEVEL = 3; // Default to warnings and errors only
 
 // Cookie expiration threshold: refresh cookies every 20 minutes
 const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (changed from 30 minutes)
@@ -122,7 +122,6 @@ export class ScraperManager {
     this.batchProxies = new Map(); // Map batch ID to proxy
 
     // New: Data caching and API error handling
-    this.responseCache = new Map(); // Cache successful responses
     this.headerRotationPool = []; // Pool of working headers
     this.proxySuccessRates = new Map(); // Track success rates per proxy
     this.apiCircuitBreaker = {
@@ -139,34 +138,6 @@ export class ScraperManager {
     this.lastFailedBatchProcess = null; // Last time we processed a batch of failed events
     this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
-    
-    // Add cache configuration
-    this.cacheConfig = {
-      responseCacheDuration: 5 * 60 * 1000, // 5 minutes default cache duration
-      maxCacheSize: 1000, // Maximum number of cached responses
-      cacheCleanupInterval: 60 * 1000, // Cleanup cache every minute
-    };
-    
-    // Start cache cleanup interval
-    setInterval(() => this.cleanupCache(), this.cacheConfig.cacheCleanupInterval);
-  }
-
-  // Add cache cleanup method
-  cleanupCache() {
-    const now = Date.now();
-    for (const [eventId, { timestamp, data }] of this.responseCache.entries()) {
-      if (now - timestamp > this.cacheConfig.responseCacheDuration) {
-        this.responseCache.delete(eventId);
-      }
-    }
-    
-    // Limit cache size
-    if (this.responseCache.size > this.cacheConfig.maxCacheSize) {
-      const entries = Array.from(this.responseCache.entries());
-      entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-      const toRemove = entries.slice(0, entries.length - this.cacheConfig.maxCacheSize);
-      toRemove.forEach(([eventId]) => this.responseCache.delete(eventId));
-    }
   }
 
   logWithTime(message, type = "info") {
@@ -953,15 +924,6 @@ export class ScraperManager {
         return true;
       }
 
-      // Check cache first
-      const cachedResponse = this.responseCache.get(eventId);
-      if (cachedResponse && Date.now() - cachedResponse.timestamp < this.cacheConfig.responseCacheDuration) {
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(`Using cached data for ${eventId} (cache age: ${Math.round((Date.now() - cachedResponse.timestamp) / 1000)}s)`, "success");
-        }
-        return cachedResponse.data;
-      }
-
       // Refresh headers with backoff/caching strategy
       const headers = await this.refreshEventHeaders(eventId);
       if (!headers) {
@@ -987,13 +949,6 @@ export class ScraperManager {
       if (result.length === 0) {
         throw new Error("Empty scrape result: array is empty");
       }
-      
-      // We're still storing in the cache for metrics/monitoring purposes
-      // but we'll never use the cached results for returning to the client
-      this.responseCache.set(eventId, {
-        timestamp: Date.now(),
-        data: result
-      });
       
       // Mark this header as successful
       if (headers) {
