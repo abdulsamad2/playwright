@@ -294,6 +294,42 @@ function getRealisticIphoneUserAgent() {
   return `Mozilla/5.0 (iPhone; CPU iPhone OS ${iOSVersion} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${safariVersion} Mobile/15E148 Safari/604.1`;
 }
 
+// Generate cross-platform compatible user agent
+function getCompatibleUserAgent(type = 'desktop') {
+  try {
+    if (type === 'mobile' || type === 'iphone') {
+      return getRealisticIphoneUserAgent();
+    }
+    
+    // Use random-useragent library with fallbacks
+    let userAgent;
+    try {
+      userAgent = randomUseragent.getRandom(ua => 
+        ua.browserName === 'Chrome' || ua.browserName === 'Firefox');
+    } catch (error) {
+      console.warn('Error getting random user agent:', error.message);
+    }
+    
+    // If random-useragent fails, use hardcoded fallbacks that work across platforms
+    if (!userAgent) {
+      const fallbacks = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/116.0',
+        'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/116.0'
+      ];
+      userAgent = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+    
+    return userAgent;
+  } catch (error) {
+    console.error('Failed to generate user agent:', error);
+    // Last resort fallback that works everywhere
+    return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36';
+  }
+}
+
 // Enhanced browser fingerprint generation
 function enhancedFingerprint() {
   const baseFingerprint = BrowserFingerprint.generate();
@@ -403,10 +439,14 @@ async function initBrowser(proxy) {
       browser = await chromium.launch(launchOptions);
     }
     
+    // Generate a user agent that works across platforms
+    const userAgent = getCompatibleUserAgent('iphone');
+    console.log('Using user agent:', userAgent);
+    
     // Create new context with enhanced fingerprinting
     context = await browser.newContext({
       
-      userAgent: getRealisticIphoneUserAgent(),
+      userAgent: userAgent,
       locale: location.locale,
       colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
       timezoneId: location.timezone,
@@ -868,7 +908,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           colorScheme: 'light',
           locale: 'en-US',
           timezoneId: 'America/Los_Angeles',
-          userAgent: getRealisticIphoneUserAgent()
+          userAgent: getCompatibleUserAgent('iphone')
         });
         
         // Create a new page in this context
@@ -1665,9 +1705,7 @@ const ScrapeEvent = async (
         fingerprint = generateEnhancedFingerprint();
         userAgent =
           fingerprint.browser?.userAgent ||
-          randomUseragent.getRandom(
-            (ua) => ua.browserName === fingerprint.browser?.name
-          ) ||
+          getCompatibleUserAgent(fingerprint.browser?.name ? 'desktop' : 'mobile') ||
           getRealisticIphoneUserAgent();
       } catch (error) {
         console.error(`Error getting captured data: ${error.message}`);
@@ -2418,9 +2456,10 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
     if (fingerprint.browser?.userAgent) {
       userAgent = fingerprint.browser.userAgent;
     } else if (fingerprint.browser?.name) {
-      userAgent = randomUseragent.getRandom(ua => ua.browserName === fingerprint.browser.name);
+      // Use our cross-platform compatible user agent generator
+      userAgent = getCompatibleUserAgent(fingerprint.browser.name === 'Safari' ? 'mobile' : 'desktop');
     } else {
-      userAgent = randomUseragent.getRandom(ua => ua.browserName === 'Chrome');
+      userAgent = getCompatibleUserAgent('desktop');
     }
 
     const browserName = fingerprint.browser?.name || 'Chrome';
