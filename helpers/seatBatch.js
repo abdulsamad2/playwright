@@ -362,31 +362,32 @@ export const AttachRowSection = (data, mapData, offers, event,descriptions) => {
  
  //attach offer
 
-return returnData.map(x=>{
+return returnData.map(x => {   
   let offerGet = offers.find(e => e.offerId == x.offerId);
-  
- if (offerGet) {
-   // Only return Standard Admission tickets
-   if (
-     offerGet.name == "Standard Admission" &&
-     offerGet.offerType == "standard"
-   ) {
-     return CreateInventoryAndLine(x, offerGet, event, descriptions);
-   } else {
-     return undefined;
-   }
- } else {
-   return undefined;
- }
- }).filter(x=>x!=undefined).filter((obj, index, self) => {
+      
+  if(offerGet) {
+    // Looser selector for Standard admission tickets
+    const offerTypeMatch = offerGet.offerType?.toLowerCase()?.includes('standard');
+    const offerNameMatch = offerGet.name?.toLowerCase()?.includes('standard');
+    
+    if(offerTypeMatch || offerNameMatch) {
+      return CreateInventoryAndLine(x, offerGet, event, descriptions);
+    } else {
+      return undefined;
+    }
+  } else {
+    return undefined;
+  }
+}).filter(x => x != undefined)
+  .filter((obj, index, self) => {
     // Convert dbId value to string to compare
     var dbId = obj.dbId.toString();
-  
+    
     // Check if the current dbId is the first occurrence in the array
     return index === self.findIndex((o) => o.dbId.toString() === dbId);
-  }).filter(x=>x.inventory.quantity>1)
-  
-  //remove duplicate
+  })
+  .filter(x => x.inventory.quantity > 1)
+  // Remove duplicates
   .filter((obj, index, self) => {
     // Check if any other object has the same row and section
     const hasDuplicate = self.some((otherObj, otherIndex) => {
@@ -397,8 +398,7 @@ return returnData.map(x=>{
         obj.seats.some(seat => otherObj.seats.includes(seat))
       );
     });
-  
+    
     return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
-  });
-
-}
+  })
+};
