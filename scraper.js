@@ -18,6 +18,22 @@ import { CookieManager } from './helpers/CookieManager.js';
 import ProxyManager from './helpers/ProxyManager.js'; 
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
+// Import functions from browser-cookies.js
+import {
+  initBrowser,
+  captureCookies,
+  refreshCookies,
+  loadCookiesFromFile,
+  saveCookiesToFile,
+  cleanup,
+  handleTicketmasterChallenge,
+  checkForTicketmasterChallenge,
+  enhancedFingerprint,
+  getRandomLocation,
+  getRealisticIphoneUserAgent,
+  simulateMobileInteractions
+} from './browser-cookies.js';
+
 // Initialize CookieManager instance
 const cookieManager = new CookieManager();
 cookieManager.persistedPage = null;
@@ -182,507 +198,31 @@ function generateCorrelationId() {
   return crypto.randomUUID();
 }
 
-async function handleTicketmasterChallenge(page) {
-  const startTime = Date.now();
-
-  try {
-    const challengePresent = await page.evaluate(() => {
-      return document.body.textContent.includes(
-        "Your Browsing Activity Has Been Paused"
-      );
-    }).catch(() => false); // Catch any navigation errors
-
-    if (challengePresent) {
-      console.log("Detected Ticketmaster challenge, attempting resolution...");
-      await page.waitForTimeout(1000 + Math.random() * 1000);
-
-      try {
-        const viewportSize = page.viewportSize();
-        if (viewportSize) {
-          await page.mouse.move(
-            Math.floor(Math.random() * viewportSize.width),
-            Math.floor(Math.random() * viewportSize.height),
-            { steps: 5 }
-          );
-        }
-      } catch (moveError) {
-        console.warn("Mouse movement error in challenge, continuing:", moveError.message);
-      }
-
-      const buttons = await page.$$("button").catch(() => []);
-      let buttonClicked = false;
-
-      for (const button of buttons) {
-        if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
-          console.warn("Challenge timeout, continuing without resolution");
-          return false;
-        }
-
-        try {
-          const text = await button.textContent();
-          if (
-            text?.toLowerCase().includes("continue") ||
-            text?.toLowerCase().includes("verify")
-          ) {
-            await button.click();
-            buttonClicked = true;
-            break;
-          }
-        } catch (buttonError) {
-          console.warn("Button click error, continuing:", buttonError.message);
-          continue;
-        }
-      }
-
-      if (!buttonClicked) {
-        console.warn("Could not find challenge button, continuing without resolution");
-        return false;
-      }
-
-      await page.waitForTimeout(2000);
-      const stillChallenged = await page.evaluate(() => {
-        return document.body.textContent.includes(
-          "Your Browsing Activity Has Been Paused"
-        );
-      }).catch(() => false);
-
-      if (stillChallenged) {
-        console.warn("Challenge not resolved, continuing without resolution");
-        return false;
-      }
-    }
-    return true;
-  } catch (error) {
-    console.warn("Challenge handling failed, continuing:", error.message);
-    return false;
-  }
-}
-
-// Enhanced location generation
-function getRandomLocation() {
-  const locations = [
-    { timezone: "America/New_York", latitude: 40.7128 + (Math.random() * 0.1 - 0.05), longitude: -74.006 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
-    { timezone: "America/Chicago", latitude: 41.8781 + (Math.random() * 0.1 - 0.05), longitude: -87.6298 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
-    { timezone: "America/Denver", latitude: 39.7392 + (Math.random() * 0.1 - 0.05), longitude: -104.9903 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
-    { timezone: "America/Los_Angeles", latitude: 34.0522 + (Math.random() * 0.1 - 0.05), longitude: -118.2437 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
-    { timezone: "America/Phoenix", latitude: 33.4484 + (Math.random() * 0.1 - 0.05), longitude: -112.0740 + (Math.random() * 0.1 - 0.05), locale: "en-US" },
-    { timezone: "America/Toronto", latitude: 43.6532 + (Math.random() * 0.1 - 0.05), longitude: -79.3832 + (Math.random() * 0.1 - 0.05), locale: "en-CA" },
-    { timezone: "America/Vancouver", latitude: 49.2827 + (Math.random() * 0.1 - 0.05), longitude: -123.1207 + (Math.random() * 0.1 - 0.05), locale: "en-CA" },
-    { timezone: "Europe/London", latitude: 51.5074 + (Math.random() * 0.1 - 0.05), longitude: -0.1278 + (Math.random() * 0.1 - 0.05), locale: "en-GB" },
-    { timezone: "Europe/Paris", latitude: 48.8566 + (Math.random() * 0.1 - 0.05), longitude: 2.3522 + (Math.random() * 0.1 - 0.05), locale: "fr-FR" },
-    { timezone: "Europe/Berlin", latitude: 52.5200 + (Math.random() * 0.1 - 0.05), longitude: 13.4050 + (Math.random() * 0.1 - 0.05), locale: "de-DE" },
-  ];
-
-  const weightedLocations = [
-    ...locations.slice(0, 6),
-    ...locations.slice(0, 6),
-    ...locations
-  ];
-
-  const random = Math.floor(Math.random() * weightedLocations.length);
-  return weightedLocations[random];
-}
-
-// Generate realistic iPhone user agent
-function getRealisticIphoneUserAgent() {
-  const iOSVersions = ['15_0', '15_1', '15_2', '15_3', '15_4', '15_5', '15_6', '16_0', '16_1', '16_2'];
-  const safariVersions = ['15.0', '15.1', '15.2', '15.3', '15.4', '16.0', '16.1'];
-  
-  const iOSVersion = iOSVersions[Math.floor(Math.random() * iOSVersions.length)];
-  const safariVersion = safariVersions[Math.floor(Math.random() * safariVersions.length)];
-  
-  return `Mozilla/5.0 (iPhone; CPU iPhone OS ${iOSVersion} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${safariVersion} Mobile/15E148 Safari/604.1`;
-}
-
-// Generate cross-platform compatible user agent
-function getCompatibleUserAgent(type = 'desktop') {
-  try {
-    if (type === 'mobile' || type === 'iphone') {
-      return getRealisticIphoneUserAgent();
-    }
-    
-    // Use random-useragent library with fallbacks
-    let userAgent;
-    try {
-      userAgent = randomUseragent.getRandom(ua => 
-        ua.browserName === 'Chrome' || ua.browserName === 'Firefox');
-    } catch (error) {
-      console.warn('Error getting random user agent:', error.message);
-    }
-    
-    // If random-useragent fails, use hardcoded fallbacks that work across platforms
-    if (!userAgent) {
-      const fallbacks = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/116.0',
-        'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/116.0'
-      ];
-      userAgent = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-    }
-    
-    return userAgent;
-  } catch (error) {
-    console.error('Failed to generate user agent:', error);
-    // Last resort fallback that works everywhere
-    return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36';
-  }
-}
-
-// Enhanced browser fingerprint generation
-function enhancedFingerprint() {
-  const baseFingerprint = BrowserFingerprint.generate();
-  
-  const hardwareValues = [4, 6, 8];
-  const memoryValues = [2, 4, 8];
-  
-  return {
-    ...baseFingerprint,
-    hardwareConcurrency: hardwareValues[Math.floor(Math.random() * hardwareValues.length)],
-    deviceMemory: memoryValues[Math.floor(Math.random() * memoryValues.length)],
-    screenResolution: {
-      width: [375, 390, 414][Math.floor(Math.random() * 3)],
-      height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
-    },
-    colorDepth: 24,
-    touchPoints: Math.floor(Math.random() * 3) + 3
-  };
-}
-
-// Simulate mobile interactions
-async function simulateMobileInteractions(page) {
-  const viewport = page.viewportSize();
-  if (!viewport) return;
-
-  const startX = viewport.width / 2;
-  const startY = viewport.height * (0.7 + Math.random() * 0.2);
-  const endY = viewport.height * (0.3 + Math.random() * 0.2);
-  
-  await page.touchscreen.tap(startX, startY);
-  await page.waitForTimeout(100 + Math.random() * 300);
-  
-  await page.mouse.move(startX, startY);
-  await page.mouse.down();
-  
-  const steps = 10 + Math.floor(Math.random() * 10);
-  const timePerStep = 10 + Math.floor(Math.random() * 20);
-  
-  for (let i = 0; i <= steps; i++) {
-    const currentY = startY - ((startY - endY) * (i / steps));
-    await page.mouse.move(startX, currentY);
-    await page.waitForTimeout(timePerStep);
-  }
-  
-  await page.mouse.up();
-  await page.waitForTimeout(300 + Math.random() * 500);
-}
-
-// Enhanced browser initialization
-async function initBrowser(proxy) {
-  let context = null;
-  
-  try {
-    // Get randomized human-like properties
-    const location = getRandomLocation();
-    
-    // For persisting browser sessions, use same browser if possible
-    if (!browser || !browser.isConnected()) {
-      // Launch options
-      const launchOptions = {
-        headless: false,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-web-security',
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-infobars',
-          '--disable-notifications'
-        ],
-        timeout: 60000,
-      };
-
-      if (proxy && typeof proxy === 'object' && proxy.proxy) {
-        try {
-          // Extract hostname and port from proxy string
-          const proxyString = proxy.proxy;
-          
-          // Ensure proxyString is a string before using string methods
-          if (typeof proxyString !== 'string') {
-            throw new Error('Invalid proxy format: proxy.proxy must be a string, got ' + typeof proxyString);
-          }
-          
-          // Check if proxy string is in correct format (host:port)
-          if (!proxyString.includes(':')) {
-            throw new Error('Invalid proxy format: ' + proxyString);
-          }
-          
-          const [hostname, portStr] = proxyString.split(':');
-          const port = parseInt(portStr) || 80;
-          
-          launchOptions.proxy = {
-            server: `http://${hostname}:${port}`,
-            username: proxy.username,
-            password: proxy.password,
-          };
-          
-          console.log(`Configuring browser with proxy: ${hostname}:${port}`);
-        } catch (error) {
-          console.warn('Invalid proxy configuration, launching without proxy:', error);
-        }
-      }
-
-      // Launch browser
-      browser = await chromium.launch(launchOptions);
-    }
-    
-    // Generate a user agent that works across platforms
-    const userAgent = getCompatibleUserAgent('iphone');
-    console.log('Using user agent:', userAgent);
-    
-    // Create new context with enhanced fingerprinting
-    context = await browser.newContext({
-      
-      userAgent: userAgent,
-      locale: location.locale,
-      colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
-      timezoneId: location.timezone,
-      geolocation: {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        accuracy: 100 * Math.random() + 50,
-      },
-      permissions: [
-        "geolocation",
-        "notifications",
-        "microphone",
-        "camera",
-      ],
-      deviceScaleFactor: 2 + Math.random() * 0.5,
-      hasTouch: true,
-      isMobile: true,
-      javaScriptEnabled: true,
-      acceptDownloads: true,
-      ignoreHTTPSErrors: true,
-      bypassCSP: true,
-      extraHTTPHeaders: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Accept-Language": `${location.locale},en;q=0.9`,
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "DNT": Math.random() > 0.5 ? "1" : "0",
-        "Upgrade-Insecure-Requests": "1",
-        "Pragma": "no-cache"
-      },
-      viewport: {
-        width: [375, 390, 414][Math.floor(Math.random() * 3)],
-        height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
-      }
-    });
-    
-    // Create a new page and simulate human behavior
-    const page = await context.newPage();
-    await page.waitForTimeout(1000 + Math.random() * 2000);
-    await simulateMobileInteractions(page);
-    
-    return { context, fingerprint: enhancedFingerprint(), page };
-  } catch (error) {
-    console.error("Error initializing browser:", error.message);
-    
-    // Cleanup on error
-    if (context) await context.close().catch(() => {});
-    
-    throw error;
-  }
-}
-
-async function captureCookies(page, fingerprint) {
-  let retryCount = 0;
-  const MAX_RETRIES = 5;
-  
-  while (retryCount < MAX_RETRIES) {
-    try {
-      const challengePresent = await page.evaluate(() => {
-        return document.body.textContent.includes(
-          "Your Browsing Activity Has Been Paused"
-        );
-      }).catch(() => false);
-
-      if (challengePresent) {
-        console.log(
-          `Attempt ${retryCount + 1}: Challenge detected during cookie capture`
-        );
-
-        const challengeResolved = await handleTicketmasterChallenge(page);
-        if (!challengeResolved) {
-          if (retryCount === MAX_RETRIES - 1) {
-            console.log("Max retries reached during challenge resolution");
-            return { cookies: null, fingerprint };
-          }
-          await page.waitForTimeout(CONFIG.RETRY_DELAY);
-          retryCount++;
-          continue;
-        }
-      }
-
-      // Get context from page's browser context
-      const context = page.context();
-      if (!context) {
-        throw new Error("Cannot access browser context from page");
-      }
-
-      let cookies = await context.cookies().catch(() => []);
-
-      if (!cookies?.length) {
-        console.log(`Attempt ${retryCount + 1}: No cookies captured`);
-        if (retryCount === MAX_RETRIES - 1) {
-          return { cookies: null, fingerprint };
-        }
-        await page.waitForTimeout(CONFIG.RETRY_DELAY);
-        retryCount++;
-        continue;
-      }
-
-      // Filter out reCAPTCHA Google cookies
-      cookies = cookies.filter(cookie => !cookie.name.includes('_grecaptcha') && 
-                                      !cookie.domain.includes('google.com'));
-
-      // Check if we have enough cookies from ticketmaster.com
-      const ticketmasterCookies = cookies.filter(cookie => 
-        cookie.domain.includes('ticketmaster.com') || 
-        cookie.domain.includes('.ticketmaster.com')
-      );
-
-      if (ticketmasterCookies.length < 3) {
-        console.log(`Attempt ${retryCount + 1}: Not enough Ticketmaster cookies`);
-        if (retryCount === MAX_RETRIES - 1) {
-          return { cookies: null, fingerprint };
-        }
-        await page.waitForTimeout(CONFIG.RETRY_DELAY);
-        retryCount++;
-        continue;
-      }
-
-      // Check JSON size
-      const cookiesJson = JSON.stringify(cookies, null, 2);
-      const lineCount = cookiesJson.split('\n').length;
-      
-      if (lineCount < 200) {
-        console.log(`Attempt ${retryCount + 1}: Cookie JSON too small (${lineCount} lines)`);
-        if (retryCount === MAX_RETRIES - 1) {
-          return { cookies: null, fingerprint };
-        }
-        await page.waitForTimeout(CONFIG.RETRY_DELAY);
-        retryCount++;
-        continue;
-      }
-
-      const oneHourFromNow = Date.now() + CONFIG.COOKIE_REFRESH_INTERVAL;
-      cookies = cookies.map((cookie) => ({
-        ...cookie,
-        expires: oneHourFromNow / 1000,
-        expiry: oneHourFromNow / 1000,
-      }));
-
-      // Add cookies one at a time with error handling
-      for (const cookie of cookies) {
-        try {
-          await context.addCookies([cookie]);
-        } catch (error) {
-          console.warn(`Error adding cookie ${cookie.name}:`, error.message);
-        }
-      }
-
-      fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
-      console.log(`Successfully captured cookies on attempt ${retryCount + 1}`);
-      return { cookies, fingerprint };
-    } catch (error) {
-      console.error(`Error capturing cookies on attempt ${retryCount + 1}:`, error);
-      if (retryCount === MAX_RETRIES - 1) {
-        return { cookies: null, fingerprint };
-      }
-      await page.waitForTimeout(CONFIG.RETRY_DELAY);
-      retryCount++;
-    }
-  }
-}
-
-async function loadCookiesFromFile() {
-  try {
-    if (fs.existsSync(COOKIES_FILE)) {
-      const data = await fs.promises.readFile(COOKIES_FILE, 'utf8');
-      const parsedData = JSON.parse(data);
-      
-      // Check if we're using the new format with cookie rotation
-      if (parsedData.cookieSets && Array.isArray(parsedData.cookieSets)) {
-        // Sort sets by timestamp (newest first)
-        const sortedSets = parsedData.cookieSets.sort((a, b) => b.timestamp - a.timestamp);
-        
-        // Try each cookie set until we find a usable one
-        for (const set of sortedSets) {
-          const cookies = set.cookies;
-          if (cookies && cookies.length > 0) {
-            // Validate cookie freshness
-            const cookieString = cookies
-              .map(cookie => `${cookie.name}=${cookie.value}`)
-              .join('; ');
-            
-            if (handleCookies.areCookiesFresh(cookieString)) {
-              console.log('Using cookie set from', new Date(set.timestamp).toISOString());
-              return cookies;
-            }
-          }
-        }
-        return null; // No valid cookie sets found
-      } 
-      else if (Array.isArray(parsedData)) {
-        // Legacy format - single cookie array
-        const cookies = parsedData;
-        
-        // Validate cookie freshness
-        const cookieString = cookies
-          .map(cookie => `${cookie.name}=${cookie.value}`)
-          .join('; ');
-        
-        if (handleCookies.areCookiesFresh(cookieString)) {
-          return cookies;
-        }
-      }
-    }
-    return null;
-  } catch (error) {
-    console.error('Error loading cookies:', error);
-    return null;
-  }
-}
-
 async function getCapturedData(eventId, proxy, forceRefresh = false) {
   const currentTime = Date.now();
 
   // If we don't have cookies, try to load them from file first
   if (!cookieManager.capturedState.cookies) {
-    const cookiesFromFile = await cookieManager.loadCookiesFromFile();
-    if (cookiesFromFile) {
-      const cookieAge = cookiesFromFile[0]?.expiry ? 
-                       (cookiesFromFile[0].expiry * 1000 - currentTime) : 
-                       CookieManager.CONFIG.MAX_COOKIE_AGE;
-      
-      if (cookieAge > 0 && cookieAge < CookieManager.CONFIG.MAX_COOKIE_AGE) {
-        cookieManager.capturedState.cookies = cookiesFromFile;
-        cookieManager.capturedState.lastRefresh = currentTime - (CookieManager.CONFIG.MAX_COOKIE_AGE - cookieAge);
-        if (!cookieManager.capturedState.fingerprint) {
-          cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
-        }
-        if (!cookieManager.capturedState.proxy) {
-          cookieManager.capturedState.proxy = proxy;
+    try {
+      const cookiesFromFile = await loadCookiesFromFile();
+      if (cookiesFromFile) {
+        const cookieAge = cookiesFromFile[0]?.expiry ? 
+                        (cookiesFromFile[0].expiry * 1000 - currentTime) : 
+                        CookieManager.CONFIG.MAX_COOKIE_AGE;
+        
+        if (cookieAge > 0 && cookieAge < CookieManager.CONFIG.MAX_COOKIE_AGE) {
+          cookieManager.capturedState.cookies = cookiesFromFile;
+          cookieManager.capturedState.lastRefresh = currentTime - (CookieManager.CONFIG.MAX_COOKIE_AGE - cookieAge);
+          if (!cookieManager.capturedState.fingerprint) {
+            cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
+          }
+          if (!cookieManager.capturedState.proxy) {
+            cookieManager.capturedState.proxy = proxy;
+          }
         }
       }
+    } catch (error) {
+      console.error("Error loading cookies from file:", error.message);
     }
   }
 
@@ -747,9 +287,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     });
   }
 
-  let localContext = null;
-  let page = null;
-  let mainBrowser = null;
   let proxyToUse = proxy;
   let eventIdToUse = eventId;
 
@@ -782,8 +319,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           resolve(fallbackState);
         }
       }
-      
-      // Don't close context or page to keep the browser session alive
     };
     
     // Add a global timeout for the entire refresh process
@@ -824,18 +359,15 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       return cookieManager.capturedState;
     }
 
-    // Try to load cookies from file with improved validation
+    // Use our new module to refresh cookies
     try {
-      const cookiesFromFile = await loadCookiesFromFile();
-      if (cookiesFromFile && cookiesFromFile.length >= 3) { // Ensure we have enough cookies
-        console.log("Using cookies from file");
-        if (!cookieManager.capturedState.fingerprint) {
-          cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
-        }
-
+      const result = await refreshCookies(eventIdToUse, proxyToUse);
+      
+      if (result && result.cookies) {
+        // Update captured state with the new cookies and fingerprint
         cookieManager.capturedState = {
-          cookies: cookiesFromFile,
-          fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
+          cookies: result.cookies,
+          fingerprint: result.fingerprint,
           lastRefresh: Date.now(),
           proxy: cookieManager.capturedState.proxy || proxyToUse,
         };
@@ -843,330 +375,26 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         clearTimeout(globalTimeoutId);
         await cleanupRefreshProcess();
         return cookieManager.capturedState;
-      }
-    } catch (err) {
-      console.error("Error loading cookies from file:", err);
-    }
-
-    // Get a random event ID from the database for cookie refreshing
-    try {
-      const randomEvent = await Event.aggregate([
-        { 
-          $match: { 
-            Skip_Scraping: { $ne: true },
-            url: { $exists: true, $ne: "" }
-          } 
-        },
-        { $sample: { size: 5 } },
-        { $project: { Event_ID: 1, url: 1 } }
-      ]);
-
-      if (randomEvent && randomEvent.length > 0) {
-        const selectedEvent = randomEvent[Math.floor(Math.random() * randomEvent.length)];
-        eventIdToUse = selectedEvent.Event_ID;
-        console.log(`Using random event ${eventIdToUse} for cookie refresh`);
       } else {
-        console.log(`No random event found, using provided event ID ${eventIdToUse}`);
+        console.error("Failed to get cookies from refreshCookies");
+        throw new Error("Failed to get cookies");
       }
-    } catch (dbError) {
-      console.error(`Error getting random event: ${dbError.message}`);
-      // Continue with the provided event ID
-    }
-
-    // Get a new proxy for this refresh operation
-    const proxyManager = new ProxyManager(console);
-    const proxyData = proxyManager.getProxyForEvent(eventIdToUse);
-    if (proxyData && proxyData.proxy) {
-      proxyToUse = proxyData.proxy;
-      console.log(`Using new proxy for cookie refresh: ${proxyToUse.proxy}`);
-    }
-
-    console.log(
-      `No valid cookies found, getting new cookies using event ${eventIdToUse}`
-    );
-
-    // Generate fallback headers if we can't get proper ones
-    const fallbackHeaders = generateFallbackHeaders();
-    
-    // Check if we have an existing browser to use
-    if (browser) {
-      console.log('Using existing browser for refresh');
-      
-      try {
-        // Create a new context with the new proxy
-        localContext = await browser.newContext({
-          ...iphone13,
-          proxy: proxyToUse ? {
-            server: `http://${proxyToUse.proxy}`,
-            username: proxyToUse.username,
-            password: proxyToUse.password
-          } : undefined,
-          viewport: { width: 390, height: 844 },
-          deviceScaleFactor: 3,
-          isMobile: true,
-          hasTouch: true,
-          colorScheme: 'light',
-          locale: 'en-US',
-          timezoneId: 'America/Los_Angeles',
-          userAgent: getCompatibleUserAgent('iphone')
-        });
-        
-        // Create a new page in this context
-        page = await localContext.newPage();
-        
-        console.log('Successfully created new tab with new proxy');
-      } catch (error) {
-        console.error('Error creating new context/tab:', error.message);
-        
-        // If creating a new context fails, try initializing a new browser
-        console.log('Falling back to initializing a new browser');
-        const { context: newContext, fingerprint, page: newPage, browser: newBrowser } = await initBrowser(proxyToUse, true);
-        browser = newPage.context().browser();
-        localContext = newContext;
-        page = newPage;
-      }
-    } else {
-      // Initialize browser with improved error handling if no existing browser
-      let initAttempts = 0;
-      let initSuccess = false;
-      let initError = null;
-      
-      while (initAttempts < 3 && !initSuccess) {
-        try {
-          const { context: newContext, fingerprint, page: newPage, browser: newBrowser } = await initBrowser(proxyToUse, true);
-          if (!newContext || !fingerprint) {
-            throw new Error("Failed to initialize browser or generate fingerprint");
-          }
-          
-          browser = newBrowser;
-          localContext = newContext;
-          page = newPage;
-          
-          initSuccess = true;
-        } catch (error) {
-          initAttempts++;
-          initError = error;
-          console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
-          await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
-        }
-      }
-      
-      if (!initSuccess) {
-        console.error("All browser initialization attempts failed");
-        
-        // Return fallback headers since we couldn't initialize browser
-        cookieManager.capturedState = {
-          cookies: null,
-          fingerprint: BrowserFingerprint.generate(),
-          lastRefresh: Date.now(),
-          headers: fallbackHeaders,
-          proxy: cookieManager.capturedState.proxy || proxyToUse,
-        };
-        
-        clearTimeout(globalTimeoutId);
-        cleanupRefreshProcess();
-        return cookieManager.capturedState;
-      }
-    }
-
-    if (!page) {
-      throw new Error("Failed to create page");
-    }
-
-    const url = `https://www.ticketmaster.com/event/${eventIdToUse}`;
-
-    try {
-      console.log(`Navigating to ${url} for event ${eventIdToUse}`);
-
-      // Use domcontentloaded instead of networkidle for faster, more reliable loading
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000, // 30 second timeout
-      });
-
-      // Only capture cookies if the page URL still contains the event ID (i.e., real event data)
-      let currentUrl = page.url();
-      let pageLoadSuccessful = currentUrl.includes(`/event/${eventIdToUse}`);
-      
-      // Try reloading the page if it didn't load correctly the first time
-      if (!pageLoadSuccessful) {
-        console.warn(`Page did not load event data for ${eventIdToUse} on first attempt, URL: ${currentUrl}. Trying page reload...`);
-        
-        try {
-          // Attempt to reload the page
-          await page.reload({ 
-            waitUntil: "domcontentloaded",
-            timeout: 30000
-          });
-          
-          // Check if the reload worked
-          currentUrl = page.url();
-          pageLoadSuccessful = currentUrl.includes(`/event/${eventIdToUse}`);
-          
-          if (pageLoadSuccessful) {
-            console.log(`Page successfully loaded after reload for event ${eventIdToUse}`);
-          } else {
-            console.warn(`Page reload did not fix the issue for event ${eventIdToUse}, URL: ${currentUrl}`);
-          }
-        } catch (reloadError) {
-          console.error(`Error reloading page for event ${eventIdToUse}:`, reloadError.message);
-        }
-      }
-      
-      // If reload didn't work, try with a new tab in the same context
-      if (!pageLoadSuccessful) {
-        console.warn(`Trying with a new tab for event ${eventIdToUse}...`);
-        
-        try {
-          // Create a new tab in the same context
-          const newPage = await localContext.newPage();
-          
-          // Navigate to the URL in the new tab
-          await newPage.goto(url, {
-            waitUntil: "domcontentloaded",
-            timeout: 30000
-          });
-          
-          // Check if the new tab worked
-          currentUrl = newPage.url();
-          pageLoadSuccessful = currentUrl.includes(`/event/${eventIdToUse}`);
-          
-          if (pageLoadSuccessful) {
-            console.log(`Successfully loaded in new tab for event ${eventIdToUse}`);
-            // Use the new page instead
-            await page.close().catch(e => console.error("Error closing old page:", e));
-            page = newPage;
-          } else {
-            // Close the new page if it didn't work
-            console.warn(`New tab did not fix the issue for event ${eventIdToUse}, URL: ${currentUrl}`);
-            await newPage.close().catch(e => console.error("Error closing new page:", e));
-          }
-        } catch (newTabError) {
-          console.error(`Error using new tab for event ${eventIdToUse}:`, newTabError.message);
-        }
-      }
-      
-      // If both reload and new tab didn't work, return fallback state
-      if (!pageLoadSuccessful) {
-        console.warn(`Failed to load event data after multiple attempts for ${eventIdToUse}`);
-        // Abort and return fallback state without cookies
-        cookieManager.capturedState = {
-          cookies: null,
-          fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
-          lastRefresh: Date.now(),
-          headers: fallbackHeaders,
-          proxy: proxyToUse
-        };
-        clearTimeout(globalTimeoutId);
-        cleanupRefreshProcess();
-        return cookieManager.capturedState;
-      }
-
-      console.log(`Successfully loaded page for event ${eventIdToUse}`);
-
-      // Check for Ticketmaster challenge (e.g., CAPTCHA)
-      const isChallengePresent = await checkForTicketmasterChallenge(page);
-      if (isChallengePresent) {
-        console.warn(
-          "Detected Ticketmaster challenge page, attempting to resolve..."
-        );
-        await handleTicketmasterChallenge(page);
-      }
-
-      // Simulate human behavior
-      await simulateHumanBehavior(page);
-
-      // Additional wait for cookies to be fully set
-      await page.waitForTimeout(1000);
-
-      // Capture cookies
-      const { cookies, fingerprint: newFingerprint } = await captureCookies(
-        page,
-        cookieManager.capturedState.fingerprint || BrowserFingerprint.generate()
-      );
-
-      if (!cookies || cookies.length === 0) {
-        console.error("Failed to capture cookies for event", eventIdToUse);
-        
-        // Use fallback headers if we couldn't get cookies
-        cookieManager.capturedState = {
-          cookies: null,
-          fingerprint: newFingerprint,
-          lastRefresh: Date.now(),
-          headers: fallbackHeaders,
-          proxy: cookieManager.capturedState.proxy || proxyToUse,
-        };
-        
-        // Process queued refresh requests with fallback data
-        while (cookieManager.cookieRefreshQueue.length > 0) {
-          const { resolve } = cookieManager.cookieRefreshQueue.shift();
-          resolve(cookieManager.capturedState);
-        }
-        
-        cookieManager.isRefreshingCookies = false;
-        return cookieManager.capturedState;
-      }
-
-      // Update captured state with new cookies and fingerprint
-      cookieManager.capturedState = {
-        cookies,
-        fingerprint: newFingerprint,
-        lastRefresh: Date.now(),
-        proxy: cookieManager.capturedState.proxy || proxyToUse,
-      };
-
-      // Save cookies to file in the background
-      cookieManager.saveCookiesToFile(cookies).catch((error) => {
-        console.error("Error saving cookies to file:", error);
-      });
-      
-      // Process queued refresh requests
-      while (cookieManager.cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieManager.cookieRefreshQueue.shift();
-        resolve(cookieManager.capturedState);
-      }
-
-      return cookieManager.capturedState;
     } catch (error) {
-      console.error("Error refreshing headers:", error);
+      console.error("Error refreshing cookies:", error.message);
       
-      // Use fallback headers on error
+      // Generate fallback headers since we couldn't get cookies
+      const fallbackHeaders = generateFallbackHeaders();
       cookieManager.capturedState = {
         cookies: null,
         fingerprint: BrowserFingerprint.generate(),
         lastRefresh: Date.now(),
         headers: fallbackHeaders,
-        proxy: cookieManager.capturedState.proxy || proxyToUse,
+        proxy: cookieManager.capturedState.proxy || proxyToUse
       };
       
-      // Process queued refresh requests with fallback data
-      while (cookieManager.cookieRefreshQueue.length > 0) {
-        const { resolve } = cookieManager.cookieRefreshQueue.shift();
-        resolve(cookieManager.capturedState);
-      }
-      
-      throw error;
-    } finally {
-      // Close the page but keep the browser and context open
-      if (page) {
-        try {
-          await page.close().catch(e => console.error("Error closing page:", e));
-        } catch (e) {
-          console.error("Error closing page in finally block:", e);
-        }
-      }
-      
-      // Close the context but keep the browser
-      if (localContext && localContext !== cookieManager.persistedContext) {
-        try {
-          await localContext.close().catch(e => console.error("Error closing context:", e));
-        } catch (e) {
-          console.error("Error closing context in finally block:", e);
-        }
-      }
-      
       clearTimeout(globalTimeoutId);
-      cleanupRefreshProcess();
+      await cleanupRefreshProcess();
+      return cookieManager.capturedState;
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
@@ -1207,119 +435,41 @@ function generateFallbackHeaders() {
 }
 
 // Function to check for Ticketmaster challenge (e.g., CAPTCHA)
-async function checkForTicketmasterChallenge(page) {
-  try {
-    // Check for CAPTCHA or other blocking mechanisms
-    const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
-    const isChallengePresent = (await page.$(challengeSelector)) !== null;
+// async function checkForTicketmasterChallenge(page) {
+//   try {
+//     // Check for CAPTCHA or other blocking mechanisms
+//     const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
+//     const isChallengePresent = (await page.$(challengeSelector)) !== null;
 
-    if (isChallengePresent) {
-      console.warn("Ticketmaster challenge detected");
-      return true;
-    }
+//     if (isChallengePresent) {
+//       console.warn("Ticketmaster challenge detected");
+//       return true;
+//     }
 
-    return false;
-  } catch (error) {
-    console.error("Error checking for Ticketmaster challenge:", error);
-    return false;
-  }
-}
+//     return false;
+//   } catch (error) {
+//     console.error("Error checking for Ticketmaster challenge:", error);
+//     return false;
+//   }
+// }
 
 // Function to save cookies to a JSON file
-async function saveCookiesToFile(cookies) {
-  try {
-    // Get current cookies from file if they exist
-    let existingCookieSets = [];
-    try {
-      if (fs.existsSync(COOKIES_FILE)) {
-        const fileContent = await fs.promises.readFile(COOKIES_FILE, 'utf8');
-        const fileData = JSON.parse(fileContent);
-        if (Array.isArray(fileData)) {
-          existingCookieSets = fileData;
-        } else if (Array.isArray(fileData.cookieSets)) {
-          existingCookieSets = fileData.cookieSets;
-        }
-      }
-    } catch (err) {
-      console.error('Error reading existing cookies:', err);
-    }
+// async function saveCookiesToFile(cookies) {
+//   try {
+//     return await saveCookiesToFile(cookies);
+//   } catch (error) {
+//     console.error('Error saving cookies:', error);
+//   }
+// }
 
-    // Format the new cookies with updated expiration
-    const cookieData = cookies.map(cookie => ({
-      ...cookie,
-      expires: cookie.expires || Date.now() + COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL,
-      expiry: cookie.expiry || Date.now() + COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
-    }));
-
-    // If cookie rotation is enabled
-    if (COOKIE_MANAGEMENT.COOKIE_ROTATION.ENABLED) {
-      // Check if enough time has passed since last rotation
-      const shouldRotate = Date.now() - COOKIE_MANAGEMENT.COOKIE_ROTATION.LAST_ROTATION > 
-                          COOKIE_MANAGEMENT.COOKIE_ROTATION.ROTATION_INTERVAL;
-      
-      if (shouldRotate) {
-        // Add current cookies as a new set with timestamp
-        const newCookieSet = {
-          timestamp: Date.now(),
-          cookies: cookieData
-        };
-        
-        // Add new set to existing sets
-        existingCookieSets.push(newCookieSet);
-        
-        // Keep only the newest sets up to MAX_STORED_COOKIES
-        existingCookieSets.sort((a, b) => b.timestamp - a.timestamp);
-        existingCookieSets = existingCookieSets.slice(0, COOKIE_MANAGEMENT.COOKIE_ROTATION.MAX_STORED_COOKIES);
-        
-        // Update last rotation time
-        COOKIE_MANAGEMENT.COOKIE_ROTATION.LAST_ROTATION = Date.now();
-        
-        // Save all sets to file
-        await fs.promises.writeFile(
-          COOKIES_FILE,
-          JSON.stringify({
-            lastUpdated: Date.now(),
-            cookieSets: existingCookieSets
-          }, null, 2)
-        );
-      } else {
-        // Just update the most recent set
-        if (existingCookieSets.length > 0) {
-          existingCookieSets[0].cookies = cookieData;
-          existingCookieSets[0].timestamp = Date.now();
-          
-          await fs.promises.writeFile(
-            COOKIES_FILE,
-            JSON.stringify({
-              lastUpdated: Date.now(),
-              cookieSets: existingCookieSets
-            }, null, 2)
-          );
-        } else {
-          // No existing sets, create first one
-          await fs.promises.writeFile(
-            COOKIES_FILE,
-            JSON.stringify({
-              lastUpdated: Date.now(),
-              cookieSets: [{
-                timestamp: Date.now(),
-                cookies: cookieData
-              }]
-            }, null, 2)
-          );
-        }
-      }
-    } else {
-      // Simple cookie storage without rotation
-      await fs.promises.writeFile(
-        COOKIES_FILE,
-        JSON.stringify(cookieData, null, 2)
-      );
-    }
-  } catch (error) {
-    console.error('Error saving cookies:', error);
-  }
-}
+// async function loadCookiesFromFile() {
+//   try {
+//     return await loadCookiesFromFile();
+//   } catch (error) {
+//     console.error('Error loading cookies:', error);
+//     return null;
+//   }
+// }
 
 // New throttled request function to limit API calls (max 5 requests per 10 seconds)
 const throttle = pThrottle({
@@ -1705,7 +855,9 @@ const ScrapeEvent = async (
         fingerprint = generateEnhancedFingerprint();
         userAgent =
           fingerprint.browser?.userAgent ||
-          getCompatibleUserAgent(fingerprint.browser?.name ? 'desktop' : 'mobile') ||
+          randomUseragent.getRandom(
+            (ua) => ua.browserName === fingerprint.browser?.name
+          ) ||
           getRealisticIphoneUserAgent();
       } catch (error) {
         console.error(`Error getting captured data: ${error.message}`);
@@ -2456,10 +1608,9 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
     if (fingerprint.browser?.userAgent) {
       userAgent = fingerprint.browser.userAgent;
     } else if (fingerprint.browser?.name) {
-      // Use our cross-platform compatible user agent generator
-      userAgent = getCompatibleUserAgent(fingerprint.browser.name === 'Safari' ? 'mobile' : 'desktop');
+      userAgent = randomUseragent.getRandom(ua => ua.browserName === fingerprint.browser.name);
     } else {
-      userAgent = getCompatibleUserAgent('desktop');
+      userAgent = randomUseragent.getRandom(ua => ua.browserName === 'Chrome');
     }
 
     const browserName = fingerprint.browser?.name || 'Chrome';
@@ -2588,14 +1739,14 @@ function trimCookieString(cookieString, maxLength) {
   return result;
 }
 
-async function cleanup(browser, context) {
-  try {
-    // Never close the browser or context to maintain persistent session
-    console.log("Keeping browser and context open for reuse");
-  } catch (error) {
-    console.warn("Cleanup error:", error);
-  }
-}
+// async function cleanup(browser, context) {
+//   try {
+//     // Never close the browser or context to maintain persistent session
+//     console.log("Keeping browser and context open for reuse");
+//   } catch (error) {
+//     console.warn("Cleanup error:", error);
+//   }
+// }
 
 function resetCapturedState() {
   capturedState = {
