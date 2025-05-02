@@ -365,43 +365,19 @@ export const AttachRowSection = (data, mapData, offers, event,descriptions) => {
 return returnData.map(x=>{
   let offerGet = offers.find(e => e.offerId == x.offerId);
   
-  if(offerGet)
-  {
-    if(offerGet.name=="Special Offers")
-    {
-       return undefined;
-    }
-    else if(offerGet.name=="Summer's Live 4 Pack")
-    {
-       return undefined;
-    }
-    else if(offerGet.name=="Me + 3 4-Pack Offer")
-    {
-       return undefined;
-    }
-    else if (offerGet?.protected==true)
-    {
-      return undefined;
-    }
-    // exclude verizon offer
-    else if (offerGet.name == "Verizon" && offerGet.offerType !== "standard")
-    {
-       return undefined;
-    }
-    else if (
-      offerGet.name == "Verified Resale Ticket" &&
-      offerGet.offerType == "resale"
-    ) {
-      return undefined;
-    } else {
-      return CreateInventoryAndLine(x, offerGet, event, descriptions);
-    }
-  }
-  else
-  {
-  return undefined;
-  }
-
+ if (offerGet) {
+   // Only return Standard Admission tickets
+   if (
+     offerGet.name == "Standard Admission" &&
+     offerGet.offerType == "standard"
+   ) {
+     return CreateInventoryAndLine(x, offerGet, event, descriptions);
+   } else {
+     return undefined;
+   }
+ } else {
+   return undefined;
+ }
  }).filter(x=>x!=undefined).filter((obj, index, self) => {
     // Convert dbId value to string to compare
     var dbId = obj.dbId.toString();
