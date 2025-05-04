@@ -151,6 +151,9 @@ const consecutiveGroupSchema = new mongoose.Schema(
       customSplit: {
         type: String,
       },
+      mapping_id: {
+        type: String,
+      },
       tickets: [ticketSchema],
     },
   },

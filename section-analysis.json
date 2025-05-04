@@ -1,0 +1,1069 @@
+[
+  {
+    "id": "s_70:GMYDI",
+    "name": "304",
+    "hasSegments": true,
+    "segmentCount": 14,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_72:GMYDM",
+    "name": "306",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_71:GMYDK",
+    "name": "305",
+    "hasSegments": true,
+    "segmentCount": 14,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_78:GMYTE",
+    "name": "312",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_77:GMYTC",
+    "name": "311",
+    "hasSegments": true,
+    "segmentCount": 12,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_79:GMYTG",
+    "name": "313",
+    "hasSegments": true,
+    "segmentCount": 12,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_74:GMYDQ",
+    "name": "308",
+    "hasSegments": true,
+    "segmentCount": 12,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_73:GMYDO",
+    "name": "307",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_76:GMYTA",
+    "name": "310",
+    "hasSegments": true,
+    "segmentCount": 11,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_75:GMYDS",
+    "name": "309",
+    "hasSegments": true,
+    "segmentCount": 10,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_61:GIZDA",
+    "name": "220",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_60:GIYTS",
+    "name": "219",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_67:GMYDC",
+    "name": "301",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_66:GIZDK",
+    "name": "225",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_69:GMYDG",
+    "name": "303",
+    "hasSegments": true,
+    "segmentCount": 15,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_68:GMYDE",
+    "name": "302",
+    "hasSegments": true,
+    "segmentCount": 14,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_63:GIZDE",
+    "name": "222",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_62:GIZDC",
+    "name": "221",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_65:GIZDI",
+    "name": "224",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_64:GIZDG",
+    "name": "223",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_92:GMZDM",
+    "name": "326",
+    "hasSegments": true,
+    "segmentCount": 18,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_91:GMZDK",
+    "name": "325",
+    "hasSegments": true,
+    "segmentCount": 17,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_94:GMZDQ",
+    "name": "328",
+    "hasSegments": true,
+    "segmentCount": 17,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_93:GMZDO",
+    "name": "327",
+    "hasSegments": true,
+    "segmentCount": 15,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_90:GMZDI",
+    "name": "324",
+    "hasSegments": true,
+    "segmentCount": 18,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_99:GMZTG",
+    "name": "333",
+    "hasSegments": true,
+    "segmentCount": 15,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_96:GMZTA",
+    "name": "330",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_95:GMZDS",
+    "name": "329",
+    "hasSegments": true,
+    "segmentCount": 18,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_98:GMZTE",
+    "name": "332",
+    "hasSegments": true,
+    "segmentCount": 12,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_97:GMZTC",
+    "name": "331",
+    "hasSegments": true,
+    "segmentCount": 14,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_81:GMYTK",
+    "name": "315",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_80:GMYTI",
+    "name": "314",
+    "hasSegments": true,
+    "segmentCount": 9,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_83:GMYTO",
+    "name": "317",
+    "hasSegments": true,
+    "segmentCount": 11,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_82:GMYTM",
+    "name": "316",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_89:GMZDG",
+    "name": "323",
+    "hasSegments": true,
+    "segmentCount": 12,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_88:GMZDE",
+    "name": "322",
+    "hasSegments": true,
+    "segmentCount": 9,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_85:GMYTS",
+    "name": "319",
+    "hasSegments": true,
+    "segmentCount": 11,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_84:GMYTQ",
+    "name": "318",
+    "hasSegments": true,
+    "segmentCount": 11,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_87:GMZDC",
+    "name": "321",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_86:GMZDA",
+    "name": "320",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_38:GEYTO",
+    "name": "117",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_37:GEYTM",
+    "name": "116",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_39:GEYTQ",
+    "name": "118",
+    "hasSegments": true,
+    "segmentCount": 24,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_34:GEYTG",
+    "name": "113",
+    "hasSegments": true,
+    "segmentCount": 18,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_33:GEYTE",
+    "name": "112",
+    "hasSegments": true,
+    "segmentCount": 18,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_36:GEYTK",
+    "name": "115",
+    "hasSegments": true,
+    "segmentCount": 19,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_35:GEYTI",
+    "name": "114",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_30:GEYDS",
+    "name": "109",
+    "hasSegments": true,
+    "segmentCount": 24,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_32:GEYTC",
+    "name": "111",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_31:GEYTA",
+    "name": "110",
+    "hasSegments": true,
+    "segmentCount": 11,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_27:GEYDM",
+    "name": "106",
+    "hasSegments": true,
+    "segmentCount": 21,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_26:GEYDK",
+    "name": "105",
+    "hasSegments": true,
+    "segmentCount": 24,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_100:GMZTI",
+    "name": "334",
+    "hasSegments": true,
+    "segmentCount": 13,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_29:GEYDQ",
+    "name": "108",
+    "hasSegments": true,
+    "segmentCount": 24,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_101:GEYDC",
+    "name": "101",
+    "hasSegments": true,
+    "segmentCount": 20,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_28:GEYDO",
+    "name": "107",
+    "hasSegments": true,
+    "segmentCount": 21,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_102:GEYDE",
+    "name": "102",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_103:GEZDC",
+    "name": "121",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_104:GEZDG",
+    "name": "123",
+    "hasSegments": true,
+    "segmentCount": 20,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_105:GEZDI",
+    "name": "124",
+    "hasSegments": true,
+    "segmentCount": 21,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_106:GEZDE",
+    "name": "122",
+    "hasSegments": true,
+    "segmentCount": 23,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_107:GE3A",
+    "name": "16",
+    "hasSegments": true,
+    "segmentCount": 17,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_108:GEZQ",
+    "name": "13",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_109:GEZA",
+    "name": "12",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_25:GEYDI",
+    "name": "104",
+    "hasSegments": true,
+    "segmentCount": 24,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_24:GEYDG",
+    "name": "103",
+    "hasSegments": true,
+    "segmentCount": 9,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_110:GEYA",
+    "name": "10",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_59:GIYTQ",
+    "name": "218",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_111:GEYQ",
+    "name": "11",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_112:GE4A",
+    "name": "18",
+    "hasSegments": true,
+    "segmentCount": 17,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_113:GE2Q",
+    "name": "15",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_114:GE2A",
+    "name": "14",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_115:GE4Q",
+    "name": "19",
+    "hasSegments": true,
+    "segmentCount": 17,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_116:GE3Q",
+    "name": "17",
+    "hasSegments": true,
+    "segmentCount": 16,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_117:GIYA",
+    "name": "20",
+    "hasSegments": true,
+    "segmentCount": 18,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_118:HE",
+    "name": "9",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_119:HA",
+    "name": "8",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_50:GIYDS",
+    "name": "209",
+    "hasSegments": true,
+    "segmentCount": 5,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_56:GIYTK",
+    "name": "215",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_55:GIYTI",
+    "name": "214",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_58:GIYTO",
+    "name": "217",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_57:GIYTM",
+    "name": "216",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_52:GIYTC",
+    "name": "211",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_51:GIYTA",
+    "name": "210",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_54:GIYTG",
+    "name": "213",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_53:GIYTE",
+    "name": "212",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_120:GIYQ",
+    "name": "21",
+    "hasSegments": true,
+    "segmentCount": 17,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_49:GIYDQ",
+    "name": "208",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_48:GIYDO",
+    "name": "207",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_45:GIYDI",
+    "name": "204",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_44:GIYDG",
+    "name": "203",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_47:GIYDM",
+    "name": "206",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_46:GIYDK",
+    "name": "205",
+    "hasSegments": true,
+    "segmentCount": 8,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_41:GEZDA",
+    "name": "120",
+    "hasSegments": true,
+    "segmentCount": 24,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_40:GEYTS",
+    "name": "119",
+    "hasSegments": true,
+    "segmentCount": 21,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_43:GIYDE",
+    "name": "202",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  },
+  {
+    "id": "s_42:GIYDC",
+    "name": "201",
+    "hasSegments": true,
+    "segmentCount": 4,
+    "properties": [
+      "segmentCategory",
+      "totalPlaces"
+    ],
+    "customProps": {}
+  }
+]
