@@ -391,25 +391,24 @@ export const AttachRowSection = (
   returnData = CreateConsicutiveSeats(returnData);
 
   //attach offer
-  fs.writeFileSync("returnData.json", JSON.stringify(returnData, null, 2));
   return (
     returnData
       .map((x) => {
         let offerGet = offers.find((e) => e.offerId == x.offerId);
 
         if (offerGet) {
-          // Looser selector for Standard admission tickets
-          const offerTypeMatch = offerGet.offerType
-            ?.toLowerCase()
-            ?.includes("standard");
-          const offerNameMatch = offerGet.name
-            ?.toLowerCase()
-            ?.includes("standard");
-
-          if (offerTypeMatch || offerNameMatch) {
-            return CreateInventoryAndLine(x, offerGet, event, descriptions);
-          } else {
+          if (offerGet.name == "Special Offers") {
             return undefined;
+          } else if (offerGet.name == "Summer's Live 4 Pack") {
+            return undefined;
+          } else if (offerGet.name == "Me + 3 4-Pack Offer") {
+            return undefined;
+          } else if (offerGet?.protected == true) {
+            return undefined;
+          } else if (offerGet.name !== "Standard Admission") {
+            return undefined;
+          } else {
+            return CreateInventoryAndLine(x, offerGet, event, descriptions);
           }
         } else {
           return undefined;
@@ -424,7 +423,8 @@ export const AttachRowSection = (
         return index === self.findIndex((o) => o.dbId.toString() === dbId);
       })
       .filter((x) => x.inventory.quantity > 1)
-      // Remove duplicates
+
+      //remove duplicate
       .filter((obj, index, self) => {
         // Check if any other object has the same row and section
         const hasDuplicate = self.some((otherObj, otherIndex) => {
@@ -439,4 +439,4 @@ export const AttachRowSection = (
         return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
       })
   );
-};
+}

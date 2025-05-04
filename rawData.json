@@ -1,0 +1,98 @@
+{
+  "offer": {
+    "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+    "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2025-05-04T17:55:33.260564937Z",
+      "expires": "2025-05-04T18:05:33.260564937Z"
+    },
+    "offerId": "GJ6DC7BUHA",
+    "name": "Standard Admission",
+    "rank": 0,
+    "online": true,
+    "protected": false,
+    "rollup": false,
+    "inventoryType": "primary",
+    "offerType": "standard",
+    "ticketTypeId": "000000000001",
+    "auditPriceLevel": "1",
+    "priceLevelId": "48",
+    "priceLevelSecname": "P1",
+    "description": "Standard Admission",
+    "currency": "USD",
+    "listPrice": 95.75,
+    "faceValue": 95.75,
+    "totalPrice": 115.05,
+    "noChargesPrice": 95.75,
+    "charges": [
+      {
+        "reason": "facility",
+        "type": "fee",
+        "amount": 4
+      },
+      {
+        "reason": "service",
+        "type": "fee",
+        "amount": 15.3
+      },
+      {
+        "reason": "order_processing",
+        "type": "fee",
+        "subType": "default",
+        "amount": 4.5
+      }
+    ],
+    "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "alternateIds": [],
+    "_links": {
+      "self": [
+        {
+          "href": "/host/01006228B1D43104/offers/GJ6DC7BUHA"
+        }
+      ],
+      "event": [
+        {
+          "href": "/event/01006228B1D43104"
+        }
+      ],
+      "tickettype": [
+        {
+          "href": "/host/01006228B1D43104/tickettypes/000000000001"
+        }
+      ]
+    }
+  },
+  "data": {
+    "section": "F8",
+    "row": "8",
+    "seats": [
+      8
+    ],
+    "offerId": "GJ6DC7BUHA",
+    "accessibility": "",
+    "descriptionId": "IE5A",
+    "attributes": []
+  },
+  "event": {
+    "eventId": "01006228B1D43104"
+  },
+  "allDescriptions": "",
+  "singleExtraCharges": 4.5,
+  "repeatExtraCharges": 19.3,
+  "faceValue": 95.75,
+  "totalCost": 119.55,
+  "listCostPercentage": 0,
+  "totalCostWithPercentage": 119.55,
+  "formattedTotalCost": 119.55,
+  "formattedFaceValue": 95.75,
+  "formattedTotalCostWithPercentage": 119.55
+}
