@@ -73,9 +73,10 @@ export const createEvent = async (req, res) => {
       Skip_Scraping = true,
       Zone,
       priceIncreasePercentage = 25, // Default 25% if not provided
+      mapping_ID,
     } = req.body;
 
-    if (!Event_Name || !inHandDate || !Event_DateTime || !URL) {
+    if (!Event_Name || !inHandDate || !Event_DateTime || !URL || !mapping_ID) {
       return res.status(400).json({
         status: "error",
         message: "Missing required fields",
@@ -103,6 +104,7 @@ export const createEvent = async (req, res) => {
       priceIncreasePercentage,
       metadata: {
         iterationNumber: 0,
+        mapping_ID,
       },
     });
 

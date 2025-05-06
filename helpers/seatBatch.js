@@ -201,7 +201,7 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
       "inventory": {
       "quantity": data?.seats?.length || 0,
       "section": data?.section || "",
-      "SeatsType":data?.seatsType || "",
+      "SeatsType":offerName || "",
       "hideSeatNumbers": true,
       "row": data?.row || "",
       "cost": totalCost * (data?.seats?.length || 0),
@@ -246,159 +246,168 @@ function CreateInventoryAndLine(data,offer,event,descriptions)
 }
  
 export const AttachRowSection = (data, mapData, offers, event,descriptions) => {
-  
- let allAvailableSeats = GetMapSeats(mapData);
-   if (!allAvailableSeats || allAvailableSeats.length === 0) {
+  let allAvailableSeats = GetMapSeats(mapData);
+  if (!allAvailableSeats || allAvailableSeats.length === 0) {
     console.log("No available seats found in map data");
     return [];
   }
-  let mapPlacesIndex = allAvailableSeats.map(x => x.seatId);
-  let returnData=[];
+  let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
+  let returnData = [];
   //get all seats number by seat id
-  let customData=data.map(x => {
+  let customData = data
+    .map((x) => {
+      if (x.places.length > 0) {
+        let placeId = x.places[0];
+        if (placeId) {
+          let indexToFind = mapPlacesIndex.indexOf(placeId);
 
-    if (x.places.length > 0) {
-      let placeId = x.places[0];
-      if (placeId) {
+          if (indexToFind != -1) {
+            let found = allAvailableSeats[indexToFind];
+            // let  found= allAvailableSeats.find(y=>y.seatId==placeId);
+            if (found) {
+              let allPlaces = x?.places
+                .map((z) => {
+                  let indexOfZ = mapPlacesIndex.indexOf(z);
 
-        let indexToFind = mapPlacesIndex.indexOf(placeId);
+                  let foundSeatFromMap = allAvailableSeats[indexOfZ];
+                  if (foundSeatFromMap && indexOfZ != -1) {
+                    return { ...foundSeatFromMap, offerId: x.offerId };
+                  }
+                  foundSeatFromMap = undefined;
 
-        if (indexToFind != -1) {
-          let found = allAvailableSeats[indexToFind];
-          // let  found= allAvailableSeats.find(y=>y.seatId==placeId);
-          if (found) {
-            let allPlaces = x?.places.map(z => {
+                  //SORT BY (seat) NUMBER
+                })
+                .filter((y) => y != undefined);
 
-              let indexOfZ = mapPlacesIndex.indexOf(z);
-
-              let foundSeatFromMap = allAvailableSeats[indexOfZ];
-              if (foundSeatFromMap && indexOfZ != -1) {
-                return { ...foundSeatFromMap, offerId:x.offerId }
-              }
-              foundSeatFromMap = undefined;
-
-              //SORT BY (seat) NUMBER
-            }).filter(y => y != undefined);
-            
-            return {
-              section: found.section,
-              row: "",
-              seats: allPlaces,
-              eventId: event?.eventMappingId,
-              offerId:x.offerId,
-              accessibility:x?.accessibility,
-              descriptionId:x?.descriptionId,
-              attributes:x?.attributes
+              return {
+                section: found.section,
+                row: "",
+                seats: allPlaces,
+                eventId: event?.eventMappingId,
+                offerId: x.offerId,
+                accessibility: x?.accessibility,
+                descriptionId: x?.descriptionId,
+                attributes: x?.attributes,
+              };
             }
+            found = undefined;
           }
-          found = undefined;
-
         }
       }
 
-    }
+      return undefined;
+    })
+    .filter((x) => x != undefined);
 
-    return undefined;
-  }).filter(x => x != undefined);
-
-    //it will check if pair has same row as some events are giving pair of different row
-    let groupedSeats = [];
-    customData.forEach(seatGroup => {
-      const rows = [...new Set(seatGroup.seats.map(seat => seat.row))];
-      rows.forEach(row => {
-        const seatsInRow = seatGroup.seats.filter(seat => seat.row === row);
-        groupedSeats.push({
-          section: seatGroup.section,
-          seats: seatsInRow,
-          eventId: seatGroup.eventId,
-          offerId: seatGroup.offerId,
-          accessibility: seatGroup.accessibility,
-          descriptionId: seatGroup.descriptionId,
-          attributes: seatGroup.attributes
-        });
+  //it will check if pair has same row as some events are giving pair of different row
+  let groupedSeats = [];
+  customData.forEach((seatGroup) => {
+    const rows = [...new Set(seatGroup.seats.map((seat) => seat.row))];
+    rows.forEach((row) => {
+      const seatsInRow = seatGroup.seats.filter((seat) => seat.row === row);
+      groupedSeats.push({
+        section: seatGroup.section,
+        seats: seatsInRow,
+        eventId: seatGroup.eventId,
+        offerId: seatGroup.offerId,
+        accessibility: seatGroup.accessibility,
+        descriptionId: seatGroup.descriptionId,
+        attributes: seatGroup.attributes,
       });
     });
-    
-     //add row and get seats in order
-  groupedSeats.map(x=>{
-    if(x?.seats.length>0)
-    {
-      return {
-        ...x,
-        row:x?.seats[0]?.row,
-        seats:x?.seats.map(y => parseInt(y.seat)).sort((a, b)=>{return a - b})
-      }
-    }
-    else
-    {
-      return undefined;
-    }
-      
-  }).filter(x => x != undefined)
-  
-  //break seats if it is not consicutive ex [1,2,3,6,7] => [1,2,3],[6,7]
-  .map(x=>{
-    let breakOBJ=breakArray(x.seats)
- 
-     if(breakOBJ.length>1)
-     {
-         breakOBJ.map(y=>{
-          returnData.push({
-                 ...x,
-                 seats:y
-                 
-             })
-         })
-     }
-     else
-     {
-      returnData.push(x)
-     }
- });
- 
- 
- //it will make consicutive seats ex [2],[4],[3] => [2,3,4]
- returnData= CreateConsicutiveSeats(returnData);
- 
- //attach offer
+  });
 
-return returnData.map(x => {   
-  let offerGet = offers.find(e => e.offerId == x.offerId);
-      
-  if(offerGet) {
-    // Looser selector for Standard admission tickets
-    const offerTypeMatch = offerGet.offerType?.toLowerCase()?.includes('standard');
-    const offerNameMatch = offerGet.name?.toLowerCase()?.includes('standard');
-    
-    if(offerTypeMatch || offerNameMatch) {
-      return CreateInventoryAndLine(x, offerGet, event, descriptions);
-    } else {
-      return undefined;
-    }
-  } else {
-    return undefined;
-  }
-}).filter(x => x != undefined)
-  .filter((obj, index, self) => {
-    // Convert dbId value to string to compare
-    var dbId = obj.dbId.toString();
-    
-    // Check if the current dbId is the first occurrence in the array
-    return index === self.findIndex((o) => o.dbId.toString() === dbId);
-  })
-  .filter(x => x.inventory.quantity > 1)
-  // Remove duplicates
-  .filter((obj, index, self) => {
-    // Check if any other object has the same row and section
-    const hasDuplicate = self.some((otherObj, otherIndex) => {
-      return (
-        index !== otherIndex && // Exclude the current object from comparison
-        obj.row === otherObj.row &&
-        obj.section === otherObj.section &&
-        obj.seats.some(seat => otherObj.seats.includes(seat))
-      );
+  //add row and get seats in order
+  groupedSeats
+    .map((x) => {
+      if (x?.seats.length > 0) {
+        return {
+          ...x,
+          row: x?.seats[0]?.row,
+          seats: x?.seats
+            .map((y) => parseInt(y.seat))
+            .sort((a, b) => {
+              return a - b;
+            }),
+        };
+      } else {
+        return undefined;
+      }
+    })
+    .filter((x) => x != undefined)
+
+    //break seats if it is not consicutive ex [1,2,3,6,7] => [1,2,3],[6,7]
+    .map((x) => {
+      let breakOBJ = breakArray(x.seats);
+
+      if (breakOBJ.length > 1) {
+        breakOBJ.map((y) => {
+          returnData.push({
+            ...x,
+            seats: y,
+          });
+        });
+      } else {
+        returnData.push(x);
+      }
     });
-    
-    return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
-  })
-};
+
+  //it will make consicutive seats ex [2],[4],[3] => [2,3,4]
+  returnData = CreateConsicutiveSeats(returnData);
+
+  //attach offer
+
+  return (
+    returnData
+      .map((x) => {
+        let offerGet = offers.find((e) => e.offerId == x.offerId);
+
+        if (offerGet) {
+          if (offerGet.name == "Special Offers") {
+            return undefined;
+          } else if (offerGet.name == "Summer's Live 4 Pack") {
+            return undefined;
+          } else if (offerGet.name == "Me + 3 4-Pack Offer") {
+            return undefined;
+          } else if (offerGet?.protected == true) {
+            return undefined;
+          } else if(offerGet.inventoryType=="season")
+          {
+            return undefined;
+          }else if(offerGet.inventoryType=="resale")
+          {
+            return undefined;
+          }
+           else {
+            return CreateInventoryAndLine(x, offerGet, event, descriptions);
+          }
+        } else {
+          return undefined;
+        }
+      })
+      .filter((x) => x != undefined)
+      .filter((obj, index, self) => {
+        // Convert dbId value to string to compare
+        var dbId = obj.dbId.toString();
+
+        // Check if the current dbId is the first occurrence in the array
+        return index === self.findIndex((o) => o.dbId.toString() === dbId);
+      })
+      .filter((x) => x.inventory.quantity > 1)
+
+      //remove duplicate
+      .filter((obj, index, self) => {
+        // Check if any other object has the same row and section
+        const hasDuplicate = self.some((otherObj, otherIndex) => {
+          return (
+            index !== otherIndex && // Exclude the current object from comparison
+            obj.row === otherObj.row &&
+            obj.section === otherObj.section &&
+            obj.seats.some((seat) => otherObj.seats.includes(seat))
+          );
+        });
+
+        return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
+      })
+  );
+}

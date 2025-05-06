@@ -2,6 +2,7 @@ import fs from 'fs';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
 import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Validates whether seats are consecutive
@@ -233,13 +234,14 @@ export function updateInventoryRecord(inventory, updates) {
  */
 export function formatInventoryForExport(data) {
   // Get seat count and format seats
+  const uuid = uuidv4();
   const seats = data.seats || '';
   const seatArray = seats.split(',').map(s => s.trim()).filter(Boolean);
   const quantity = seatArray.length || (data.quantity ? parseInt(data.quantity) : 0);
   
   // Calculate split information
-  let customSplit = data.custom_split || '';
-  let splitType = data.split_type || '';
+  let customSplit = data.custom_split || "NEVERLEAVEONE";
+  let splitType = data.split_type || "NEVERLEAVEONE";
   
   // Generate custom split if not provided but split type is CUSTOM
   if (splitType === 'CUSTOM' && !customSplit && quantity > 1) {
@@ -254,34 +256,36 @@ export function formatInventoryForExport(data) {
   
   // Format the exported data in the required structure
   return {
-    inventory_id: data.inventory_id || '',
-    event_name: data.event_name || '',
-    venue_name: data.venue_name || '',
-    event_date: data.event_date || '',
-    event_id: data.event_id || '',
+    inventory_id: data.inventory_id || uuid,
+    event_name: data.event_name || "",
+    venue_name: data.venue_name || "",
+    event_date: data.event_date || "",
+    event_id: data.mapping_id || "",
     quantity: quantity.toString(),
-    section: data.section || '',
-    row: data.row || '',
+    section: data.section || "",
+    row: data.row || "",
     seats: seats,
-    barcodes: data.barcodes || '',
-    internal_notes: data.internal_notes || '',
-    public_notes: data.public_notes || '',
-    tags: data.tags || '',
-    list_price: data.list_price || '',
-    face_price: data.face_price || '',
-    taxed_cost: data.taxed_cost || '',
-    cost: data.cost || '',
-    hide_seats: data.hide_seats || 'Y',
-    in_hand: data.in_hand || 'N',
+    barcodes: "",
+    internal_notes: data.internal_notes || "",
+    public_notes: data.public_notes || "",
+    tags: data.tags || "",
+    list_price: data.list_price || "",
+    face_price: data.face_price || "",
+    taxed_cost: data.taxed_cost || "",
+    cost: data.cost || "",
+    hide_seats: data.hide_seats || "Y",
+    in_hand: data.in_hand || "N",
     in_hand_date: inHandDate,
-    instant_transfer: data.instant_transfer || 'N',
-    files_available: data.files_available || 'Y',
-    split_type: splitType,
-    custom_split: customSplit,
-    stock_type: data.stock_type || 'MOBILE_TRANSFER',
-    zone: data.zone || 'N',
-    shown_quantity: data.shown_quantity || (quantity > 1 ? Math.ceil(quantity/2).toString() : quantity.toString()),
-    passthrough: data.passthrough || '128shd8923kjej47',
-    mapping_id: data.mapping_id || data.skybox || ''
+    instant_transfer: data.instant_transfer || "N",
+    files_available: data.files_available || "N",
+    split_type: "NEVERLEAVEONEALONE",
+    custom_split: "",
+    stock_type: data.stock_type || "MOBILE_TRANSFER",
+    zone: data.zone || "N",
+    shown_quantity:"",
+    //   data.shown_quantity ||
+    //   (quantity > 1 ? Math.ceil(quantity / 2).toString() : quantity.toString()),
+    // passthrough: data.passthrough || "",
+    // mapping_id: data.mapping_id || data.skybox || "",
   };
 }

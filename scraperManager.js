@@ -7,6 +7,7 @@ import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
 import { BrowserFingerprint } from "./browserFingerprint.js";
+import { v4 as uuidv4 } from 'uuid';
 
 // Updated constants for stricter update intervals and high performance on 32GB system
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
@@ -699,7 +700,7 @@ export class ScraperManager {
                     cost: ticket.cost,
                     faceValue: ticket.faceValue,
                     taxedCost: ticket.taxedCost,
-                    sellPrice: ticket.sellPrice * 1.25, // Using multiplication instead of exponentiation 
+                    sellPrice: ticket.sellPrice, // Using multiplication instead of exponentiation 
                     stockType: ticket.stockType,
                     eventId: ticket.eventId,
                     accountId: ticket.accountId,
@@ -754,7 +755,7 @@ export class ScraperManager {
   }
 
   /**
-   * Generate CSV inventory for an event if this is the first scrape
+   * Generate CSV inventory for an event for each scrape
    * @param {string} eventId - The event ID
    * @param {Array} scrapeResult - The scrape result data
    */
@@ -762,18 +763,6 @@ export class ScraperManager {
     try {
       // Import the inventory controller
       const inventoryController = (await import('./controllers/inventoryController.js')).default;
-      
-      // Check if this is the first scrape for this event
-      if (!inventoryController.isFirstScrape(eventId)) {
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(`Skipping CSV generation for event ${eventId} - not the first scrape`, "info");
-        }
-        return;
-      }
-      
-      if (LOG_LEVEL >= 1) {
-        this.logWithTime(`Generating CSV for event ${eventId} (first scrape)`, "info");
-      }
       
       // Get event data upfront
       const event = await Event.findOne({ Event_ID: eventId }).lean();
@@ -784,7 +773,7 @@ export class ScraperManager {
       
       // Get price increase percentage and in-hand date from event
       const priceIncreasePercentage = event.priceIncreasePercentage || 25; // Default 25% if not set
-      const inHandDate = event.inHandDate || new Date();
+      const inHandDate = event?.inHandDate;
       
       // Filter out groups with fewer than 2 seats
       const validGroups = scrapeResult.filter(group => 
@@ -800,7 +789,7 @@ export class ScraperManager {
       const inventoryRecords = [];
       for (const group of validGroups) {
         // Calculate the increased list price based on the percentage
-        const basePrice = parseFloat(group.inventory.listPrice) || 500.00;
+        const basePrice = parseFloat(group.inventory.listPrice); // Default to 500 if not set or invalid
         const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
         
         // Format in-hand date as YYYY-MM-DD
@@ -810,35 +799,38 @@ export class ScraperManager {
         
         // Create a record with the exact required format
         inventoryRecords.push({
-          inventory_id: `${eventId}-${group.section}-${group.row}-${Math.min(...group.seats)}`,
+          inventory_id: uuidv4(),
           event_name: event?.Event_Name || `Event ${eventId}`,
-          venue_name: event?.Venue || 'Unknown Venue',
-          event_date: event?.Event_DateTime?.toISOString() || new Date().toISOString(),
-          event_id: eventId,
+          venue_name: event?.Venue || "Unknown Venue",
+          event_date:
+            event?.Event_DateTime?.toISOString() || new Date().toISOString(),
+          event_id: group.mapping_id || group.skybox || '',
           quantity: group.inventory.quantity,
           section: group.section,
           row: group.row,
-          seats: group.seats.join(','),
-          barcodes: group.seats.map(() => `${Math.floor(Math.random() * 1000000000000)}${Math.floor(Math.random() * 1000000000000)}`).join('|'),
+          seats: group.seats.join(","),
+          barcodes: "",
           internal_notes: `These are internal notes. @sec[${group.section}]`,
           public_notes: `These are ${group.row} Row`,
-          tags: "john drew don",
+          tags: "",
           list_price: increasedPrice,
-          face_price: group.inventory?.tickets?.[0]?.faceValue || '',
-          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || '',
-          cost: group.inventory?.tickets?.[0]?.cost || '',
-          hide_seats: 'Y',
-          in_hand: 'N',
+          face_price: group.inventory?.tickets?.[0]?.faceValue || "",
+          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || "",
+          cost: group.inventory?.tickets?.[0]?.cost || "",
+          hide_seats: "Y",
+          in_hand: "N",
           in_hand_date: formattedInHandDate,
-          instant_transfer: 'N',
-          files_available: 'Y',
-          split_type: 'CUSTOM',
-          custom_split: `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
-          stock_type: 'MOBILE_TRANSFER',
-          zone: 'N',
-          shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
-          passthrough: '128shd8923kjej47',
-          mapping_id: group.mapping_id || group.skybox || ''
+          instant_transfer: "N",
+          files_available: "Y",
+          split_type: "NEVERLEAVEONE",
+          custom_split: `${Math.ceil(group.inventory.quantity / 2)},${
+            group.inventory.quantity
+          }`,
+          stock_type: "NEVERLEAVEONE",
+          zone: "N",
+          shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
+          passthrough: "",
+          mapping_id: group.mapping_id || group.skybox || "",
         });
       }
       
@@ -992,7 +984,7 @@ export class ScraperManager {
 
       await this.updateEventMetadata(eventId, result);
       
-      // Generate CSV inventory if this is the first scrape
+      // Generate fresh CSV inventory for each scrape
       await this.generateInventoryCsv(eventId, result);
       
       // Success! If this event was previously failing, update its status in DB
