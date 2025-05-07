@@ -15,13 +15,13 @@ const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q
  * Create a sample CSV file for testing
  * @param {string} filePath - Path where the sample CSV will be saved
  */
-async function createSampleCsv(filePath) {
-  const csvContent = 
-    'sku,quantity,price\n';
+// async function createSampleCsv(filePath) {
+//   const csvContent = 
+//     'sku,quantity,price\n';
 
-  fs.writeFileSync(filePath, csvContent);
-  console.log(`Blank CSV created at: ${filePath}`);
-}
+//   fs.writeFileSync(filePath, csvContent);
+//   console.log(`Blank CSV created at: ${filePath}`);
+// }
 
 /**
  * Test function for uploading a CSV file and then clearing inventory
@@ -38,8 +38,8 @@ async function testSyncService() {
     }
     
     // Create sample CSV file
-    const sampleCsvPath = path.join(dataDir, 'blank_inventory.csv');
-    await createSampleCsv(sampleCsvPath);
+    const sampleCsvPath = path.join(dataDir, "blank_csv.csv");
+   
     
     // 1. Test uploading the CSV
     console.log('STEP 1: Uploading CSV file to Sync...');
@@ -55,14 +55,14 @@ async function testSyncService() {
     // const clearResult = await syncService.clearAllInventory();
     // console.log('Clear result:', clearResult);
     
-    // Clean up
-    console.log('\nCleaning up test files...');
-    if (fs.existsSync(sampleCsvPath)) {
-      fs.unlinkSync(sampleCsvPath);
-      console.log(`Deleted: ${sampleCsvPath}`);
-    } else {
-      console.log(`File not found: ${sampleCsvPath}`);
-    }
+    // // Clean up
+    // console.log('\nCleaning up test files...');
+    // if (fs.existsSync(sampleCsvPath)) {
+    //   fs.unlinkSync(sampleCsvPath);
+    //   console.log(`Deleted: ${sampleCsvPath}`);
+    // } else {
+    //   console.log(`File not found: ${sampleCsvPath}`);
+    // }
     
     console.log('\nTest completed successfully!');
   } catch (error) {

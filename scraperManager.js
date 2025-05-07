@@ -772,7 +772,7 @@ export class ScraperManager {
         // Import the inventory controller
         const inventoryController = (await import('./controllers/inventoryController.js')).default;
         
-        // Get event data upfront with price increase percentage
+        // Get event data upfront with price increase percentage and mapping_id
         const event = await Event.findOne({ Event_ID: eventId })
             .select('Event_Name Venue Event_DateTime priceIncreasePercentage mapping_id')
             .lean();
@@ -782,27 +782,20 @@ export class ScraperManager {
             return;
         }
         
-        if (!event.priceIncreasePercentage || !event.mapping_id) {
-          console.error(`Event ${eventId} missing required fields: priceIncreasePercentage or mapping_id`);
-          return;
+        // Validate required fields
+        if (!event.mapping_id) {
+            this.logWithTime(`No mapping_id found for event ${eventId} in database`, "error");
+            return;
         }
         
-        // Get price increase percentage from event - must be present in database
         if (!event.priceIncreasePercentage) {
             this.logWithTime(`No price increase percentage found for event ${eventId} in database`, "error");
             return;
         }
 
-        // Get mapping_id from event - must be present
-        if (!event.mapping_id) {
-            this.logWithTime(`No mapping_id found for event ${eventId} in database`, "error");
-            return null;
-        }
-
         const mapping_id = event.mapping_id;
         const priceIncreasePercentage = event.priceIncreasePercentage;
         const inHandDate = event?.inHandDate;
-        
         
         // Filter out groups with fewer than 2 seats
         const validGroups = scrapeResult.filter(group => 
@@ -813,10 +806,22 @@ export class ScraperManager {
             this.logWithTime(`No valid groups with at least 2 seats found for event ${eventId}`, "warning");
             return;
         }
-        console.log(mapping_id,'this is the mapping_id from scraping Manager');
-        // Format the scrape results as inventory records
+        
+        // Create a Set to track unique combinations of section, row, and seats
+        const uniqueGroups = new Set();
+        
+        // Format the scrape results as inventory records, preventing duplicates
         const inventoryRecords = [];
         for (const group of validGroups) {
+            // Create a unique key for this group
+            const uniqueKey = `${group.section}-${group.row}-${group.seats.join(",")}`;
+            
+            // Skip if we've already processed this combination
+            if (uniqueGroups.has(uniqueKey)) {
+                continue;
+            }
+            uniqueGroups.add(uniqueKey);
+            
             // Calculate the increased list price based on the percentage from database
             const basePrice = parseFloat(group.inventory.listPrice);
             const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
@@ -834,7 +839,7 @@ export class ScraperManager {
               event_date:
                 event?.Event_DateTime?.toISOString() ||
                 new Date().toISOString(),
-              event_id: mapping_id || "",
+              event_id: mapping_id, // Use mapping_id as event_id
               quantity: group.inventory.quantity,
               section: group.section,
               row: group.row,
@@ -851,19 +856,22 @@ export class ScraperManager {
               in_hand: "N",
               in_hand_date: formattedInHandDate,
               instant_transfer: "N",
-              files_available: "Y",
+              files_available: "N",
               split_type: "NEVERLEAVEONE",
               custom_split: `${Math.ceil(group.inventory.quantity / 2)},${
                 group.inventory.quantity
               }`,
-              stock_type: "CUSTOM",
+              stock_type: "MOBILE_TRANSFER",
               zone: "N",
               shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
               passthrough: "",
-              mapping_id: mapping_id || "",
+              mapping_id: mapping_id, // Include mapping_id in the record
             });
         }
-        console.log(inventoryRecords);
+        
+        // Delete old CSV files before adding new records
+        inventoryController.deleteOldCsvFiles(eventId);
+        
         // Add the inventory records in bulk
         const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
         

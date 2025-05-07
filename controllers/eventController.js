@@ -276,165 +276,101 @@ export const deleteEvent = async (req, res) => {
 
 export const downloadEventCsv = async (req, res) => {
   try {
-    console.log('==== START DOWNLOAD EVENT CSV ====');
     const { eventId } = req.params;
-    console.log(`Attempting to download CSV for event ID: ${eventId}`);
     
-    // Define the data directory where CSVs are stored
-    const dataDir = path.join(process.cwd(), 'data');
-    console.log(`Looking for files in directory: ${dataDir}`);
-    
-    // Create data directory if it doesn't exist
-    try {
-      await fs.promises.mkdir(dataDir, { recursive: true });
-      console.log('Data directory created/verified');
-    } catch (err) {
-      console.error(`Error creating data directory: ${err.message}`);
-      return res.status(500).json({
-        status: "error",
-        message: "Failed to create data directory"
-      });
+    // Get event data with mapping_id
+    const event = await Event.findOne({ Event_ID: eventId })
+      .select('Event_Name Venue Event_DateTime mapping_id inHandDate')
+      .lean();
+      
+    if (!event) {
+      return res.status(404).json({ success: false, message: 'Event not found' });
     }
     
-    // Find all CSV files for this event
-    let files;
-    try {
-      files = await fs.promises.readdir(dataDir);
-      console.log(`Found ${files.length} files in data directory`);
-    } catch (err) {
-      console.error(`Failed to read data directory: ${err.message}`);
-      return res.status(500).json({
-        status: "error",
-        message: "Failed to access inventory data"
-      });
+    // Validate mapping_id
+    if (!event.mapping_id) {
+      return res.status(400).json({ success: false, message: 'No mapping_id found for this event' });
     }
     
-    // Check if there is a CSV file for this event
-    const eventFile = `event_${eventId}.csv`;
-    const eventFilePath = path.join(dataDir, eventFile);
+    const mapping_id = event.mapping_id;
     
-    // If no CSV file found, try to generate one from the database
-    if (!files.includes(eventFile)) {
-      try {
-        // Import the inventory controller
-        const inventoryController = (await import('../controllers/inventoryController.js')).default;
-        
-        // Get the event data
-        const event = await Event.findOne({ Event_ID: eventId })
-          .select('Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate mapping_id')
-          .lean();
-          
-        if (!event) {
-          return res.status(404).json({
-            status: "error",
-            message: "Event not found"
-          });
-        }
-      const mapping_id = event.mapping_id;
-        
-        // Get the consecutive groups for this event
-        const groups = await ConsecutiveGroup.find({ eventId })
-          .select('section row seats inventory')
-          .lean();
-          
-        if (!groups || groups.length === 0) {
-          return res.status(404).json({
-            status: "error",
-            message: "No inventory data found for this event"
-          });
-        }
-        
-        // Format the groups as inventory records
-        const inventoryRecords = groups.map(group => ({
-          inventory_id: group._id.toString(),
-          event_name: event.Event_Name || `Event ${eventId}`,
-          venue_name: event.Venue || "Unknown Venue",
-          event_date: event.Event_DateTime?.toISOString() || new Date().toISOString(),
-          event_id: mapping_id || '',
-          quantity: group.inventory.quantity,
-          section: group.section,
-          row: group.row,
-          seats: group.seats.map(s => s.number).join(","),
-          barcodes: "",
-          internal_notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
-          public_notes: group.inventory.publicNotes || `These are ${group.row} Row`,
-          tags: group.inventory.tags || "",
-          list_price: group.inventory.listPrice,
-          face_price: group.inventory.tickets?.[0]?.faceValue || "",
-          taxed_cost: group.inventory.tickets?.[0]?.taxedCost || "",
-          cost: group.inventory.tickets?.[0]?.cost || "",
-          hide_seats: "Y",
-          in_hand: "N",
-          in_hand_date: event.inHandDate?.toISOString() || new Date().toISOString(),
-          instant_transfer: "N",
-          files_available: "Y",
-          split_type: group.inventory.splitType || "NEVERLEAVEONE",
-          custom_split: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
-          stock_type: group.inventory.stockType || "custom",
-          zone: "N",
-          shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
-          passthrough: "",
-          mapping_id:mapping_id || ""
-        }));
-        
-        // Add the records in bulk
-        const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
-        
-        if (!result.success) {
-          throw new Error(result.message);
-        }
-      } catch (err) {
-        console.error(`Error generating CSV: ${err.message}`);
-        return res.status(500).json({
-          status: "error",
-          message: "Failed to generate CSV from database data"
-        });
-      }
+    // Get all groups for this event
+    const groups = await ConsecutiveGroup.find({ event_id: eventId })
+      .select('section row seats inventory')
+      .lean();
+      
+    if (!groups || groups.length === 0) {
+      return res.status(404).json({ success: false, message: 'No groups found for this event' });
     }
     
-    // Check if file exists and is readable
-    try {
-      await fs.promises.access(eventFilePath, fs.constants.R_OK);
-    } catch (err) {
-      return res.status(404).json({
-        status: "error",
-        message: "Could not access inventory CSV file"
-      });
-    }
+    // Import the inventory controller
+    const inventoryController = (await import('./inventoryController.js')).default;
     
-    // Log successful access
-    console.log(`Serving CSV file: ${eventFilePath}`);
+    // Delete old CSV files before generating new ones
+    inventoryController.deleteOldCsvFiles(eventId);
     
-    // Set headers for download
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename=event_${eventId}_inventory.csv`);
+    // Create a Set to track unique combinations
+    const uniqueKeys = new Set();
+    const uniqueGroups = [];
     
-    // Stream the file with error handling
-    const fileStream = fs.createReadStream(eventFilePath);
-    
-    fileStream.on('error', (err) => {
-      console.error(`Error streaming file: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({
-          status: "error",
-          message: "Error while streaming file"
-        });
+    // Filter out duplicates based on section, row, and seats
+    groups.forEach(group => {
+      const uniqueKey = `${group.section}-${group.row}-${group.seats.map(s => s.number).join(",")}`;
+      if (!uniqueKeys.has(uniqueKey)) {
+        uniqueKeys.add(uniqueKey);
+        uniqueGroups.push(group);
       }
     });
     
-    // Handle client disconnect
-    req.on('close', () => {
-      fileStream.destroy();
-    });
+    // Format the unique groups as inventory records
+    const inventoryRecords = uniqueGroups.map(group => ({
+      inventory_id: group._id.toString(),
+      event_name: event.Event_Name || `Event ${eventId}`,
+      venue_name: event.Venue || "Unknown Venue",
+      event_date: event.Event_DateTime?.toISOString() || new Date().toISOString(),
+      event_id: mapping_id || '',
+      quantity: group.inventory.quantity,
+      section: group.section,
+      row: group.row,
+      seats: group.seats.map(s => s.number).join(","),
+      barcodes: "",
+      internal_notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
+      public_notes: group.inventory.publicNotes || `These are ${group.row} Row`,
+      tags: group.inventory.tags || "",
+      list_price: group.inventory.listPrice,
+      face_price: group.inventory.tickets?.[0]?.faceValue || "",
+      taxed_cost: group.inventory.tickets?.[0]?.taxedCost || "",
+      cost: group.inventory.tickets?.[0]?.cost || "",
+      hide_seats: "Y",
+      in_hand: "N",
+      in_hand_date: event.inHandDate?.toISOString() || new Date().toISOString(),
+      instant_transfer: "N",
+      files_available: "Y",
+      split_type: group.inventory.splitType || "NEVERLEAVEONE",
+      custom_split: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
+      stock_type: group.inventory.stockType || "custom",
+      zone: "N",
+      shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
+      passthrough: "",
+      mapping_id: mapping_id || ""
+    }));
     
-    // Pipe the file to the response
-    fileStream.pipe(res);
+    // Add the records in bulk
+    const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
+    
+    if (!result.success) {
+      throw new Error(result.message);
+    }
+    
+    // Send the file as a download
+    const filePath = path.join(process.cwd(), 'data', `event_${eventId}.csv`);
+    res.download(filePath, `event_${eventId}.csv`, (err) => {
+      if (err) {
+        res.status(500).json({ success: false, message: 'Error sending file' });
+      }
+    });
   } catch (error) {
-    console.error(`Error in downloadEventCsv: ${error.message}`);
-    console.error(error.stack);
-    res.status(500).json({
-      status: "error",
-      message: `Server error: ${error.message}`
-    });
+    console.error(`Error downloading event CSV: ${error.message}`);
+    res.status(500).json({ success: false, message: error.message });
   }
 };

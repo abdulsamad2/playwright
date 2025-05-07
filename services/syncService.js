@@ -146,7 +146,7 @@ class SyncService {
       const result = await this.uploadCsvToSync(blankCsvPath);
       
       // Clean up the temporary file
-      fs.unlinkSync(blankCsvPath);
+      // fs.unlinkSync(blankCsvPath);
       
       return {
         success: true,

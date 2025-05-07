@@ -103,6 +103,22 @@ class InventoryController {
   }
 
   /**
+   * Delete old CSV files for a specific event
+   * @param {string} eventId - The event ID
+   */
+  deleteOldCsvFiles(eventId) {
+    try {
+      const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
+      if (fs.existsSync(eventFilePath)) {
+        fs.unlinkSync(eventFilePath);
+        console.log(`Deleted old CSV file: ${eventFilePath}`);
+      }
+    } catch (error) {
+      console.error(`Error deleting old CSV file: ${error.message}`);
+    }
+  }
+
+  /**
    * Save inventory data to CSV file
    * Generates a new CSV file for each scrape
    * @param {string} filePath - Path to save the CSV file
@@ -111,6 +127,11 @@ class InventoryController {
   saveInventory(filePath = DEFAULT_INVENTORY_FILE, eventId = null) {
     try {
       const formattedData = this.inventoryData.map(record => formatInventoryForExport(record));
+      
+      // Delete old CSV file if eventId is provided
+      if (eventId) {
+        this.deleteOldCsvFiles(eventId);
+      }
       
       // Generate event-specific file path without timestamp
       const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
@@ -208,22 +229,32 @@ class InventoryController {
         return { success: false, message: 'No valid records after filtering (all had insufficient seats)' };
       }
       
-      // Add the records
+      // Create a Set to track unique combinations
+      const uniqueKeys = new Set();
+      const uniqueRecords = [];
+      
+      // Filter out duplicates based on section, row, and seats
       validatedRecords.forEach(record => {
-        const existingIndex = this.inventoryData.findIndex(
-          r => r.inventory_id === record.inventory_id
-        );
-        
-        if (existingIndex === -1) {
-          this.inventoryData.push(record);
+        const uniqueKey = `${record.section}-${record.row}-${record.seats}`;
+        if (!uniqueKeys.has(uniqueKey)) {
+          uniqueKeys.add(uniqueKey);
+          uniqueRecords.push(record);
         }
       });
+      
+      // Clear existing inventory data for this event
+      this.inventoryData = this.inventoryData.filter(record => 
+        record.event_id !== eventId
+      );
+      
+      // Add the unique records
+      this.inventoryData.push(...uniqueRecords);
       
       // Generate event-specific CSV filename without timestamp
       const eventCsvPath = path.join(DATA_DIR, `event_${eventId}.csv`);
       
       // Save to both the event-specific file and the default file
-      const formattedData = validatedRecords.map(record => formatInventoryForExport(record));
+      const formattedData = uniqueRecords.map(record => formatInventoryForExport(record));
       saveInventoryToCSV(formattedData, eventCsvPath);
       this.saveInventory(DEFAULT_INVENTORY_FILE, eventId);
       
@@ -236,7 +267,7 @@ class InventoryController {
       
       return { 
         success: true, 
-        message: `Added ${validatedRecords.length} records for event ${eventId}`,
+        message: `Added ${uniqueRecords.length} unique records for event ${eventId}`,
         csvPath: eventCsvPath
       };
     } catch (error) {

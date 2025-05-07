@@ -254,13 +254,16 @@ export function formatInventoryForExport(data) {
     data.in_hand_date.toISOString().split('T')[0] : 
     data.in_hand_date || '';
   
+  // Ensure mapping_id is used as event_id
+  const event_id = data.mapping_id || "";
+  
   // Format the exported data in the required structure
   return {
     inventory_id: data.inventory_id || uuid,
     event_name: data.event_name || "",
     venue_name: data.venue_name || "",
     event_date: data.event_date || "",
-    event_id: data.mapping_id || "",
+    event_id: event_id, // Always use mapping_id as event_id
     quantity: quantity.toString(),
     section: data.section || "",
     row: data.row || "",
@@ -278,14 +281,12 @@ export function formatInventoryForExport(data) {
     in_hand_date: inHandDate,
     instant_transfer: data.instant_transfer || "N",
     files_available: data.files_available || "N",
-    split_type: "NEVERLEAVEONEALONE",
-    custom_split: "",
+    split_type: splitType,
+    custom_split: customSplit,
     stock_type: data.stock_type || "MOBILE_TRANSFER",
     zone: data.zone || "N",
-    shown_quantity:"",
-    //   data.shown_quantity ||
-    //   (quantity > 1 ? Math.ceil(quantity / 2).toString() : quantity.toString()),
-    // passthrough: data.passthrough || "",
-    // mapping_id: data.mapping_id || "",
+    shown_quantity: data.shown_quantity || (quantity > 1 ? Math.ceil(quantity / 2).toString() : quantity.toString()),
+    passthrough: data.passthrough || "",
+    mapping_id: event_id // Use the same mapping_id value
   };
 }
