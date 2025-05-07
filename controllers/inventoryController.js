@@ -112,15 +112,14 @@ class InventoryController {
     try {
       const formattedData = this.inventoryData.map(record => formatInventoryForExport(record));
       
-      // Generate a timestamp for the new file
-      const timestamp = new Date().toISOString().replace(/:/g, '-');
-      const newFilePath = path.join(DATA_DIR, `event_${eventId}_${timestamp}.csv`);
+      // Generate event-specific file path without timestamp
+      const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
       
-      // Save to both the new timestamped file and the default file
-      saveInventoryToCSV(formattedData, newFilePath);
+      // Save to both the event-specific file and the default file
+      saveInventoryToCSV(formattedData, eventFilePath);
       saveInventoryToCSV(formattedData, filePath);
       
-      console.log(`Saved ${this.inventoryData.length} inventory records to ${newFilePath}`);
+      console.log(`Saved ${this.inventoryData.length} inventory records to ${eventFilePath}`);
       
       // Update the event's last processed timestamp
       if (eventId) {
@@ -220,11 +219,10 @@ class InventoryController {
         }
       });
       
-      // Generate event-specific CSV filename with timestamp
-      const timestamp = new Date().toISOString().replace(/:/g, '-');
-      const eventCsvPath = path.join(DATA_DIR, `event_${eventId}_${timestamp}.csv`);
+      // Generate event-specific CSV filename without timestamp
+      const eventCsvPath = path.join(DATA_DIR, `event_${eventId}.csv`);
       
-      // Save to both the timestamped file and the default file
+      // Save to both the event-specific file and the default file
       const formattedData = validatedRecords.map(record => formatInventoryForExport(record));
       saveInventoryToCSV(formattedData, eventCsvPath);
       this.saveInventory(DEFAULT_INVENTORY_FILE, eventId);

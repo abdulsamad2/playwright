@@ -860,7 +860,7 @@ export class ScraperManager {
               zone: "N",
               shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
               passthrough: "",
-              mapping_id: group.mapping_id || group.skybox || "",
+              mapping_id: mapping_id || "",
             });
         }
         console.log(inventoryRecords);

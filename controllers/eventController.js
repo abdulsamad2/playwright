@@ -309,22 +309,19 @@ export const downloadEventCsv = async (req, res) => {
       });
     }
     
-    // Check if there are any CSV files for this event
-    const eventFiles = files.filter(file => 
-      file.startsWith(`event_${eventId}_`) && file.endsWith('.csv')
-    );
-    console.log(`Found ${eventFiles.length} CSV files for event ${eventId}:`);
-    eventFiles.forEach(file => console.log(` - ${file}`));
+    // Check if there is a CSV file for this event
+    const eventFile = `event_${eventId}.csv`;
+    const eventFilePath = path.join(dataDir, eventFile);
     
-    // If no CSV files found, try to generate one from the database
-    if (eventFiles.length === 0) {
+    // If no CSV file found, try to generate one from the database
+    if (!files.includes(eventFile)) {
       try {
         // Import the inventory controller
         const inventoryController = (await import('../controllers/inventoryController.js')).default;
         
         // Get the event data
         const event = await Event.findOne({ Event_ID: eventId })
-          .select('Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate')
+          .select('Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate mapping_id')
           .lean();
           
         if (!event) {
@@ -333,6 +330,7 @@ export const downloadEventCsv = async (req, res) => {
             message: "Event not found"
           });
         }
+      const mapping_id = event.mapping_id;
         
         // Get the consecutive groups for this event
         const groups = await ConsecutiveGroup.find({ eventId })
@@ -352,7 +350,7 @@ export const downloadEventCsv = async (req, res) => {
           event_name: event.Event_Name || `Event ${eventId}`,
           venue_name: event.Venue || "Unknown Venue",
           event_date: event.Event_DateTime?.toISOString() || new Date().toISOString(),
-          event_id: group.mapping_id || '',
+          event_id: mapping_id || '',
           quantity: group.inventory.quantity,
           section: group.section,
           row: group.row,
@@ -372,16 +370,12 @@ export const downloadEventCsv = async (req, res) => {
           files_available: "Y",
           split_type: group.inventory.splitType || "NEVERLEAVEONE",
           custom_split: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
-          stock_type: group.inventory.stockType || "NEVERLEAVEONE",
+          stock_type: group.inventory.stockType || "custom",
           zone: "N",
           shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
           passthrough: "",
-          mapping_id: group.mapping_id || ""
+          mapping_id:mapping_id || ""
         }));
-        
-        // Generate a new CSV file
-        const timestamp = new Date().toISOString().replace(/:/g, '-');
-        const newFilePath = path.join(dataDir, `event_${eventId}_${timestamp}.csv`);
         
         // Add the records in bulk
         const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
@@ -389,9 +383,6 @@ export const downloadEventCsv = async (req, res) => {
         if (!result.success) {
           throw new Error(result.message);
         }
-        
-        // Use the newly generated file
-        eventFiles.push(`event_${eventId}_${timestamp}.csv`);
       } catch (err) {
         console.error(`Error generating CSV: ${err.message}`);
         return res.status(500).json({
@@ -401,54 +392,43 @@ export const downloadEventCsv = async (req, res) => {
       }
     }
     
-    if (eventFiles.length > 0) {
-      // Sort files by timestamp (newest first)
-      eventFiles.sort().reverse();
-      const latestFile = path.join(dataDir, eventFiles[0]);
-      
-      // Check if file exists and is readable
-      try {
-        await fs.promises.access(latestFile, fs.constants.R_OK);
-      } catch (err) {
-        return res.status(404).json({
-          status: "error",
-          message: "Could not access inventory CSV file"
-        });
-      }
-      
-      // Log successful access
-      console.log(`Serving CSV file: ${latestFile}`);
-      
-      // Set headers for download
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename=event_${eventId}_inventory.csv`);
-      
-      // Stream the file with error handling
-      const fileStream = fs.createReadStream(latestFile);
-      
-      fileStream.on('error', (err) => {
-        console.error(`Error streaming file: ${err.message}`);
-        if (!res.headersSent) {
-          res.status(500).json({
-            status: "error",
-            message: "Error while streaming file"
-          });
-        }
-      });
-      
-      // Handle client disconnect
-      req.on('close', () => {
-        fileStream.destroy();
-      });
-      
-      // Pipe the file to the response
-      fileStream.pipe(res);
-    } else {
+    // Check if file exists and is readable
+    try {
+      await fs.promises.access(eventFilePath, fs.constants.R_OK);
+    } catch (err) {
       return res.status(404).json({
         status: "error",
-        message: "No CSV inventory found for this event"
+        message: "Could not access inventory CSV file"
       });
     }
+    
+    // Log successful access
+    console.log(`Serving CSV file: ${eventFilePath}`);
+    
+    // Set headers for download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=event_${eventId}_inventory.csv`);
+    
+    // Stream the file with error handling
+    const fileStream = fs.createReadStream(eventFilePath);
+    
+    fileStream.on('error', (err) => {
+      console.error(`Error streaming file: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({
+          status: "error",
+          message: "Error while streaming file"
+        });
+      }
+    });
+    
+    // Handle client disconnect
+    req.on('close', () => {
+      fileStream.destroy();
+    });
+    
+    // Pipe the file to the response
+    fileStream.pipe(res);
   } catch (error) {
     console.error(`Error in downloadEventCsv: ${error.message}`);
     console.error(error.stack);
