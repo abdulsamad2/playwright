@@ -2,6 +2,11 @@ import mongoose from "mongoose";
 
 const eventSchema = new mongoose.Schema(
   {
+    mapping_id: {
+      type: String,
+      required: true,
+      unique: true,
+    },
     Event_ID: {
       type: String,
       required: true,

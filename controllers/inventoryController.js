@@ -104,26 +104,31 @@ class InventoryController {
 
   /**
    * Save inventory data to CSV file
-   * Only save if this is the first scrape for the eventId
+   * Generates a new CSV file for each scrape
+   * @param {string} filePath - Path to save the CSV file
    * @param {string} eventId - The event ID
    */
   saveInventory(filePath = DEFAULT_INVENTORY_FILE, eventId = null) {
     try {
-      // If eventId is provided, check if this is the first scrape
-      if (eventId && !this.isFirstScrape(eventId)) {
-        console.log(`Skipping CSV generation for event ${eventId} - not the first scrape`);
-        return true;
-      }
-      
       const formattedData = this.inventoryData.map(record => formatInventoryForExport(record));
+      
+      // Generate a timestamp for the new file
+      const timestamp = new Date().toISOString().replace(/:/g, '-');
+      const newFilePath = path.join(DATA_DIR, `event_${eventId}_${timestamp}.csv`);
+      
+      // Save to both the new timestamped file and the default file
+      saveInventoryToCSV(formattedData, newFilePath);
       saveInventoryToCSV(formattedData, filePath);
       
-      console.log(`Saved ${this.inventoryData.length} inventory records to ${filePath}`);
+      console.log(`Saved ${this.inventoryData.length} inventory records to ${newFilePath}`);
       
-      // If this is the first scrape, mark the event as processed
-      if (eventId && this.isFirstScrape(eventId)) {
-        this.markEventAsProcessed(eventId);
-        console.log(`Marked event ${eventId} as processed after first CSV generation`);
+      // Update the event's last processed timestamp
+      if (eventId) {
+        this.processedEvents[eventId] = {
+          firstProcessed: this.processedEvents[eventId]?.firstProcessed || new Date().toISOString(),
+          lastUpdated: new Date().toISOString()
+        };
+        saveProcessedEvents(this.processedEvents);
       }
       
       return true;
@@ -184,7 +189,7 @@ class InventoryController {
   }
 
   /**
-   * Add inventory records in bulk (for first scrape)
+   * Add inventory records in bulk
    * @param {Array} records - Array of inventory records to add
    * @param {string} eventId - The event ID these records belong to
    */
@@ -192,12 +197,6 @@ class InventoryController {
     try {
       if (!records || !records.length) {
         return { success: false, message: 'No records provided' };
-      }
-      
-      // Only proceed with CSV generation if this is the first scrape
-      if (!this.isFirstScrape(eventId)) {
-        console.log(`Skipping CSV generation for event ${eventId} - not the first scrape`);
-        return { success: true, message: 'Records processed but CSV not generated (not first scrape)' };
       }
       
       // Validate all records
@@ -221,17 +220,21 @@ class InventoryController {
         }
       });
       
-      // Generate event-specific CSV filename
+      // Generate event-specific CSV filename with timestamp
       const timestamp = new Date().toISOString().replace(/:/g, '-');
       const eventCsvPath = path.join(DATA_DIR, `event_${eventId}_${timestamp}.csv`);
       
-      // Save to both the default file and an event-specific file
+      // Save to both the timestamped file and the default file
       const formattedData = validatedRecords.map(record => formatInventoryForExport(record));
       saveInventoryToCSV(formattedData, eventCsvPath);
       this.saveInventory(DEFAULT_INVENTORY_FILE, eventId);
       
-      // Mark this event as processed
-      this.markEventAsProcessed(eventId);
+      // Update the event's last processed timestamp
+      this.processedEvents[eventId] = {
+        firstProcessed: this.processedEvents[eventId]?.firstProcessed || new Date().toISOString(),
+        lastUpdated: new Date().toISOString()
+      };
+      saveProcessedEvents(this.processedEvents);
       
       return { 
         success: true, 

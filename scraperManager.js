@@ -579,6 +579,11 @@ export class ScraperManager {
         // Get price increase percentage and in-hand date from event
         const priceIncreasePercentage = event.priceIncreasePercentage || 25; // Default 25% if not set
         const inHandDate = event.inHandDate || new Date();
+        const mapping_id = event.mapping_id; // Get the mapping_id from the event
+
+        if (!mapping_id) {
+          throw new Error(`Event ${eventId} is missing required mapping_id`);
+        }
  
         // Filter scrape results to include only groups with at least 2 seats
         const validScrapeResult = scrapeResult.filter(group => 
@@ -663,6 +668,7 @@ export class ScraperManager {
               
               return {
                 eventId,
+                mapping_id, // Add mapping_id at the top level
                 section: group.section,
                 row: group.row,
                 seatCount: group.inventory.quantity,
@@ -673,6 +679,7 @@ export class ScraperManager {
                   number: seatNumber.toString(),
                   inHandDate: formattedInHandDate,
                   price: increasedPrice,
+                  mapping_id, // Add mapping_id to each seat
                 })),
                 inventory: {
                   quantity: group.inventory.quantity,
@@ -692,7 +699,7 @@ export class ScraperManager {
                   publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
                   listPrice: increasedPrice,
                   customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
-                  mapping_id: group.mapping_id || group.skybox || '',
+                  mapping_id, // Add mapping_id to inventory
                   tickets: group.inventory.tickets.map((ticket) => ({
                     id: ticket.id,
                     seatNumber: ticket.seatNumber,
@@ -700,12 +707,13 @@ export class ScraperManager {
                     cost: ticket.cost,
                     faceValue: ticket.faceValue,
                     taxedCost: ticket.taxedCost,
-                    sellPrice: ticket.sellPrice, // Using multiplication instead of exponentiation 
+                    sellPrice: ticket.sellPrice,
                     stockType: ticket.stockType,
                     eventId: ticket.eventId,
                     accountId: ticket.accountId,
                     status: ticket.status,
                     auditNote: ticket.auditNote,
+                    mapping_id: mapping_id, // Add mapping_id to each ticket
                   })),
                 },
               };
@@ -761,89 +769,111 @@ export class ScraperManager {
    */
   async generateInventoryCsv(eventId, scrapeResult) {
     try {
-      // Import the inventory controller
-      const inventoryController = (await import('./controllers/inventoryController.js')).default;
-      
-      // Get event data upfront
-      const event = await Event.findOne({ Event_ID: eventId }).lean();
-      if (!event) {
-        this.logWithTime(`Event ${eventId} not found for CSV generation`, "error");
-        return;
-      }
-      
-      // Get price increase percentage and in-hand date from event
-      const priceIncreasePercentage = event.priceIncreasePercentage || 25; // Default 25% if not set
-      const inHandDate = event?.inHandDate;
-      
-      // Filter out groups with fewer than 2 seats
-      const validGroups = scrapeResult.filter(group => 
-        group.seats && group.seats.length >= 2 && group.inventory && group.inventory.quantity >= 2
-      );
-      
-      if (validGroups.length === 0) {
-        this.logWithTime(`No valid groups with at least 2 seats found for event ${eventId}`, "warning");
-        return;
-      }
-      
-      // Format the scrape results as inventory records
-      const inventoryRecords = [];
-      for (const group of validGroups) {
-        // Calculate the increased list price based on the percentage
-        const basePrice = parseFloat(group.inventory.listPrice); // Default to 500 if not set or invalid
-        const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
+        // Import the inventory controller
+        const inventoryController = (await import('./controllers/inventoryController.js')).default;
         
-        // Format in-hand date as YYYY-MM-DD
-        const formattedInHandDate = inHandDate instanceof Date ? 
-          inHandDate.toISOString().split('T')[0] : 
-          new Date().toISOString().split('T')[0];
+        // Get event data upfront with price increase percentage
+        const event = await Event.findOne({ Event_ID: eventId })
+            .select('Event_Name Venue Event_DateTime priceIncreasePercentage mapping_id')
+            .lean();
+            
+        if (!event) {
+            this.logWithTime(`Event ${eventId} not found for CSV generation`, "error");
+            return;
+        }
         
-        // Create a record with the exact required format
-        inventoryRecords.push({
-          inventory_id: uuidv4(),
-          event_name: event?.Event_Name || `Event ${eventId}`,
-          venue_name: event?.Venue || "Unknown Venue",
-          event_date:
-            event?.Event_DateTime?.toISOString() || new Date().toISOString(),
-          event_id: group.mapping_id || group.skybox || '',
-          quantity: group.inventory.quantity,
-          section: group.section,
-          row: group.row,
-          seats: group.seats.join(","),
-          barcodes: "",
-          internal_notes: `These are internal notes. @sec[${group.section}]`,
-          public_notes: `These are ${group.row} Row`,
-          tags: "",
-          list_price: increasedPrice,
-          face_price: group.inventory?.tickets?.[0]?.faceValue || "",
-          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || "",
-          cost: group.inventory?.tickets?.[0]?.cost || "",
-          hide_seats: "Y",
-          in_hand: "N",
-          in_hand_date: formattedInHandDate,
-          instant_transfer: "N",
-          files_available: "Y",
-          split_type: "NEVERLEAVEONE",
-          custom_split: `${Math.ceil(group.inventory.quantity / 2)},${
-            group.inventory.quantity
-          }`,
-          stock_type: "NEVERLEAVEONE",
-          zone: "N",
-          shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
-          passthrough: "",
-          mapping_id: group.mapping_id || group.skybox || "",
-        });
-      }
-      
-      // Add the inventory records in bulk
-      const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
-      
-      if (result.success) {
-        this.logWithTime(`Successfully generated CSV for event ${eventId}: ${result.message}`, "success");
-      } else {
-        this.logWithTime(`Failed to generate CSV for event ${eventId}: ${result.message}`, "error");
-      }
+        if (!event.priceIncreasePercentage || !event.mapping_id) {
+          console.error(`Event ${eventId} missing required fields: priceIncreasePercentage or mapping_id`);
+          return;
+        }
+        
+        // Get price increase percentage from event - must be present in database
+        if (!event.priceIncreasePercentage) {
+            this.logWithTime(`No price increase percentage found for event ${eventId} in database`, "error");
+            return;
+        }
+
+        // Get mapping_id from event - must be present
+        if (!event.mapping_id) {
+            this.logWithTime(`No mapping_id found for event ${eventId} in database`, "error");
+            return null;
+        }
+
+        const mapping_id = event.mapping_id;
+        const priceIncreasePercentage = event.priceIncreasePercentage;
+        const inHandDate = event?.inHandDate;
+        
+        
+        // Filter out groups with fewer than 2 seats
+        const validGroups = scrapeResult.filter(group => 
+            group.seats && group.seats.length >= 2 && group.inventory && group.inventory.quantity >= 2
+        );
+        
+        if (validGroups.length === 0) {
+            this.logWithTime(`No valid groups with at least 2 seats found for event ${eventId}`, "warning");
+            return;
+        }
+        console.log(mapping_id,'this is the mapping_id from scraping Manager');
+        // Format the scrape results as inventory records
+        const inventoryRecords = [];
+        for (const group of validGroups) {
+            // Calculate the increased list price based on the percentage from database
+            const basePrice = parseFloat(group.inventory.listPrice);
+            const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
+            
+            // Format in-hand date as YYYY-MM-DD
+            const formattedInHandDate = inHandDate instanceof Date ? 
+                inHandDate.toISOString().split('T')[0] : 
+                new Date().toISOString().split('T')[0];
+            
+            // Create a record with the exact required format
+            inventoryRecords.push({
+              inventory_id: uuidv4(),
+              event_name: event?.Event_Name || `Event ${eventId}`,
+              venue_name: event?.Venue || "Unknown Venue",
+              event_date:
+                event?.Event_DateTime?.toISOString() ||
+                new Date().toISOString(),
+              event_id: mapping_id || "",
+              quantity: group.inventory.quantity,
+              section: group.section,
+              row: group.row,
+              seats: group.seats.join(","),
+              barcodes: "",
+              internal_notes: `These are internal notes. @sec[${group.section}]`,
+              public_notes: `These are ${group.row} Row`,
+              tags: "",
+              list_price: increasedPrice,
+              face_price: group.inventory?.tickets?.[0]?.faceValue || "",
+              taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || "",
+              cost: group.inventory?.tickets?.[0]?.cost || "",
+              hide_seats: "Y",
+              in_hand: "N",
+              in_hand_date: formattedInHandDate,
+              instant_transfer: "N",
+              files_available: "Y",
+              split_type: "NEVERLEAVEONE",
+              custom_split: `${Math.ceil(group.inventory.quantity / 2)},${
+                group.inventory.quantity
+              }`,
+              stock_type: "CUSTOM",
+              zone: "N",
+              shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
+              passthrough: "",
+              mapping_id: group.mapping_id || group.skybox || "",
+            });
+        }
+        console.log(inventoryRecords);
+        // Add the inventory records in bulk
+        const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
+        
+        if (result.success) {
+            this.logWithTime(`Successfully generated CSV for event ${eventId}: ${result.message}`, "success");
+        } else {
+            this.logWithTime(`Failed to generate CSV for event ${eventId}: ${result.message}`, "error");
+        }
     } catch (error) {
-      this.logWithTime(`Error generating CSV for event ${eventId}: ${error.message}`, "error");
+        this.logWithTime(`Error generating CSV for event ${eventId}: ${error.message}`, "error");
     }
   }
 

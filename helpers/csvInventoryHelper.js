@@ -286,6 +286,6 @@ export function formatInventoryForExport(data) {
     //   data.shown_quantity ||
     //   (quantity > 1 ? Math.ceil(quantity / 2).toString() : quantity.toString()),
     // passthrough: data.passthrough || "",
-    // mapping_id: data.mapping_id || data.skybox || "",
+    // mapping_id: data.mapping_id || "",
   };
 }

@@ -10,12 +10,20 @@ const seatSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  mapping_id: {
+    type: String,
+    required: true,
+  },
 });
 
 // Ticket Schema (as a subdocument)
 const ticketSchema = new mongoose.Schema({
   id: {
     type: Number,
+    required: true,
+  },
+  mapping_id: {
+    type: String,
     required: true,
   },
   seatNumber: {
@@ -66,6 +74,10 @@ const ticketSchema = new mongoose.Schema({
 const consecutiveGroupSchema = new mongoose.Schema(
   {
     eventId: {
+      type: String,
+      required: true,
+    },
+    mapping_id: {
       type: String,
       required: true,
     },

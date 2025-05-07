@@ -29,7 +29,12 @@ export const getAllEvents = async (req, res) => {
 
 export const getEventById = async (req, res) => {
   try {
-    const event = await Event.findOne({ Event_ID: req.params.eventId });
+    const event = await Event.findOne({ 
+      $or: [
+        { Event_ID: req.params.eventId },
+        { mapping_id: req.params.eventId }
+      ]
+    });
     if (!event) {
       return res.status(404).json({
         status: "error",
@@ -38,10 +43,10 @@ export const getEventById = async (req, res) => {
     }
 
     const seatGroups = await ConsecutiveGroup.find({
-      eventId: req.params.eventId,
+      eventId: event.Event_ID,
     });
 
-    const isActive = scraperManager.activeJobs.has(req.params.eventId);
+    const isActive = scraperManager.activeJobs.has(event.Event_ID);
 
     res.json({
       status: "success",
@@ -73,21 +78,33 @@ export const createEvent = async (req, res) => {
       Skip_Scraping = true,
       Zone,
       priceIncreasePercentage = 25, // Default 25% if not provided
-      mapping_ID,
+      mapping_id,
     } = req.body;
 
-    if (!Event_Name || !inHandDate || !Event_DateTime || !URL || !mapping_ID) {
+    // Use mapping_id directly
+    const finalMappingId = mapping_id;
+
+    if (!Event_Name || !inHandDate || !Event_DateTime || !URL || !finalMappingId) {
       return res.status(400).json({
         status: "error",
         message: "Missing required fields",
       });
     }
 
-    const existingEvent = await Event.findOne({ URL });
+    // Check for existing event with same URL or mapping_id
+    const existingEvent = await Event.findOne({
+      $or: [
+        { URL },
+        { mapping_id: finalMappingId }
+      ]
+    });
+    
     if (existingEvent) {
       return res.status(400).json({
         status: "error",
-        message: "Event with this URL already exists",
+        message: existingEvent.URL === URL 
+          ? "Event with this URL already exists"
+          : "Event with this mapping_id already exists",
       });
     }
 
@@ -102,9 +119,9 @@ export const createEvent = async (req, res) => {
       Available_Seats: Available_Seats || 0,
       Skip_Scraping,
       priceIncreasePercentage,
+      mapping_id: finalMappingId,
       metadata: {
         iterationNumber: 0,
-        mapping_ID,
       },
     });
 
@@ -169,12 +186,13 @@ export const stopEventScraping = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // Update the event to skip scraping
-    const event = await Event.findOneAndUpdate(
-      { Event_ID: eventId },
-      { Skip_Scraping: true },
-      { new: true }
-    );
+    // Find the event by either Event_ID or mapping_id
+    const event = await Event.findOne({
+      $or: [
+        { Event_ID: eventId },
+        { mapping_id: eventId }
+      ]
+    });
 
     if (!event) {
       return res.status(404).json({
@@ -183,22 +201,36 @@ export const stopEventScraping = async (req, res) => {
       });
     }
 
+    // Update the event to skip scraping
+    const updatedEvent = await Event.findOneAndUpdate(
+      { _id: event._id },
+      { Skip_Scraping: true },
+      { new: true }
+    );
+
     // Remove from active jobs if it's currently being scraped
-    if (scraperManager.activeJobs.has(eventId)) {
-      scraperManager.activeJobs.delete(eventId);
+    if (scraperManager.activeJobs.has(event.Event_ID)) {
+      scraperManager.activeJobs.delete(event.Event_ID);
+      scraperManager.logWithTime(`Stopped scraping for event ${event.Event_ID}`, "info");
     }
 
     // Remove from retry queue if present
     scraperManager.retryQueue = scraperManager.retryQueue.filter(
-      (item) => item.eventId !== eventId
+      (item) => item.eventId !== event.Event_ID
     );
+
+    // Clear any failure counts or cooldowns
+    scraperManager.eventFailureCounts.delete(event.Event_ID);
+    scraperManager.eventFailureTimes.delete(event.Event_ID);
+    scraperManager.cooldownEvents.delete(event.Event_ID);
 
     res.json({
       status: "success",
-      message: `Scraping stopped for event ${eventId}`,
-      data: event,
+      message: `Scraping stopped for event ${event.Event_ID}`,
+      data: updatedEvent,
     });
   } catch (error) {
+    console.error("Error stopping event scraping:", error);
     res.status(500).json({
       status: "error",
       message: error.message,
@@ -252,15 +284,15 @@ export const downloadEventCsv = async (req, res) => {
     const dataDir = path.join(process.cwd(), 'data');
     console.log(`Looking for files in directory: ${dataDir}`);
     
-    // Check if data directory exists
+    // Create data directory if it doesn't exist
     try {
-      await fs.promises.access(dataDir);
-      console.log('Data directory exists');
+      await fs.promises.mkdir(dataDir, { recursive: true });
+      console.log('Data directory created/verified');
     } catch (err) {
-      console.error(`Data directory doesn't exist: ${dataDir}`);
-      return res.status(404).json({
+      console.error(`Error creating data directory: ${err.message}`);
+      return res.status(500).json({
         status: "error",
-        message: "Data directory not found. No inventory data available."
+        message: "Failed to create data directory"
       });
     }
     
@@ -284,23 +316,89 @@ export const downloadEventCsv = async (req, res) => {
     console.log(`Found ${eventFiles.length} CSV files for event ${eventId}:`);
     eventFiles.forEach(file => console.log(` - ${file}`));
     
-    // Check if we have the inventory controller to look for processed events
-    let inventoryController;
-    try {
-      inventoryController = (await import('../controllers/inventoryController.js')).default;
-      
-      // Check if this event has been processed
-      if (inventoryController && !eventFiles.length) {
-        const isProcessed = !inventoryController.isFirstScrape(eventId);
-        if (!isProcessed) {
+    // If no CSV files found, try to generate one from the database
+    if (eventFiles.length === 0) {
+      try {
+        // Import the inventory controller
+        const inventoryController = (await import('../controllers/inventoryController.js')).default;
+        
+        // Get the event data
+        const event = await Event.findOne({ Event_ID: eventId })
+          .select('Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate')
+          .lean();
+          
+        if (!event) {
           return res.status(404).json({
             status: "error",
-            message: "This event hasn't been processed yet. No inventory CSV available."
+            message: "Event not found"
           });
         }
+        
+        // Get the consecutive groups for this event
+        const groups = await ConsecutiveGroup.find({ eventId })
+          .select('section row seats inventory')
+          .lean();
+          
+        if (!groups || groups.length === 0) {
+          return res.status(404).json({
+            status: "error",
+            message: "No inventory data found for this event"
+          });
+        }
+        
+        // Format the groups as inventory records
+        const inventoryRecords = groups.map(group => ({
+          inventory_id: group._id.toString(),
+          event_name: event.Event_Name || `Event ${eventId}`,
+          venue_name: event.Venue || "Unknown Venue",
+          event_date: event.Event_DateTime?.toISOString() || new Date().toISOString(),
+          event_id: group.mapping_id || '',
+          quantity: group.inventory.quantity,
+          section: group.section,
+          row: group.row,
+          seats: group.seats.map(s => s.number).join(","),
+          barcodes: "",
+          internal_notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
+          public_notes: group.inventory.publicNotes || `These are ${group.row} Row`,
+          tags: group.inventory.tags || "",
+          list_price: group.inventory.listPrice,
+          face_price: group.inventory.tickets?.[0]?.faceValue || "",
+          taxed_cost: group.inventory.tickets?.[0]?.taxedCost || "",
+          cost: group.inventory.tickets?.[0]?.cost || "",
+          hide_seats: "Y",
+          in_hand: "N",
+          in_hand_date: event.inHandDate?.toISOString() || new Date().toISOString(),
+          instant_transfer: "N",
+          files_available: "Y",
+          split_type: group.inventory.splitType || "NEVERLEAVEONE",
+          custom_split: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
+          stock_type: group.inventory.stockType || "NEVERLEAVEONE",
+          zone: "N",
+          shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
+          passthrough: "",
+          mapping_id: group.mapping_id || ""
+        }));
+        
+        // Generate a new CSV file
+        const timestamp = new Date().toISOString().replace(/:/g, '-');
+        const newFilePath = path.join(dataDir, `event_${eventId}_${timestamp}.csv`);
+        
+        // Add the records in bulk
+        const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
+        
+        if (!result.success) {
+          throw new Error(result.message);
+        }
+        
+        // Use the newly generated file
+        eventFiles.push(`event_${eventId}_${timestamp}.csv`);
+      } catch (err) {
+        console.error(`Error generating CSV: ${err.message}`);
+        return res.status(500).json({
+          status: "error",
+          message: "Failed to generate CSV from database data"
+        });
       }
-    } catch (err) {
-      console.log('Could not load inventory controller:', err.message);
     }
     
     if (eventFiles.length > 0) {
@@ -325,8 +423,9 @@ export const downloadEventCsv = async (req, res) => {
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename=event_${eventId}_inventory.csv`);
       
-      // Stream the file
+      // Stream the file with error handling
       const fileStream = fs.createReadStream(latestFile);
+      
       fileStream.on('error', (err) => {
         console.error(`Error streaming file: ${err.message}`);
         if (!res.headersSent) {
@@ -337,9 +436,14 @@ export const downloadEventCsv = async (req, res) => {
         }
       });
       
+      // Handle client disconnect
+      req.on('close', () => {
+        fileStream.destroy();
+      });
+      
+      // Pipe the file to the response
       fileStream.pipe(res);
     } else {
-      // If no CSV exists for this event
       return res.status(404).json({
         status: "error",
         message: "No CSV inventory found for this event"

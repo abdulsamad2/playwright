@@ -52,8 +52,8 @@ async function testSyncService() {
     
     // 2. Test clearing inventory
     console.log('\nSTEP 2: Clearing all inventory...');
-    const clearResult = await syncService.clearAllInventory();
-    console.log('Clear result:', clearResult);
+    // const clearResult = await syncService.clearAllInventory();
+    // console.log('Clear result:', clearResult);
     
     // Clean up
     console.log('\nCleaning up test files...');
