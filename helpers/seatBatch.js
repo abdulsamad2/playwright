@@ -367,20 +367,17 @@ export const AttachRowSection = (
         let offerGet = offers.find((e) => e.offerId == x.offerId);
 
         if (offerGet) {
-          if(offerGet.name !="Standard Admission")
-          {
+          if (offerGet.name == "Special Offers") {
             return undefined;
-          }
-          // if (offerGet.name == "Special Offers") {
-          //   return undefined;
-          // } else if (offerGet.name == "Summer's Live 4 Pack") {
-          //   return undefined;
-          // } else if (offerGet.name == "Me + 3 4-Pack Offer") {
-          //   return undefined;
-          // } else if (offerGet?.protected == true) {
-          //   return undefined;
-            
-           else {
+          } else if (offerGet.name == "Summer's Live 4 Pack") {
+            return undefined;
+          } else if (offerGet.name == "Me + 3 4-Pack Offer") {
+            return undefined;
+          } else if (offerGet?.protected == true) {
+            return undefined;
+          } else if (offerGet.inventoryTypes == "resale") {
+            return undefined;
+          } else {
             return CreateInventoryAndLine(x, offerGet, event, descriptions);
           }
         } else {
