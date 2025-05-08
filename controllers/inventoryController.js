@@ -110,6 +110,20 @@ class InventoryController {
     try {
       const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
       if (fs.existsSync(eventFilePath)) {
+        // Check if file contains data from other events before deleting
+        try {
+          const existingData = readInventoryFromCSV(eventFilePath);
+          if (existingData.length > 0) {
+            // Check how many different event names exist in the file
+            const eventNames = new Set(existingData.map(record => record.event_name).filter(Boolean));
+            if (eventNames.size > 1) {
+              console.log(`WARNING: CSV file for event ${eventId} contains ${eventNames.size} different event names: ${[...eventNames].join(', ')}`);
+            }
+          }
+        } catch (e) {
+          // Ignore errors when checking existing file
+        }
+        
         fs.unlinkSync(eventFilePath);
         console.log(`Deleted old CSV file: ${eventFilePath}`);
       }
@@ -126,21 +140,29 @@ class InventoryController {
    */
   saveInventory(filePath = DEFAULT_INVENTORY_FILE, eventId = null) {
     try {
-      const formattedData = this.inventoryData.map(record => formatInventoryForExport(record));
+      // Format all inventory for export
+      const allFormattedData = this.inventoryData.map(record => formatInventoryForExport(record));
       
-      // Delete old CSV file if eventId is provided
+      // Save all inventory to the default file
+      saveInventoryToCSV(allFormattedData, filePath);
+      
+      // If an event ID is provided, generate an event-specific file
       if (eventId) {
-        this.deleteOldCsvFiles(eventId);
+        // Get only records that belong to this specific event
+        const eventSpecificData = this.inventoryData
+          .filter(record => record.source_event_id === eventId)
+          .map(record => formatInventoryForExport(record));
+        
+        // Generate event-specific file path
+        const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
+        
+        // Save event-specific data to event-specific file
+        saveInventoryToCSV(eventSpecificData, eventFilePath);
+        
+        console.log(`Saved ${eventSpecificData.length} records specific to event ${eventId} to ${eventFilePath}`);
       }
       
-      // Generate event-specific file path without timestamp
-      const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
-      
-      // Save to both the event-specific file and the default file
-      saveInventoryToCSV(formattedData, eventFilePath);
-      saveInventoryToCSV(formattedData, filePath);
-      
-      console.log(`Saved ${this.inventoryData.length} inventory records to ${eventFilePath}`);
+      console.log(`Saved ${this.inventoryData.length} total inventory records to ${filePath}`);
       
       // Update the event's last processed timestamp
       if (eventId) {
@@ -211,12 +233,25 @@ class InventoryController {
   /**
    * Add inventory records in bulk
    * @param {Array} records - Array of inventory records to add
-   * @param {string} eventId - The event ID these records belong to
+   * @param {string} eventId - The event ID these records belong to (external Event_ID)
    */
   addBulkInventory(records, eventId) {
     try {
       if (!records || !records.length) {
         return { success: false, message: 'No records provided' };
+      }
+      
+      // First, ensure all records are for the same event (compare event_name)
+      const eventName = records[0]?.event_name || '';
+      if (eventName) {
+        // Check if all records have the same event name to prevent mixing
+        const differentEventNames = records.filter(r => 
+          r.event_name && r.event_name !== eventName
+        );
+        
+        if (differentEventNames.length > 0) {
+          console.warn(`Warning: ${differentEventNames.length} records have different event names than the primary event "${eventName}"`);
+        }
       }
       
       // Validate all records
@@ -238,25 +273,40 @@ class InventoryController {
         const uniqueKey = `${record.section}-${record.row}-${record.seats}`;
         if (!uniqueKeys.has(uniqueKey)) {
           uniqueKeys.add(uniqueKey);
+          // Add the source eventId as a property to track which event the record belongs to
+          record.source_event_id = eventId;
+          record.original_event_name = record.event_name; // Preserve original event name
           uniqueRecords.push(record);
         }
       });
       
-      // Clear existing inventory data for this event
+      // Remove ALL existing inventory records for this specific eventId before adding new ones
       this.inventoryData = this.inventoryData.filter(record => 
-        record.event_id !== eventId
+        record.source_event_id !== eventId
       );
       
       // Add the unique records
       this.inventoryData.push(...uniqueRecords);
       
-      // Generate event-specific CSV filename without timestamp
+      // Generate event-specific CSV filename
       const eventCsvPath = path.join(DATA_DIR, `event_${eventId}.csv`);
       
-      // Save to both the event-specific file and the default file
-      const formattedData = uniqueRecords.map(record => formatInventoryForExport(record));
+      // Only include records from this specific event in the CSV
+      const formattedData = uniqueRecords
+        .filter(record => record.source_event_id === eventId)
+        .map(record => formatInventoryForExport(record));
+      
+      // Ensure we write to a new file (delete old file first)
+      if (fs.existsSync(eventCsvPath)) {
+        fs.unlinkSync(eventCsvPath);
+      }
+      
+      // Write event-specific data to the event CSV
       saveInventoryToCSV(formattedData, eventCsvPath);
-      this.saveInventory(DEFAULT_INVENTORY_FILE, eventId);
+      
+      // Update the main inventory file
+      const allFormattedData = this.inventoryData.map(record => formatInventoryForExport(record));
+      saveInventoryToCSV(allFormattedData, DEFAULT_INVENTORY_FILE);
       
       // Update the event's last processed timestamp
       this.processedEvents[eventId] = {
@@ -452,8 +502,81 @@ class InventoryController {
       return { success: false, message: error.message };
     }
   }
+
+  /**
+   * Clean up cross-contaminated event data
+   * Checks all event CSV files and ensures each only contains records
+   * for the event it's named after
+   */
+  cleanupEventCsvFiles() {
+    try {
+      // Get all event_*.csv files in the data directory
+      const files = fs.readdirSync(DATA_DIR).filter(file => 
+        file.startsWith('event_') && file.endsWith('.csv')
+      );
+      
+      let cleanedFiles = 0;
+      let problemsFound = 0;
+      
+      for (const file of files) {
+        // Extract event ID from filename
+        const eventId = file.replace('event_', '').replace('.csv', '');
+        const filePath = path.join(DATA_DIR, file);
+        
+        try {
+          // Read file data
+          const data = readInventoryFromCSV(filePath);
+          if (data.length === 0) continue;
+          
+          // Check for event name contamination
+          const eventNames = new Set(data.map(record => record.event_name).filter(Boolean));
+          
+          if (eventNames.size > 1) {
+            console.log(`Fixing: CSV file for event ${eventId} contains ${eventNames.size} different event names: ${[...eventNames].join(', ')}`);
+            problemsFound++;
+            
+            // Find legitimate records for this event
+            const eventData = data.filter(record => 
+              record.source_event_id === eventId || 
+              (record.event_id === eventId && !record.source_event_id)
+            );
+            
+            if (eventData.length > 0) {
+              // Rewrite file with only the proper records
+              saveInventoryToCSV(eventData, filePath);
+              console.log(`Fixed event ${eventId} CSV - removed ${data.length - eventData.length} records from other events`);
+              cleanedFiles++;
+            } else {
+              console.log(`No legitimate records found for event ${eventId} - file may need to be regenerated`);
+            }
+          }
+        } catch (error) {
+          console.error(`Error processing ${file}: ${error.message}`);
+        }
+      }
+      
+      return {
+        success: true,
+        filesChecked: files.length,
+        problemsFound,
+        cleanedFiles,
+        message: `Checked ${files.length} event files, fixed ${cleanedFiles} contaminated files`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Error cleaning up event CSV files: ${error.message}`
+      };
+    }
+  }
 }
 
 // Create and export singleton instance
 const inventoryController = new InventoryController();
+
+// Add cleanup method to be accessible from outside
+export const cleanupEventCsvFiles = () => {
+  return inventoryController.cleanupEventCsvFiles();
+};
+
 export default inventoryController; 

@@ -1,4 +1,5 @@
 import moment from "moment";
+import fs from "fs";
 //it will break map into seats
 function GetMapSeats(data) {
   let seatArray = [];
@@ -119,6 +120,7 @@ function getSplitType(arr, offer) {
   }
 }
 function CreateInventoryAndLine(data, offer, event, descriptions) {
+
   let _descriptions = descriptions.find(
     (x) => x.descriptionId == data?.descriptionId
   );
@@ -186,6 +188,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   //let singleExtraCharges=parseFloat(parseFloat(offer?.charges.filter(x=>x?.reason=="order_processing").reduce((total, item) => total + item.amount, 0)));
   //console.log(parseFloat(parseFloat(offer?.charges.filter(x=>x?.reason=="order_processing").reduce((total, item) => total + item.amount, 0))))
   //Remove single fee's
+  fs.writeFileSync("data.json", JSON.stringify(offer, null, 2));
   let repeatExtraCharges = parseFloat(
     offer?.charges
       .filter((x) => x?.reason != "order_processing")
@@ -216,7 +219,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
       offerId: data?.offerId,
       splitType: "CUSTOM",
       publicNotes: "xfer" + allDescriptions,
-      listPrice: totalCostWithPercentage,
+      listPrice: totalCost,
       customSplit: getSplitType(data?.seats, offer),
       tickets: data?.seats.map((y) => {
         return {
@@ -226,7 +229,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
           cost: totalCost,
           faceValue: totalCost,
           taxedCost: totalCost,
-          sellPrice: totalCostWithPercentage,
+          sellPrice: totalCost,
           stockType: "HARD",
           eventId: 0,
           accountId: 0,

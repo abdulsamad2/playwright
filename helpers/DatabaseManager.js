@@ -113,7 +113,9 @@ class DatabaseManager {
                 ...group.inventory,
                 tickets: group.inventory.tickets.map((ticket) => ({
                   ...ticket,
-                  sellPrice: ticket.sellPrice * 1.25, // Apply markup
+                  sellPrice: typeof ticket.sellPrice === 'number' && !isNaN(ticket.sellPrice) 
+                    ? ticket.sellPrice * 1.25 // Apply 1.25 markup as in original
+                    : parseFloat(ticket.cost || ticket.faceValue || 0) * 1.25, // Fallback to cost or faceValue if sellPrice is invalid
                 })),
               },
             }));

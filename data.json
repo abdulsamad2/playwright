@@ -1,0 +1,74 @@
+{
+  "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+  "meta": {
+    "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+    "modified": "2025-05-08T18:19:50.280878643Z",
+    "expires": "2025-05-08T18:29:50.280878643Z"
+  },
+  "offerId": "GJ6DM7BVHE",
+  "name": "Standard Ticket",
+  "rank": 1,
+  "online": true,
+  "protected": false,
+  "rollup": false,
+  "inventoryType": "primary",
+  "offerType": "standard",
+  "ticketTypeId": "000000000006",
+  "auditPriceLevel": "12",
+  "priceLevelId": "59",
+  "priceLevelSecname": "P12",
+  "description": "Standard Ticket",
+  "currency": "USD",
+  "listPrice": 35.5,
+  "faceValue": 35.5,
+  "totalPrice": 46.15,
+  "noChargesPrice": 29.5,
+  "charges": [
+    {
+      "reason": "service",
+      "type": "fee",
+      "amount": 10.65
+    },
+    {
+      "reason": "order_processing",
+      "type": "fee",
+      "subType": "default",
+      "amount": 0
+    }
+  ],
+  "sellableQuantities": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "alternateIds": [],
+  "_links": {
+    "self": [
+      {
+        "href": "/host/0A00625A9E393E68/offers/GJ6DM7BVHE"
+      }
+    ],
+    "event": [
+      {
+        "href": "/event/0A00625A9E393E68"
+      }
+    ],
+    "tickettype": [
+      {
+        "href": "/host/0A00625A9E393E68/tickettypes/000000000006"
+      }
+    ]
+  }
+}

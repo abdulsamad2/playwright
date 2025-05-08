@@ -8,6 +8,10 @@ import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
 import { BrowserFingerprint } from "./browserFingerprint.js";
 import { v4 as uuidv4 } from 'uuid';
+import SyncService from './services/syncService.js';
+import nodeFs from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
 // Updated constants for stricter update intervals and high performance on 32GB system
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
@@ -91,6 +95,15 @@ const COOKIE_MANAGEMENT = {
 // Update constants for large-scale processing
 const CONCURRENT_DOMAIN_LIMIT = 25; // Process more events from the same domain concurrently
 const DB_FETCH_LIMIT = 500; // Fetch more events at once for efficient DB interaction
+
+// CSV Upload Constants
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const DATA_DIR = path.join(__dirname, 'data');
+const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank_csv.csv');
+const COMPANY_ID = '702';
+const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q9eKV_Jt';
+const CSV_UPLOAD_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
@@ -707,7 +720,9 @@ export class ScraperManager {
                     cost: ticket.cost,
                     faceValue: ticket.faceValue,
                     taxedCost: ticket.taxedCost,
-                    sellPrice: ticket.sellPrice,
+                    sellPrice: typeof ticket?.sellPrice === 'number' && !isNaN(ticket?.sellPrice) 
+                      ? ticket.sellPrice 
+                      : parseFloat(ticket?.cost || ticket?.faceValue || 0), // Fallback to cost or faceValue if sellPrice is invalid
                     stockType: ticket.stockType,
                     eventId: ticket.eventId,
                     accountId: ticket.accountId,
@@ -774,8 +789,8 @@ export class ScraperManager {
         
         // Get event data upfront with price increase percentage and mapping_id
         const event = await Event.findOne({ Event_ID: eventId })
-            .select('Event_Name Venue Event_DateTime priceIncreasePercentage mapping_id')
-            .lean();
+          .select("")
+          .lean();
             
         if (!event) {
             this.logWithTime(`Event ${eventId} not found for CSV generation`, "error");
@@ -827,9 +842,7 @@ export class ScraperManager {
             const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
             
             // Format in-hand date as YYYY-MM-DD
-            const formattedInHandDate = inHandDate instanceof Date ? 
-                inHandDate.toISOString().split('T')[0] : 
-                new Date().toISOString().split('T')[0];
+            const formattedInHandDate = event?.inHandDate?.toISOString().split('T')[0] 
             
             // Create a record with the exact required format
             inventoryRecords.push({
@@ -837,8 +850,7 @@ export class ScraperManager {
               event_name: event?.Event_Name || `Event ${eventId}`,
               venue_name: event?.Venue || "Unknown Venue",
               event_date:
-                event?.Event_DateTime?.toISOString() ||
-                new Date().toISOString(),
+                event?.Event_DateTime?.toISOString(),
               event_id: mapping_id, // Use mapping_id as event_id
               quantity: group.inventory.quantity,
               section: group.section,
@@ -866,6 +878,7 @@ export class ScraperManager {
               shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
               passthrough: "",
               mapping_id: mapping_id, // Include mapping_id in the record
+              source_event_id: eventId, // Store the original Event_ID to ensure proper association
             });
         }
         
@@ -2404,6 +2417,18 @@ export class ScraperManager {
       this.isRunning = true;
       this.logWithTime("Starting optimized hybrid scraping for 10,000+ events...", "info");
       
+      // Start CSV upload cycle immediately
+      await this.runCsvUploadCycle();
+      
+      // Set up recurring CSV upload cycle every 5 minutes
+      const csvUploadIntervalId = setInterval(async () => {
+        try {
+          await this.runCsvUploadCycle();
+        } catch (error) {
+          this.logWithTime(`Error in CSV upload interval: ${error.message}`, "error");
+        }
+      }, CSV_UPLOAD_INTERVAL);
+      
       // Main scraping loop
       while (this.isRunning) {
         try {
@@ -2655,6 +2680,96 @@ export class ScraperManager {
     }
     
     return pauseTime;
+  }
+
+  /**
+   * Ensures the blank CSV file exists for upload
+   */
+  ensureBlankCsvExists() {
+    try {
+      if (!nodeFs.existsSync(DATA_DIR)) {
+        nodeFs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      
+      if (!nodeFs.existsSync(BLANK_CSV_PATH)) {
+        // Create empty CSV with headers
+        nodeFs.writeFileSync(BLANK_CSV_PATH, 'inventory_id,event_name,venue_name,event_date,event_id,quantity,section,row,seats,barcodes,internal_notes,public_notes,tags,list_price,face_price,taxed_cost,cost,hide_seats,in_hand,in_hand_date,instant_transfer,files_available,split_type,custom_split,stock_type,zone,shown_quantity,passthrough,mapping_id\n');
+        this.logWithTime('Created blank CSV file for inventory upload', "info");
+      }
+      return true;
+    } catch (error) {
+      this.logWithTime(`Error ensuring blank CSV exists: ${error.message}`, "error");
+      return false;
+    }
+  }
+
+  /**
+   * Gets all event CSV files from the data directory
+   * @returns {Array} Array of file paths for event CSV files
+   */
+  getEventCsvFiles() {
+    try {
+      return nodeFs.readdirSync(DATA_DIR)
+        .filter(file => file.startsWith('event_') && file.endsWith('.csv'))
+        .map(file => path.join(DATA_DIR, file));
+    } catch (error) {
+      this.logWithTime(`Error reading event CSV files: ${error.message}`, "error");
+      return [];
+    }
+  }
+
+  /**
+   * Upload a single CSV file to Sync
+   * @param {SyncService} syncService - The SyncService instance
+   * @param {string} filePath - Path to the CSV file
+   * @returns {Promise<boolean>} Whether the upload was successful
+   */
+  async uploadCsvFile(syncService, filePath) {
+    try {
+      this.logWithTime(`Uploading ${path.basename(filePath)} to Sync...`, "info");
+      const uploadResult = await syncService.uploadCsvToSync(filePath);
+      this.logWithTime(`Upload result for ${path.basename(filePath)}: ${JSON.stringify(uploadResult)}`, "success");
+      return true;
+    } catch (error) {
+      this.logWithTime(`Upload failed for ${path.basename(filePath)}: ${error.message}`, "error");
+      return false;
+    }
+  }
+
+  /**
+   * Run the CSV upload cycle - first blank CSV, then all event CSVs
+   */
+  async runCsvUploadCycle() {
+    try {
+      this.logWithTime('Starting inventory upload cycle', "info");
+      
+      // Ensure blank CSV exists
+      this.ensureBlankCsvExists();
+      
+      // Initialize the service
+      const syncService = new SyncService(COMPANY_ID, API_TOKEN);
+      
+      // First upload the blank CSV
+      await this.uploadCsvFile(syncService, BLANK_CSV_PATH);
+      
+      // Wait 1 minute before continuing with event files
+      this.logWithTime('Waiting 1 minute for blank CSV to be processed before sending event CSVs...', "info");
+      await setTimeout(60000); // 60 seconds = 1 minute
+      
+      // Get all event CSV files and upload them
+      const eventFiles = this.getEventCsvFiles();
+      this.logWithTime(`Found ${eventFiles.length} event CSV files to upload`, "info");
+      
+      for (const filePath of eventFiles) {
+        await this.uploadCsvFile(syncService, filePath);
+        // Add a small delay between uploads to avoid overwhelming the API
+        await setTimeout(2000);
+      }
+      
+      this.logWithTime('Upload cycle completed successfully', "success");
+    } catch (error) {
+      this.logWithTime(`Error in CSV upload cycle: ${error.message}`, "error");
+    }
   }
 
   // Add handleApiError method to fix the reported error
