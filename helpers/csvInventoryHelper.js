@@ -284,7 +284,7 @@ export function formatInventoryForExport(data) {
     in_hand_date: inHandDate,
     instant_transfer: data.instant_transfer || "N",
     files_available: data.files_available || "N",
-    split_type: splitType,
+    split_type: "NEVERLEAVEONE",
     custom_split: customSplit,
     stock_type: data.stock_type || "MOBILE_TRANSFER",
     zone: data.zone || "N",

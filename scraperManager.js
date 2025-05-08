@@ -2417,16 +2417,13 @@ export class ScraperManager {
       this.isRunning = true;
       this.logWithTime("Starting optimized hybrid scraping for 10,000+ events...", "info");
       
-      // Start CSV upload cycle immediately
-      await this.runCsvUploadCycle();
+      // Start CSV upload cycle immediately (non-blocking)
+      this.runCsvUploadCycle();
       
       // Set up recurring CSV upload cycle every 5 minutes
-      const csvUploadIntervalId = setInterval(async () => {
-        try {
-          await this.runCsvUploadCycle();
-        } catch (error) {
-          this.logWithTime(`Error in CSV upload interval: ${error.message}`, "error");
-        }
+      const csvUploadIntervalId = setInterval(() => {
+        // Each interval call is non-blocking
+        this.runCsvUploadCycle();
       }, CSV_UPLOAD_INTERVAL);
       
       // Main scraping loop
@@ -2738,38 +2735,53 @@ export class ScraperManager {
 
   /**
    * Run the CSV upload cycle - first blank CSV, then all event CSVs
+   * This is now fully asynchronous and won't block scraping operations
    */
   async runCsvUploadCycle() {
-    try {
-      this.logWithTime('Starting inventory upload cycle', "info");
-      
-      // Ensure blank CSV exists
-      this.ensureBlankCsvExists();
-      
-      // Initialize the service
-      const syncService = new SyncService(COMPANY_ID, API_TOKEN);
-      
-      // First upload the blank CSV
-      await this.uploadCsvFile(syncService, BLANK_CSV_PATH);
-      
-      // Wait 1 minute before continuing with event files
-      this.logWithTime('Waiting 1 minute for blank CSV to be processed before sending event CSVs...', "info");
-      await setTimeout(60000); // 60 seconds = 1 minute
-      
-      // Get all event CSV files and upload them
-      const eventFiles = this.getEventCsvFiles();
-      this.logWithTime(`Found ${eventFiles.length} event CSV files to upload`, "info");
-      
-      for (const filePath of eventFiles) {
-        await this.uploadCsvFile(syncService, filePath);
-        // Add a small delay between uploads to avoid overwhelming the API
-        await setTimeout(2000);
+    // Run the whole process in a non-blocking way
+    (async () => {
+      try {
+        this.logWithTime('Starting inventory upload cycle check', "info");
+        
+        // Check if there are any event files before proceeding
+        const eventFiles = this.getEventCsvFiles();
+        if (eventFiles.length === 0) {
+          this.logWithTime('No event CSV files found, skipping this upload cycle', "info");
+          return; // Skip this cycle if no event files exist
+        }
+        
+        this.logWithTime(`Found ${eventFiles.length} event CSV files, proceeding with upload cycle`, "info");
+        
+        // Ensure blank CSV exists
+        this.ensureBlankCsvExists();
+        
+        // Initialize the service
+        const syncService = new SyncService(COMPANY_ID, API_TOKEN);
+        
+        // First upload the blank CSV
+        await this.uploadCsvFile(syncService, BLANK_CSV_PATH);
+        
+        // Wait 1 minute before continuing with event files
+        this.logWithTime('Waiting 1 minute for blank CSV to be processed before sending event CSVs...', "info");
+        await setTimeout(60000); // 60 seconds = 1 minute
+        
+        // Upload each event file with a small delay between
+        for (const filePath of eventFiles) {
+          await this.uploadCsvFile(syncService, filePath);
+          // Add a small delay between uploads to avoid overwhelming the API
+          await setTimeout(2000);
+        }
+        
+        this.logWithTime('Upload cycle completed successfully', "success");
+      } catch (error) {
+        this.logWithTime(`Error in CSV upload cycle: ${error.message}`, "error");
       }
-      
-      this.logWithTime('Upload cycle completed successfully', "success");
-    } catch (error) {
-      this.logWithTime(`Error in CSV upload cycle: ${error.message}`, "error");
-    }
+    })().catch(error => {
+      this.logWithTime(`Fatal error in CSV upload cycle: ${error.message}`, "error");
+    });
+    
+    // Return immediately to allow scraping to continue uninterrupted
+    return Promise.resolve();
   }
 
   // Add handleApiError method to fix the reported error
