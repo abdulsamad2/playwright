@@ -2,8 +2,8 @@
   "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
   "meta": {
     "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
-    "modified": "2025-05-08T18:19:50.280878643Z",
-    "expires": "2025-05-08T18:29:50.280878643Z"
+    "modified": "2025-05-08T19:37:32.363994099Z",
+    "expires": "2025-05-08T19:47:32.363994099Z"
   },
   "offerId": "GJ6DM7BVHE",
   "name": "Standard Ticket",

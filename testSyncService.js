@@ -38,7 +38,7 @@ async function testSyncService() {
     }
     
     // Create sample CSV file
-    const sampleCsvPath = path.join(dataDir, "inventoryupdate.csv");
+    const sampleCsvPath = path.join(dataDir, "blank.csv");
    
     
     // 1. Test uploading the CSV

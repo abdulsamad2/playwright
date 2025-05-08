@@ -14,7 +14,7 @@ const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q
 
 // Directory for CSV files
 const DATA_DIR = path.join(__dirname, 'data');
-const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank_csv.csv');
+const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank.csv');
 
 // Ensure blank CSV exists
 function ensureBlankCsvExists() {
@@ -68,8 +68,8 @@ async function uploadInventoryCycle() {
     // First upload the blank CSV
     await uploadFile(syncService, BLANK_CSV_PATH);
     
-    // Wait 5 seconds before continuing with event files
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // Wait 60 seconds before continuing with event files
+    await new Promise(resolve => setTimeout(resolve, 60000));
     
     // Get all event CSV files and upload them
     const eventFiles = getEventCsvFiles();
