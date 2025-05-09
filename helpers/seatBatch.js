@@ -140,10 +140,10 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     isNameAdded = true;
   }
 
-  if (offer?.name.toLowerCase().includes("limited/obstructed")) {
+  if (offer?.name?.toLowerCase().includes("limited/obstructed")) {
     allDescriptions += ", Limted/Obstructed View";
     isNameAdded = true;
-  } else if (offer?.name.toLowerCase().includes("limited view")) {
+  } else if (offer?.name?.toLowerCase().includes("limited view")) {
     allDescriptions += ", Limited View";
     isNameAdded = true;
   }
@@ -151,21 +151,21 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   if (isNameAdded == false) {
     if (_descriptions) {
       _descriptions.descriptions.map((x) => {
-        if (x.toLowerCase().includes("side")) {
+        if (x?.toLowerCase().includes("side")) {
           allDescriptions += ", Side View";
-        } else if (x.toLowerCase().includes("behind")) {
+        } else if (x?.toLowerCase().includes("behind")) {
           allDescriptions += ", Behind The Stage";
-        } else if (x.toLowerCase().includes("rear")) {
+        } else if (x?.toLowerCase().includes("rear")) {
           allDescriptions += ", Rear View Seating";
-        } else if (x.toLowerCase().includes("partial")) {
+        } else if (x?.toLowerCase().includes("partial")) {
           allDescriptions += ", Partial View";
-        } else if (x.toLowerCase().includes("limited")) {
+        } else if (x?.toLowerCase().includes("limited")) {
           allDescriptions += ", Limited View";
-        } else if (x.toLowerCase().includes("obstructed")) {
+        } else if (x?.toLowerCase().includes("obstructed")) {
           allDescriptions += ", obstructed View";
         } else if (
-          x.toLowerCase().includes("deaf") ||
-          x.toLowerCase().includes("blind")
+          x?.toLowerCase().includes("deaf") ||
+          x?.toLowerCase().includes("blind")
         ) {
           allDescriptions += ", deaf/hard, blind/low";
         }

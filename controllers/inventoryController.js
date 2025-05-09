@@ -688,46 +688,156 @@ class InventoryController {
   }
 
   /**
-   * Generates a combined CSV file containing data from all events without duplicates
-   * @param {boolean} isNewCycle - If true, deletes previous combined file before creating a new one
-   * @returns {Object} Result of the operation
+   * Generate a combined CSV file with all events' data
+   * @param {boolean} isNewCycle - Whether this is a new scrape cycle
    */
   generateCombinedEventsCSV(isNewCycle = false) {
     try {
-      // Delete previous combined file if this is a new scrape cycle
-      if (isNewCycle && fs.existsSync(COMBINED_EVENTS_FILE)) {
+      // Get all event CSV files from the data directory
+      const eventFiles = fs.readdirSync(DATA_DIR)
+        .filter(file => file.startsWith('event_') && file.endsWith('.csv'))
+        .map(file => path.join(DATA_DIR, file));
+      
+      console.log(`Found ${eventFiles.length} event CSV files to combine`);
+      
+      if (eventFiles.length === 0) {
+        return {
+          success: false,
+          message: 'No event CSV files found to combine',
+          filePath: null
+        };
+      }
+      
+      // Load existing combined file data if it exists and this is not a new cycle
+      let existingRecords = [];
+      let existingRecordsMap = new Map(); // Map to quickly look up existing records
+      
+      if (!isNewCycle && fs.existsSync(COMBINED_EVENTS_FILE)) {
+        try {
+          existingRecords = readInventoryFromCSV(COMBINED_EVENTS_FILE);
+          console.log(`Loaded ${existingRecords.length} existing records from combined file`);
+          
+          // Create a map of existing records using section-row-seats as key
+          existingRecords.forEach(record => {
+            const key = `${record.section}-${record.row}-${record.seats}`;
+            existingRecordsMap.set(key, record);
+          });
+        } catch (error) {
+          console.error(`Error reading existing combined file: ${error.message}`);
+          // Continue with empty existingRecords if there was an error
+        }
+      } else if (isNewCycle && fs.existsSync(COMBINED_EVENTS_FILE)) {
         fs.unlinkSync(COMBINED_EVENTS_FILE);
         console.log(`Deleted previous combined events file for new scrape cycle`);
       }
       
-      // Create a Set to track unique combinations to avoid duplicates
-      const uniqueKeys = new Set();
-      const uniqueRecords = [];
-      
-      // Get all records and filter out duplicates based on section, row, and seats
-      this.inventoryData.forEach(record => {
-        const uniqueKey = `${record.section}-${record.row}-${record.seats}`;
-        if (!uniqueKeys.has(uniqueKey)) {
-          uniqueKeys.add(uniqueKey);
-          uniqueRecords.push(record);
+      // Collect all records from event files
+      let allRecords = [];
+      for (const filePath of eventFiles) {
+        try {
+          const data = readInventoryFromCSV(filePath);
+          allRecords = allRecords.concat(data);
+        } catch (error) {
+          console.error(`Error reading file ${filePath}: ${error.message}`);
+          // Continue with next file if there was an error
         }
+      }
+      
+      console.log(`Loaded a total of ${allRecords.length} records from all event files`);
+      
+      // Process each record
+      const processedKeys = new Map();
+      const finalRecords = [];
+      
+      // Counters for change tracking
+      let unchangedRecords = 0;
+      let changedRecords = 0;
+      
+      // Process each record
+      allRecords.forEach(record => {
+        // Create a unique key for this record
+        const key = `${record.section}-${record.row}-${record.seats}`;
+        
+        // Skip duplicates within the new data
+        if (processedKeys.has(key)) {
+          // If we've seen this key before, compare record details to keep the most recent one
+          const existingRecord = processedKeys.get(key);
+          
+          // Only replace if there's a actual data difference (beyond just inventory_id)
+          const isNewer = new Date(record.in_hand_date) > new Date(existingRecord.in_hand_date);
+          if (isNewer) {
+            // Remove the old record from finalRecords
+            const index = finalRecords.findIndex(r => 
+              r.section === existingRecord.section && 
+              r.row === existingRecord.row && 
+              r.seats === existingRecord.seats
+            );
+            if (index !== -1) {
+              finalRecords.splice(index, 1);
+            }
+            // Update the map with the newer record
+            processedKeys.set(key, record);
+            finalRecords.push(record);
+          }
+          return;
+        }
+        
+        // Check if this record exists in the combined file
+        if (existingRecordsMap.has(key)) {
+          const existingRecord = existingRecordsMap.get(key);
+          
+          // Compare record fields to detect changes (excluding inventory_id)
+          const fieldsToCompare = [
+            'event_id', 'quantity', 'public_notes', 'list_price', 
+            'face_price', 'taxed_cost', 'cost', 'hide_seats', 'in_hand',
+            'in_hand_date', 'stock_type', 'split_type', 'custom_split'
+          ];
+          
+          // Check if any field has changed
+          const hasChanged = fieldsToCompare.some(field => 
+            record[field] !== existingRecord[field]
+          );
+          
+          if (hasChanged) {
+            // If record has changed, use a new inventory_id
+            changedRecords++;
+            // Record is already new, so use its inventory_id
+          } else {
+            // If record is unchanged, preserve the existing inventory_id
+            unchangedRecords++;
+            record.inventory_id = existingRecord.inventory_id;
+          }
+        }
+        
+        // Add record to processed map and final records
+        processedKeys.set(key, record);
+        finalRecords.push(record);
       });
       
+      console.log(`Final record count after deduplication: ${finalRecords.length} (${changedRecords} changed, ${unchangedRecords} unchanged)`);
+      
       // Format for export
-      const formattedData = uniqueRecords.map(record => formatInventoryForExport(record));
+      const formattedData = finalRecords.map(record => formatInventoryForExport(record));
+      
+      // Verify fields are correctly included in formatted data
+      if (formattedData.length > 0) {
+        console.log(`CSV Export Verification: First record contains event_id=${formattedData[0].event_id}, mapping_id=${formattedData[0].mapping_id}`);
+      }
       
       // Save to combined file
       saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
       
-      return { 
-        success: true, 
-        message: `Generated combined CSV with ${uniqueRecords.length} unique records from all events`,
+      return {
+        success: true,
+        message: `Combined ${eventFiles.length} event files into a single CSV with ${finalRecords.length} records`,
         filePath: COMBINED_EVENTS_FILE
       };
     } catch (error) {
-      return { 
-        success: false, 
-        message: `Error generating combined events CSV: ${error.message}` 
+      console.error(`Error generating combined CSV: ${error.message}`);
+      return {
+        success: false,
+        message: `Error generating combined CSV: ${error.message}`,
+        filePath: null
       };
     }
   }

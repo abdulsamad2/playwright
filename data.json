@@ -1,66 +1,62 @@
 {
-  "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+  "schema": "urn:com.ticketmaster.services:schema:ismds:ResaleOffer:1.0",
   "meta": {
     "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
-    "modified": "2025-05-09T07:24:55.719709821Z",
-    "expires": "2025-05-09T07:34:55.719709821Z"
+    "modified": "2025-05-09T20:38:25.911171032Z",
+    "expires": "2025-05-09T20:39:25.911171032Z"
   },
-  "offerId": "GJ6DC7BVGE",
-  "name": "Standard Ticket",
+  "offerId": "GN6DQNBSHE2TCMBSGZ6DCMRSGBSGMNZQMQ2Q",
   "rank": 0,
   "online": true,
   "protected": false,
   "rollup": false,
-  "inventoryType": "primary",
+  "inventoryType": "resale",
   "offerType": "standard",
-  "ticketTypeId": "000000000001",
-  "auditPriceLevel": "4",
-  "priceLevelId": "51",
-  "priceLevelSecname": "P4",
-  "description": "Standard Ticket",
+  "listingId": "842951026",
+  "listingVersionId": "resale-listingVer-0000001220df70d5",
   "currency": "USD",
-  "listPrice": 39.75,
-  "faceValue": 39.75,
-  "totalPrice": 52.75,
-  "noChargesPrice": 35.75,
+  "listPrice": 180,
+  "faceValue": 180,
+  "totalPrice": 214.65,
+  "noChargesPrice": 180,
   "charges": [
     {
       "reason": "service",
       "type": "fee",
-      "amount": 13
-    },
-    {
-      "reason": "order_processing",
-      "type": "fee",
-      "subType": "default",
-      "amount": 0
+      "amount": 34.65
     }
   ],
   "sellableQuantities": [
     1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8
+    3
   ],
-  "alternateIds": [],
+  "section": "SEC8",
+  "row": "9",
+  "seatFrom": "5",
+  "seatTo": "7",
+  "alternateIds": [
+    {
+      "provider": "tap",
+      "id": "resale-listingVer-0000001220df70d5:product-product-0000000003c84a69:product-variant-0000000de9d0d065:1B00613AF1C87D0A"
+    }
+  ],
+  "sellerNotes": "",
+  "ticketTypeId": "STQG3LVHZ6E",
+  "deliveries": [],
   "_links": {
     "self": [
       {
-        "href": "/host/0700618C99CF1049/offers/GJ6DC7BVGE"
+        "href": "/host/1B00613AF1C87D0A/offers/GN6DQNBSHE2TCMBSGZ6DCMRSGBSGMNZQMQ2Q"
       }
     ],
     "event": [
       {
-        "href": "/event/0700618C99CF1049"
+        "href": "/event/1B00613AF1C87D0A"
       }
     ],
     "tickettype": [
       {
-        "href": "/host/0700618C99CF1049/tickettypes/000000000001"
+        "href": "/host/1B00613AF1C87D0A/tickettypes/STQG3LVHZ6E"
       }
     ]
   }

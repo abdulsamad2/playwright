@@ -283,12 +283,12 @@ export function formatInventoryForExport(data) {
     in_hand: data.in_hand || "N",
     in_hand_date: inHandDate,
     instant_transfer: data.instant_transfer || "N",
-    files_available: data.files_available || "N",
+    files_available: "Y",
     split_type: "NEVERLEAVEONE",
     custom_split: "",
     stock_type: data.stock_type || "MOBILE_TRANSFER",
     zone: data.zone || "N",
-    shown_quantity: "N",
+    shown_quantity: "",
     passthrough: data.passthrough || "",
     // mapping_id: event_id, // Use the same mapping_id value
     // source_event_id: data.source_event_id || data.event_id || '', // Preserve the source event ID
