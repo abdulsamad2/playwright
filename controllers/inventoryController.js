@@ -745,13 +745,9 @@ class InventoryController {
       
       console.log(`Loaded a total of ${allRecords.length} records from all event files`);
       
-      // Process each record
+      // Create a Map to track processed records and detect duplicates
       const processedKeys = new Map();
       const finalRecords = [];
-      
-      // Counters for change tracking
-      let unchangedRecords = 0;
-      let changedRecords = 0;
       
       // Process each record
       allRecords.forEach(record => {
@@ -800,11 +796,11 @@ class InventoryController {
           
           if (hasChanged) {
             // If record has changed, use a new inventory_id
-            changedRecords++;
+            console.log(`Record changed: ${key} - Using new inventory_id`);
             // Record is already new, so use its inventory_id
           } else {
             // If record is unchanged, preserve the existing inventory_id
-            unchangedRecords++;
+            console.log(`Record unchanged: ${key} - Preserving inventory_id`);
             record.inventory_id = existingRecord.inventory_id;
           }
         }
@@ -814,7 +810,7 @@ class InventoryController {
         finalRecords.push(record);
       });
       
-      console.log(`Final record count after deduplication: ${finalRecords.length} (${changedRecords} changed, ${unchangedRecords} unchanged)`);
+      console.log(`Final record count after deduplication: ${finalRecords.length}`);
       
       // Format for export
       const formattedData = finalRecords.map(record => formatInventoryForExport(record));

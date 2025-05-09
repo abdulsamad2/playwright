@@ -2,8 +2,8 @@
   "schema": "urn:com.ticketmaster.services:schema:ismds:ResaleOffer:1.0",
   "meta": {
     "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
-    "modified": "2025-05-09T20:38:25.911171032Z",
-    "expires": "2025-05-09T20:39:25.911171032Z"
+    "modified": "2025-05-09T20:48:37.139659233Z",
+    "expires": "2025-05-09T20:49:37.139659233Z"
   },
   "offerId": "GN6DQNBSHE2TCMBSGZ6DCMRSGBSGMNZQMQ2Q",
   "rank": 0,
