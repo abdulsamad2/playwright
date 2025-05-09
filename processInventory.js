@@ -10,6 +10,11 @@ import {
   readInventoryFromCSV, 
   saveInventoryToCSV 
 } from './helpers/csvInventoryHelper.js';
+import {
+  startScrapeCycle,
+  markEventScraped,
+  generateCombinedEventsCSV
+} from './controllers/inventoryController.js';
 
 // Define the CLI program
 const program = new Command();
@@ -113,6 +118,73 @@ program
     if (options.output) {
       saveInventoryToCSV([record], options.output);
       console.log(chalk.green(`Record saved to: ${options.output}`));
+    }
+  });
+
+// Command to start a new scrape cycle
+program
+  .command('start-cycle')
+  .description('Start a new scrape cycle for the given event IDs')
+  .argument('<eventIds>', 'Comma-separated list of event IDs to include in this cycle')
+  .action((eventIdsArg) => {
+    const eventIds = eventIdsArg.split(',').map(id => id.trim());
+    
+    if (eventIds.length === 0) {
+      console.error(chalk.red('Error: Please provide at least one event ID'));
+      process.exit(1);
+    }
+    
+    console.log(chalk.blue('Starting new scrape cycle for events:'), eventIds.join(', '));
+    
+    const result = startScrapeCycle(eventIds);
+    
+    if (result.success) {
+      console.log(chalk.green(result.message));
+    } else {
+      console.error(chalk.red(`Error: ${result.message}`));
+      process.exit(1);
+    }
+  });
+
+// Command to mark an event as scraped in the current cycle
+program
+  .command('mark-scraped')
+  .description('Mark an event as scraped in the current cycle')
+  .argument('<eventId>', 'Event ID that has been scraped')
+  .action((eventId) => {
+    console.log(chalk.blue('Marking event as scraped:'), eventId);
+    
+    const result = markEventScraped(eventId);
+    
+    if (result.success) {
+      console.log(chalk.green(result.message));
+      
+      if (result.cycleComplete) {
+        console.log(chalk.green('🎉 All events in the cycle have been scraped!'));
+        console.log(chalk.green('The combined CSV has been automatically generated.'));
+      }
+    } else {
+      console.error(chalk.red(`Error: ${result.message}`));
+      process.exit(1);
+    }
+  });
+
+// Command to manually generate the combined CSV
+program
+  .command('generate-combined')
+  .description('Manually generate a combined CSV file with all events data')
+  .option('-n, --new-cycle', 'Treat this as a new cycle (deletes previous combined file)')
+  .action((options) => {
+    console.log(chalk.blue('Generating combined CSV for all events'));
+    
+    const result = generateCombinedEventsCSV(options.newCycle || false);
+    
+    if (result.success) {
+      console.log(chalk.green(result.message));
+      console.log(chalk.green(`File saved to: ${result.filePath}`));
+    } else {
+      console.error(chalk.red(`Error: ${result.message}`));
+      process.exit(1);
     }
   });
 

@@ -69,7 +69,7 @@ async function uploadInventoryCycle() {
     await uploadFile(syncService, BLANK_CSV_PATH);
     
     // Wait 60 seconds before continuing with event files
-    await new Promise(resolve => setTimeout(resolve, 60000));
+    await new Promise(resolve => setTimeout(resolve, 1200000));
     
     // Get all event CSV files and upload them
     const eventFiles = getEventCsvFiles();

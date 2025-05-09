@@ -12,6 +12,8 @@ import {
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DEFAULT_INVENTORY_FILE = path.join(DATA_DIR, 'inventory.csv');
 const PROCESSED_EVENTS_FILE = path.join(DATA_DIR, 'processed_events.json');
+const COMBINED_EVENTS_FILE = path.join(DATA_DIR, 'all_events_combined.csv');
+const SCRAPE_CYCLE_FILE = path.join(DATA_DIR, 'scrape_cycle.json');
 
 // Create data directory if it doesn't exist
 if (!fs.existsSync(DATA_DIR)) {
@@ -29,6 +31,39 @@ const getProcessedEvents = () => {
     }
   }
   return {};
+};
+
+// Track the current scrape cycle
+const getScrapeCycle = () => {
+  if (fs.existsSync(SCRAPE_CYCLE_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(SCRAPE_CYCLE_FILE, 'utf8'));
+    } catch (error) {
+      console.error(`Error reading scrape cycle file: ${error.message}`);
+      return { 
+        currentCycle: 1,
+        events: {},
+        status: 'in_progress',
+        startedAt: new Date().toISOString()
+      };
+    }
+  }
+  return { 
+    currentCycle: 1,
+    events: {},
+    status: 'in_progress',
+    startedAt: new Date().toISOString()
+  };
+};
+
+const saveScrapeCycle = (cycleData) => {
+  try {
+    fs.writeFileSync(SCRAPE_CYCLE_FILE, JSON.stringify(cycleData, null, 2));
+    return true;
+  } catch (error) {
+    console.error(`Error saving scrape cycle file: ${error.message}`);
+    return false;
+  }
 };
 
 const saveProcessedEvents = (processedEvents) => {
@@ -49,7 +84,86 @@ class InventoryController {
     // Initialize with empty data
     this.inventoryData = [];
     this.processedEvents = getProcessedEvents();
+    this.scrapeCycle = getScrapeCycle();
     this.loadInventory();
+  }
+
+  /**
+   * Start a new scrape cycle
+   * @param {Array} eventIds - Array of event IDs that will be part of this cycle
+   */
+  startScrapeCycle(eventIds) {
+    if (!Array.isArray(eventIds) || eventIds.length === 0) {
+      return { success: false, message: 'Please provide an array of event IDs' };
+    }
+
+    // Delete previous combined file if it exists
+    if (fs.existsSync(COMBINED_EVENTS_FILE)) {
+      fs.unlinkSync(COMBINED_EVENTS_FILE);
+      console.log(`Deleted previous combined events file for new scrape cycle`);
+    }
+
+    // Create a new cycle object
+    const events = {};
+    eventIds.forEach(id => {
+      events[id] = { status: 'pending', lastUpdated: null };
+    });
+
+    this.scrapeCycle = {
+      currentCycle: this.scrapeCycle.currentCycle + 1,
+      events,
+      status: 'in_progress',
+      startedAt: new Date().toISOString(),
+      completedAt: null
+    };
+
+    saveScrapeCycle(this.scrapeCycle);
+
+    return {
+      success: true,
+      message: `Started new scrape cycle #${this.scrapeCycle.currentCycle} with ${eventIds.length} events`
+    };
+  }
+
+  /**
+   * Mark an event as scraped in the current cycle
+   * @param {string} eventId - The event ID that was scraped
+   */
+  markEventScraped(eventId) {
+    if (!this.scrapeCycle.events[eventId]) {
+      // Add this event to the cycle if it wasn't initially included
+      this.scrapeCycle.events[eventId] = { 
+        status: 'completed', 
+        lastUpdated: new Date().toISOString() 
+      };
+    } else {
+      // Update existing event status
+      this.scrapeCycle.events[eventId] = {
+        status: 'completed',
+        lastUpdated: new Date().toISOString()
+      };
+    }
+
+    // Check if all events are scraped
+    const allCompleted = Object.values(this.scrapeCycle.events)
+      .every(event => event.status === 'completed');
+
+    if (allCompleted) {
+      this.scrapeCycle.status = 'completed';
+      this.scrapeCycle.completedAt = new Date().toISOString();
+      
+      // Generate the combined CSV file
+      const result = this.generateCombinedEventsCSV();
+      console.log(`Scrape cycle #${this.scrapeCycle.currentCycle} completed - ${result.message}`);
+    }
+
+    saveScrapeCycle(this.scrapeCycle);
+
+    return {
+      success: true,
+      message: `Event ${eventId} marked as scraped`,
+      cycleComplete: allCompleted
+    };
   }
 
   /**
@@ -315,6 +429,9 @@ class InventoryController {
       };
       saveProcessedEvents(this.processedEvents);
       
+      // Mark this event as scraped in the current cycle
+      this.markEventScraped(eventId);
+      
       return { 
         success: true, 
         message: `Added ${uniqueRecords.length} unique records for event ${eventId}`,
@@ -569,6 +686,51 @@ class InventoryController {
       };
     }
   }
+
+  /**
+   * Generates a combined CSV file containing data from all events without duplicates
+   * @param {boolean} isNewCycle - If true, deletes previous combined file before creating a new one
+   * @returns {Object} Result of the operation
+   */
+  generateCombinedEventsCSV(isNewCycle = false) {
+    try {
+      // Delete previous combined file if this is a new scrape cycle
+      if (isNewCycle && fs.existsSync(COMBINED_EVENTS_FILE)) {
+        fs.unlinkSync(COMBINED_EVENTS_FILE);
+        console.log(`Deleted previous combined events file for new scrape cycle`);
+      }
+      
+      // Create a Set to track unique combinations to avoid duplicates
+      const uniqueKeys = new Set();
+      const uniqueRecords = [];
+      
+      // Get all records and filter out duplicates based on section, row, and seats
+      this.inventoryData.forEach(record => {
+        const uniqueKey = `${record.section}-${record.row}-${record.seats}`;
+        if (!uniqueKeys.has(uniqueKey)) {
+          uniqueKeys.add(uniqueKey);
+          uniqueRecords.push(record);
+        }
+      });
+      
+      // Format for export
+      const formattedData = uniqueRecords.map(record => formatInventoryForExport(record));
+      
+      // Save to combined file
+      saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
+      
+      return { 
+        success: true, 
+        message: `Generated combined CSV with ${uniqueRecords.length} unique records from all events`,
+        filePath: COMBINED_EVENTS_FILE
+      };
+    } catch (error) {
+      return { 
+        success: false, 
+        message: `Error generating combined events CSV: ${error.message}` 
+      };
+    }
+  }
 }
 
 // Create and export singleton instance
@@ -577,6 +739,20 @@ const inventoryController = new InventoryController();
 // Add cleanup method to be accessible from outside
 export const cleanupEventCsvFiles = () => {
   return inventoryController.cleanupEventCsvFiles();
+};
+
+// Export method to generate combined events CSV
+export const generateCombinedEventsCSV = (isNewCycle = false) => {
+  return inventoryController.generateCombinedEventsCSV(isNewCycle);
+};
+
+// Export methods to manage scrape cycles
+export const startScrapeCycle = (eventIds) => {
+  return inventoryController.startScrapeCycle(eventIds);
+};
+
+export const markEventScraped = (eventId) => {
+  return inventoryController.markEventScraped(eventId);
 };
 
 export default inventoryController; 
