@@ -393,20 +393,75 @@ class InventoryController {
           uniqueRecords.push(record);
         }
       });
-      
-      // Remove ALL existing inventory records for this specific eventId before adding new ones
-      this.inventoryData = this.inventoryData.filter(record => 
-        record.source_event_id !== eventId
+
+      // Get existing records for this event
+      const existingRecords = this.inventoryData.filter(record => 
+        record.source_event_id === eventId
+      );
+
+      // Create maps for quick lookup
+      const existingMap = new Map(
+        existingRecords.map(record => [
+          `${record.section}-${record.row}-${record.seats}`,
+          record
+        ])
       );
       
-      // Add the unique records
-      this.inventoryData.push(...uniqueRecords);
+      const newMap = new Map(
+        uniqueRecords.map(record => [
+          `${record.section}-${record.row}-${record.seats}`,
+          record
+        ])
+      );
+
+      // Find records to delete (exist in old but not in new)
+      const recordsToDelete = existingRecords.filter(record => {
+        const key = `${record.section}-${record.row}-${record.seats}`;
+        return !newMap.has(key);
+      });
+
+      // Find records to add (exist in new but not in old)
+      const recordsToAdd = uniqueRecords.filter(record => {
+        const key = `${record.section}-${record.row}-${record.seats}`;
+        return !existingMap.has(key);
+      });
+
+      // Find records that need updating (exist in both but have different values)
+      const recordsToUpdate = uniqueRecords.filter(record => {
+        const key = `${record.section}-${record.row}-${record.seats}`;
+        const existingRecord = existingMap.get(key);
+        if (!existingRecord) return false;
+
+        // Compare relevant fields
+        return JSON.stringify({
+          price: record.price,
+          quantity: record.quantity,
+          status: record.status
+        }) !== JSON.stringify({
+          price: existingRecord.price,
+          quantity: existingRecord.quantity,
+          status: existingRecord.status
+        });
+      });
+
+      // Remove records that need to be deleted or updated
+      this.inventoryData = this.inventoryData.filter(record => {
+        const key = `${record.section}-${record.row}-${record.seats}`;
+        return !recordsToDelete.some(r => 
+          `${r.section}-${r.row}-${r.seats}` === key
+        ) && !recordsToUpdate.some(r => 
+          `${r.section}-${r.row}-${r.seats}` === key
+        );
+      });
+
+      // Add new and updated records
+      this.inventoryData.push(...recordsToAdd, ...recordsToUpdate);
       
       // Generate event-specific CSV filename
       const eventCsvPath = path.join(DATA_DIR, `event_${eventId}.csv`);
       
       // Only include records from this specific event in the CSV
-      const formattedData = uniqueRecords
+      const formattedData = this.inventoryData
         .filter(record => record.source_event_id === eventId)
         .map(record => formatInventoryForExport(record));
       
@@ -434,8 +489,13 @@ class InventoryController {
       
       return { 
         success: true, 
-        message: `Added ${uniqueRecords.length} unique records for event ${eventId}`,
-        csvPath: eventCsvPath
+        message: `Processed ${uniqueRecords.length} records for event ${eventId}: ${recordsToAdd.length} added, ${recordsToUpdate.length} updated, ${recordsToDelete.length} deleted`,
+        csvPath: eventCsvPath,
+        stats: {
+          added: recordsToAdd.length,
+          updated: recordsToUpdate.length,
+          deleted: recordsToDelete.length
+        }
       };
     } catch (error) {
       return { success: false, message: error.message };
@@ -813,15 +873,64 @@ class InventoryController {
       console.log(`Final record count after deduplication: ${finalRecords.length}`);
       
       // Format for export
-      const formattedData = finalRecords.map(record => formatInventoryForExport(record));
+      const formattedData = finalRecords.map(record => {
+        // Ensure event_id is always present before formatting
+        if (!record.event_id && record.mapping_id) {
+          record.event_id = record.mapping_id;
+          console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
+        } else if (!record.mapping_id && record.event_id) {
+          record.mapping_id = record.event_id;
+          console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
+        } else if (!record.event_id && !record.mapping_id && record.source_event_id) {
+          // Use source_event_id as a fallback
+          record.event_id = record.source_event_id;
+          record.mapping_id = record.source_event_id;
+          console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
+        }
+        
+        // Final check to ensure neither is empty
+        if (!record.event_id || !record.mapping_id) {
+          console.warn(`WARNING: Record may have missing ID fields: section=${record.section}, row=${record.row}, event_id=${record.event_id || 'MISSING'}, mapping_id=${record.mapping_id || 'MISSING'}`);
+        }
+        
+        return formatInventoryForExport(record);
+      });
       
       // Verify fields are correctly included in formatted data
       if (formattedData.length > 0) {
-        console.log(`CSV Export Verification: First record contains event_id=${formattedData[0].event_id}, mapping_id=${formattedData[0].mapping_id}`);
+        const firstRecord = formattedData[0];
+        console.log(`CSV Export Verification: First record contains event_id=${firstRecord.event_id || 'MISSING'}, mapping_id=${firstRecord.mapping_id || 'MISSING'}`);
+        
+        // Count records with missing IDs for reporting
+        const missingEventId = formattedData.filter(r => !r.event_id).length;
+        const missingMappingId = formattedData.filter(r => !r.mapping_id).length;
+        
+        if (missingEventId > 0 || missingMappingId > 0) {
+          console.warn(`WARNING: Found ${missingEventId} records without event_id and ${missingMappingId} records without mapping_id`);
+        }
       }
       
       // Save to combined file
       saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
+      
+      // Verify the saved file has the correct headers
+      try {
+        const fs = require('fs');
+        const fileContent = fs.readFileSync(COMBINED_EVENTS_FILE, 'utf8');
+        const firstLine = fileContent.split('\n')[0];
+        
+        // Check if the header line contains event_id and mapping_id
+        const hasEventId = firstLine.includes('event_id');
+        const hasMappingId = firstLine.includes('mapping_id');
+        
+        console.log(`VERIFICATION: Combined CSV file headers - event_id=${hasEventId ? 'PRESENT' : 'MISSING'}, mapping_id=${hasMappingId ? 'PRESENT' : 'MISSING'}`);
+        
+        if (!hasEventId || !hasMappingId) {
+          console.error(`ERROR: Combined CSV file is missing required fields in headers: ${!hasEventId ? 'event_id ' : ''}${!hasMappingId ? 'mapping_id' : ''}`);
+        }
+      } catch (verifyError) {
+        console.error(`Error verifying combined CSV file: ${verifyError.message}`);
+      }
       
       return {
         success: true,

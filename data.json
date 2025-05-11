@@ -1,62 +1,72 @@
 {
-  "schema": "urn:com.ticketmaster.services:schema:ismds:ResaleOffer:1.0",
+  "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
   "meta": {
     "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
-    "modified": "2025-05-09T20:48:37.139659233Z",
-    "expires": "2025-05-09T20:49:37.139659233Z"
+    "modified": "2025-05-11T07:36:23.917304209Z",
+    "expires": "2025-05-11T07:46:23.917304209Z"
   },
-  "offerId": "GN6DQNBSHE2TCMBSGZ6DCMRSGBSGMNZQMQ2Q",
-  "rank": 0,
+  "offerId": "GJ6DQMBQGA3DAMBQHF6DIOI",
+  "name": "'SUPER COOL' EARLY ENTRY & PREMIUM SEAT PACKAGE",
+  "rank": 2,
   "online": true,
   "protected": false,
   "rollup": false,
-  "inventoryType": "resale",
+  "inventoryType": "primary",
   "offerType": "standard",
-  "listingId": "842951026",
-  "listingVersionId": "resale-listingVer-0000001220df70d5",
+  "ticketTypeId": "000800060009",
+  "ticketTypeUnsoldQualifier": "VIP3HOLD",
+  "auditPriceLevel": "2",
+  "priceLevelId": "49",
+  "priceLevelSecname": "P2",
+  "description": "'SUPER COOL' EARLY ENTRY & PREMIUM SEAT PACKAGE",
   "currency": "USD",
-  "listPrice": 180,
-  "faceValue": 180,
-  "totalPrice": 214.65,
-  "noChargesPrice": 180,
+  "listPrice": 219.75,
+  "faceValue": 219.75,
+  "totalPrice": 286.74,
+  "noChargesPrice": 214.75,
   "charges": [
+    {
+      "reason": "order_processing",
+      "type": "fee",
+      "subType": "default",
+      "amount": 0
+    },
     {
       "reason": "service",
       "type": "fee",
-      "amount": 34.65
+      "amount": 54.1
+    },
+    {
+      "reason": "face_value_tax",
+      "type": "tax",
+      "amount": 12.89
     }
   ],
   "sellableQuantities": [
     1,
-    3
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
   ],
-  "section": "SEC8",
-  "row": "9",
-  "seatFrom": "5",
-  "seatTo": "7",
-  "alternateIds": [
-    {
-      "provider": "tap",
-      "id": "resale-listingVer-0000001220df70d5:product-product-0000000003c84a69:product-variant-0000000de9d0d065:1B00613AF1C87D0A"
-    }
-  ],
-  "sellerNotes": "",
-  "ticketTypeId": "STQG3LVHZ6E",
-  "deliveries": [],
+  "alternateIds": [],
   "_links": {
     "self": [
       {
-        "href": "/host/1B00613AF1C87D0A/offers/GN6DQNBSHE2TCMBSGZ6DCMRSGBSGMNZQMQ2Q"
+        "href": "/host/1600613AB1BC42AD/offers/GJ6DQMBQGA3DAMBQHF6DIOI"
       }
     ],
     "event": [
       {
-        "href": "/event/1B00613AF1C87D0A"
+        "href": "/event/1600613AB1BC42AD"
       }
     ],
     "tickettype": [
       {
-        "href": "/host/1B00613AF1C87D0A/tickettypes/STQG3LVHZ6E"
+        "href": "/host/1600613AB1BC42AD/tickettypes/000800060009"
       }
     ]
   }

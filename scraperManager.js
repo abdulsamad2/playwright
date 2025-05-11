@@ -3308,6 +3308,25 @@ export class ScraperManager {
             `CSV WARNING: Combined CSV file is missing required fields: ${!hasMappingId ? 'mapping_id ' : ''}${!hasEventId ? 'event_id' : ''}`,
             "warning"
           );
+          
+          // If the combined CSV is missing required fields, try to regenerate it
+          try {
+            console.log(`[${new Date().toISOString()}] CSV UPLOAD: Attempting to regenerate combined CSV file with missing fields`);
+            
+            // Import the generateCombinedEventsCSV function dynamically
+            const { generateCombinedEventsCSV } = await import('./controllers/inventoryController.js');
+            
+            // Generate a new combined CSV
+            const result = generateCombinedEventsCSV(false);
+            
+            if (result.success) {
+              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Successfully regenerated combined CSV file`);
+            } else {
+              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Failed to regenerate combined CSV file: ${result.message}`);
+            }
+          } catch (regenerateError) {
+            console.error(`[${new Date().toISOString()}] CSV UPLOAD: Error regenerating combined CSV: ${regenerateError.message}`);
+          }
         }
       } catch (checkError) {
         console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK ERROR: ${checkError.message}`);

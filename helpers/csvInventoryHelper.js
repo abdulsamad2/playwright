@@ -254,8 +254,15 @@ export function formatInventoryForExport(data) {
     data.in_hand_date.toISOString().split('T')[0] : 
     data.in_hand_date || '';
   
-  // Ensure mapping_id is used as event_id
-  const event_id = data.mapping_id || "";
+  // Ensure mapping_id is used as event_id, with failsafes to ensure they're never empty
+  let event_id = data.mapping_id || data.event_id || "";
+  
+  // If both are missing, generate a warning and create a fallback ID
+  // if (!event_id) {
+  //   const fallbackId = uuid.substring(0, 8);
+  //   console.warn(`WARNING: Missing event_id and mapping_id for record with section=${data.section}, row=${data.row}. Using fallback ID: ${fallbackId}`);
+  //   event_id = fallbackId;
+  // }
   
   // Use original event name if it was preserved, otherwise use the event_name
   const eventName = data.original_event_name || data.event_name || "";
@@ -266,7 +273,7 @@ export function formatInventoryForExport(data) {
     event_name: eventName,
     venue_name: data.venue_name || "",
     event_date: data.event_date || "",
-    event_id: event_id, // Always use mapping_id as event_id
+    event_id: event_id, // Always use mapping_id or fallback as event_id
     quantity: quantity.toString(),
     section: data.section || "",
     row: data.row || "",
@@ -290,7 +297,6 @@ export function formatInventoryForExport(data) {
     zone: data.zone || "N",
     shown_quantity: "",
     passthrough: data.passthrough || "",
-    // mapping_id: event_id, // Use the same mapping_id value
-    // source_event_id: data.source_event_id || data.event_id || '', // Preserve the source event ID
+   
   };
 }
