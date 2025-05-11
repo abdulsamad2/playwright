@@ -13,7 +13,9 @@ import nodeFs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
-// Updated constants for stricter update intervals and high performance on 32GB system
+// Add this at the top of the file, after imports
+export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
+
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = Math.max(60, Math.floor(cpus().length * 5)); // Dramatically increased for maximum parallel processing
 const MAX_RETRIES = 15; // Updated from 10 per request of user
@@ -2859,14 +2861,15 @@ export class ScraperManager {
       );
 
       // Start CSV upload cycle immediately (non-blocking)
-      this.runCsvUploadCycle();
-
-      // Set up recurring CSV upload cycle every 6 minutes
-      this.csvUploadIntervalId = setInterval(() => {
-        // Each interval call is non-blocking
+      if (ENABLE_CSV_UPLOAD) {
         this.runCsvUploadCycle();
-      }, CSV_UPLOAD_INTERVAL);
 
+        // Set up recurring CSV upload cycle every 6 minutes
+        this.csvUploadIntervalId = setInterval(() => {
+          // Each interval call is non-blocking
+          this.runCsvUploadCycle();
+        }, CSV_UPLOAD_INTERVAL);
+      }
       // Main scraping loop
       while (this.isRunning) {
         try {

@@ -2,28 +2,27 @@
   "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
   "meta": {
     "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
-    "modified": "2025-05-11T07:36:23.917304209Z",
-    "expires": "2025-05-11T07:46:23.917304209Z"
+    "modified": "2025-05-11T13:20:31.838542763Z",
+    "expires": "2025-05-11T13:30:31.838542763Z"
   },
-  "offerId": "GJ6DQMBQGA3DAMBQHF6DIOI",
-  "name": "'SUPER COOL' EARLY ENTRY & PREMIUM SEAT PACKAGE",
-  "rank": 2,
+  "offerId": "GJ6DC7BVGA",
+  "name": "Standard Ticket",
+  "rank": 0,
   "online": true,
   "protected": false,
   "rollup": false,
   "inventoryType": "primary",
   "offerType": "standard",
-  "ticketTypeId": "000800060009",
-  "ticketTypeUnsoldQualifier": "VIP3HOLD",
-  "auditPriceLevel": "2",
-  "priceLevelId": "49",
-  "priceLevelSecname": "P2",
-  "description": "'SUPER COOL' EARLY ENTRY & PREMIUM SEAT PACKAGE",
+  "ticketTypeId": "000000000001",
+  "auditPriceLevel": "3",
+  "priceLevelId": "50",
+  "priceLevelSecname": "P3",
+  "description": "Standard Ticket",
   "currency": "USD",
-  "listPrice": 219.75,
-  "faceValue": 219.75,
-  "totalPrice": 286.74,
-  "noChargesPrice": 214.75,
+  "listPrice": 74.5,
+  "faceValue": 74.5,
+  "totalPrice": 99.05,
+  "noChargesPrice": 74.5,
   "charges": [
     {
       "reason": "order_processing",
@@ -34,12 +33,17 @@
     {
       "reason": "service",
       "type": "fee",
-      "amount": 54.1
+      "amount": 17.95
     },
     {
-      "reason": "face_value_tax",
+      "reason": "service_tax",
       "type": "tax",
-      "amount": 12.89
+      "amount": 1.6
+    },
+    {
+      "reason": "facility",
+      "type": "fee",
+      "amount": 5
     }
   ],
   "sellableQuantities": [
@@ -56,17 +60,17 @@
   "_links": {
     "self": [
       {
-        "href": "/host/1600613AB1BC42AD/offers/GJ6DQMBQGA3DAMBQHF6DIOI"
+        "href": "/host/0E00616E747A1458/offers/GJ6DC7BVGA"
       }
     ],
     "event": [
       {
-        "href": "/event/1600613AB1BC42AD"
+        "href": "/event/0E00616E747A1458"
       }
     ],
     "tickettype": [
       {
-        "href": "/host/1600613AB1BC42AD/tickettypes/000800060009"
+        "href": "/host/0E00616E747A1458/tickettypes/000000000001"
       }
     ]
   }
