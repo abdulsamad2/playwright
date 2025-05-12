@@ -1,5 +1,4 @@
 import fs from 'fs';
-import { promises as fsPromises } from 'fs';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
 import path from 'path';
@@ -72,9 +71,9 @@ export function getSeatRange(seatsString) {
  * @param {string} filePath - Path to the CSV file
  * @returns {Array} - Array of parsed inventory items
  */
-export async function readInventoryFromCSV(filePath) {
+export function readInventoryFromCSV(filePath) {
   try {
-    const content = await fsPromises.readFile(filePath, 'utf8');
+    const content = fs.readFileSync(filePath, 'utf8');
     const records = parse(content, {
       columns: true,
       skip_empty_lines: true
@@ -92,11 +91,11 @@ export async function readInventoryFromCSV(filePath) {
  * @param {string} filePath - Path to save the CSV file
  * @returns {boolean} - Success status
  */
-export async function saveInventoryToCSV(data, filePath) {
+export function saveInventoryToCSV(data, filePath) {
   try {
     const headers = Object.keys(data[0]);
     const csv = stringify(data, { header: true, columns: headers });
-    await fsPromises.writeFile(filePath, csv);
+    fs.writeFileSync(filePath, csv);
     return true;
   } catch (error) {
     console.error(`Error saving CSV file: ${error.message}`);
@@ -152,7 +151,7 @@ export function validateAndFixInventoryRecord(record) {
  * @param {string} outputFilePath - Path to save the validated CSV file
  * @returns {Object} - Processing statistics
  */
-export async function processInventoryCSV(inputFilePath, outputFilePath) {
+export function processInventoryCSV(inputFilePath, outputFilePath) {
   const stats = {
     total: 0,
     fixed: 0,
@@ -161,7 +160,7 @@ export async function processInventoryCSV(inputFilePath, outputFilePath) {
   
   try {
     // Read the CSV file
-    const records = await readInventoryFromCSV(inputFilePath);
+    const records = readInventoryFromCSV(inputFilePath);
     stats.total = records.length;
     
     // Process each record
@@ -183,7 +182,7 @@ export async function processInventoryCSV(inputFilePath, outputFilePath) {
     });
     
     // Save the processed data
-    await saveInventoryToCSV(fixedRecords, outputFilePath);
+    saveInventoryToCSV(fixedRecords, outputFilePath);
     
     return stats;
   } catch (error) {

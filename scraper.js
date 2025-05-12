@@ -3,7 +3,6 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { promises as fsPromises } from 'fs';
 import { chromium,devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
@@ -1844,7 +1843,7 @@ async function refreshCookiesPeriodically() {
         };
         
         // Save to file
-        await saveCookiesToFile(newState.cookies);
+        await cookieManager.saveCookiesToFile(newState.cookies);
         
         // Don't close context - keep browser session alive
         

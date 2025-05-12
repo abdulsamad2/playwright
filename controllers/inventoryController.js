@@ -7,7 +7,6 @@ import {
   validateAndFixInventoryRecord,
   formatInventoryForExport
 } from '../helpers/csvInventoryHelper.js';
-import { promises as fsPromises } from 'fs';
 
 // Store path for inventory data
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -22,11 +21,10 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 // Maintain a record of processed events to avoid duplicate CSV generation
-const getProcessedEvents = async () => {
+const getProcessedEvents = () => {
   if (fs.existsSync(PROCESSED_EVENTS_FILE)) {
     try {
-      const data = await fsPromises.readFile(PROCESSED_EVENTS_FILE, 'utf8');
-      return JSON.parse(data);
+      return JSON.parse(fs.readFileSync(PROCESSED_EVENTS_FILE, 'utf8'));
     } catch (error) {
       console.error(`Error reading processed events file: ${error.message}`);
       return {};
@@ -36,11 +34,10 @@ const getProcessedEvents = async () => {
 };
 
 // Track the current scrape cycle
-const getScrapeCycle = async () => {
+const getScrapeCycle = () => {
   if (fs.existsSync(SCRAPE_CYCLE_FILE)) {
     try {
-      const data = await fsPromises.readFile(SCRAPE_CYCLE_FILE, 'utf8');
-      return JSON.parse(data);
+      return JSON.parse(fs.readFileSync(SCRAPE_CYCLE_FILE, 'utf8'));
     } catch (error) {
       console.error(`Error reading scrape cycle file: ${error.message}`);
       return { 
@@ -59,9 +56,9 @@ const getScrapeCycle = async () => {
   };
 };
 
-const saveScrapeCycle = async (cycleData) => {
+const saveScrapeCycle = (cycleData) => {
   try {
-    await fsPromises.writeFile(SCRAPE_CYCLE_FILE, JSON.stringify(cycleData, null, 2));
+    fs.writeFileSync(SCRAPE_CYCLE_FILE, JSON.stringify(cycleData, null, 2));
     return true;
   } catch (error) {
     console.error(`Error saving scrape cycle file: ${error.message}`);
@@ -69,9 +66,9 @@ const saveScrapeCycle = async (cycleData) => {
   }
 };
 
-const saveProcessedEvents = async (processedEvents) => {
+const saveProcessedEvents = (processedEvents) => {
   try {
-    await fsPromises.writeFile(PROCESSED_EVENTS_FILE, JSON.stringify(processedEvents, null, 2));
+    fs.writeFileSync(PROCESSED_EVENTS_FILE, JSON.stringify(processedEvents, null, 2));
     return true;
   } catch (error) {
     console.error(`Error saving processed events file: ${error.message}`);
@@ -86,36 +83,16 @@ class InventoryController {
   constructor() {
     // Initialize with empty data
     this.inventoryData = [];
-    // Use empty objects initially, will be populated in initializeInventory
-    this.processedEvents = {};
-    this.scrapeCycle = { 
-      currentCycle: 1,
-      events: {},
-      status: 'in_progress',
-      startedAt: new Date().toISOString()
-    };
-    // Initialize async data loading
-    this.initializeInventory();
-  }
-
-  async initializeInventory() {
-    try {
-      // Load the processed events and scrape cycle asynchronously
-      this.processedEvents = await getProcessedEvents();
-      this.scrapeCycle = await getScrapeCycle();
-      await this.loadInventory();
-      console.log("Inventory initialized successfully");
-    } catch (error) {
-      console.error(`Error initializing inventory: ${error.message}`);
-      this.inventoryData = [];
-    }
+    this.processedEvents = getProcessedEvents();
+    this.scrapeCycle = getScrapeCycle();
+    this.loadInventory();
   }
 
   /**
    * Start a new scrape cycle
    * @param {Array} eventIds - Array of event IDs that will be part of this cycle
    */
-  async startScrapeCycle(eventIds) {
+  startScrapeCycle(eventIds) {
     if (!Array.isArray(eventIds) || eventIds.length === 0) {
       return { success: false, message: 'Please provide an array of event IDs' };
     }
@@ -151,19 +128,22 @@ class InventoryController {
   /**
    * Mark an event as scraped in the current cycle
    * @param {string} eventId - The event ID that was scraped
+   * @param {boolean} hadChanges - Whether there were any changes to the event data
    */
-  async markEventScraped(eventId) {
+  markEventScraped(eventId, hadChanges = true) {
     if (!this.scrapeCycle.events[eventId]) {
       // Add this event to the cycle if it wasn't initially included
       this.scrapeCycle.events[eventId] = { 
         status: 'completed', 
-        lastUpdated: new Date().toISOString() 
+        lastUpdated: new Date().toISOString(),
+        hadChanges: hadChanges
       };
     } else {
       // Update existing event status
       this.scrapeCycle.events[eventId] = {
         status: 'completed',
-        lastUpdated: new Date().toISOString()
+        lastUpdated: new Date().toISOString(),
+        hadChanges: hadChanges
       };
     }
 
@@ -176,7 +156,7 @@ class InventoryController {
       this.scrapeCycle.completedAt = new Date().toISOString();
       
       // Generate the combined CSV file
-      const result = await this.generateCombinedEventsCSV();
+      const result = this.generateCombinedEventsCSV();
       console.log(`Scrape cycle #${this.scrapeCycle.currentCycle} completed - ${result.message}`);
     }
 
@@ -184,7 +164,7 @@ class InventoryController {
 
     return {
       success: true,
-      message: `Event ${eventId} marked as scraped`,
+      message: `Event ${eventId} marked as scraped${hadChanges ? '' : ' (no changes)'}`,
       cycleComplete: allCompleted
     };
   }
@@ -192,10 +172,10 @@ class InventoryController {
   /**
    * Load inventory data from CSV file
    */
-  async loadInventory(filePath = DEFAULT_INVENTORY_FILE) {
+  loadInventory(filePath = DEFAULT_INVENTORY_FILE) {
     try {
       if (fs.existsSync(filePath)) {
-        this.inventoryData = await readInventoryFromCSV(filePath);
+        this.inventoryData = readInventoryFromCSV(filePath);
         console.log(`Loaded ${this.inventoryData.length} inventory records from ${filePath}`);
       } else {
         console.log(`No inventory file found at ${filePath}, starting with empty inventory`);
@@ -243,13 +223,13 @@ class InventoryController {
    * Delete old CSV files for a specific event
    * @param {string} eventId - The event ID
    */
-  async deleteOldCsvFiles(eventId) {
+  deleteOldCsvFiles(eventId) {
     try {
       const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
       if (fs.existsSync(eventFilePath)) {
         // Check if file contains data from other events before deleting
         try {
-          const existingData = await readInventoryFromCSV(eventFilePath);
+          const existingData = readInventoryFromCSV(eventFilePath);
           if (existingData.length > 0) {
             // Check how many different event names exist in the file
             const eventNames = new Set(existingData.map(record => record.event_name).filter(Boolean));
@@ -275,13 +255,13 @@ class InventoryController {
    * @param {string} filePath - Path to save the CSV file
    * @param {string} eventId - The event ID
    */
-  async saveInventory(filePath = DEFAULT_INVENTORY_FILE, eventId = null) {
+  saveInventory(filePath = DEFAULT_INVENTORY_FILE, eventId = null) {
     try {
       // Format all inventory for export
       const allFormattedData = this.inventoryData.map(record => formatInventoryForExport(record));
       
       // Save all inventory to the default file
-      await saveInventoryToCSV(allFormattedData, filePath);
+      saveInventoryToCSV(allFormattedData, filePath);
       
       // If an event ID is provided, generate an event-specific file
       if (eventId) {
@@ -294,7 +274,7 @@ class InventoryController {
         const eventFilePath = path.join(DATA_DIR, `event_${eventId}.csv`);
         
         // Save event-specific data to event-specific file
-        await saveInventoryToCSV(eventSpecificData, eventFilePath);
+        saveInventoryToCSV(eventSpecificData, eventFilePath);
         
         console.log(`Saved ${eventSpecificData.length} records specific to event ${eventId} to ${eventFilePath}`);
       }
@@ -336,7 +316,7 @@ class InventoryController {
    * @param {Object} record - The inventory record to add
    * @param {boolean} isNewEvent - Whether this is a new event being added
    */
-  async addInventory(record, isNewEvent = false) {
+  addInventory(record, isNewEvent = false) {
     try {
       // Validate and fix the record
       const validatedRecord = validateAndFixInventoryRecord(record);
@@ -355,7 +335,7 @@ class InventoryController {
       
       // Save to file only if this is a new event or we don't have event context
       const eventId = validatedRecord.event_id;
-      await this.saveInventory(DEFAULT_INVENTORY_FILE, isNewEvent ? eventId : null);
+      this.saveInventory(DEFAULT_INVENTORY_FILE, isNewEvent ? eventId : null);
       
       return { 
         success: true, 
@@ -372,7 +352,7 @@ class InventoryController {
    * @param {Array} records - Array of inventory records to add
    * @param {string} eventId - The event ID these records belong to (external Event_ID)
    */
-  async addBulkInventory(records, eventId) {
+  addBulkInventory(records, eventId) {
     try {
       if (!records || !records.length) {
         return { success: false, message: 'No records provided' };
@@ -488,17 +468,23 @@ class InventoryController {
         .filter(record => record.source_event_id === eventId)
         .map(record => formatInventoryForExport(record));
       
-      // Ensure we write to a new file (delete old file first)
+      // No matter if there were changes or not, generate a new CSV file for this event
+      // This ensures the file timestamp is updated for the merge cycle
+      
+      // Always create/update the event CSV file, even if no changes detected
+      // This is important for the merge cycle to pick up this event
       if (fs.existsSync(eventCsvPath)) {
         fs.unlinkSync(eventCsvPath);
       }
       
       // Write event-specific data to the event CSV
-      await saveInventoryToCSV(formattedData, eventCsvPath);
+      saveInventoryToCSV(formattedData, eventCsvPath);
       
-      // Update the main inventory file
-      const allFormattedData = this.inventoryData.map(record => formatInventoryForExport(record));
-      await saveInventoryToCSV(allFormattedData, DEFAULT_INVENTORY_FILE);
+      // Only update the main inventory file if there were changes
+      if (recordsToAdd.length > 0 || recordsToUpdate.length > 0 || recordsToDelete.length > 0) {
+        const allFormattedData = this.inventoryData.map(record => formatInventoryForExport(record));
+        saveInventoryToCSV(allFormattedData, DEFAULT_INVENTORY_FILE);
+      }
       
       // Update the event's last processed timestamp
       this.processedEvents[eventId] = {
@@ -507,27 +493,23 @@ class InventoryController {
       };
       saveProcessedEvents(this.processedEvents);
       
+      // Check if there were any changes
+      const noChanges = recordsToAdd.length === 0 && recordsToUpdate.length === 0 && recordsToDelete.length === 0;
+      
       // Mark this event as scraped in the current cycle
-      await this.markEventScraped(eventId);
-      
-      let message = `Processed ${uniqueRecords.length} records for event ${eventId}: ${recordsToAdd.length} added, ${recordsToUpdate.length} updated, ${recordsToDelete.length} deleted`;
-      let dataChanged = recordsToAdd.length > 0 || recordsToUpdate.length > 0 || recordsToDelete.length > 0;
-      
-      if (!dataChanged) {
-        // No actual changes were made, but we want to ensure the file is still "touched"
-        // This will help the file be included in the merge cycle since its mtime is updated
-        message = `No changes detected for event ${eventId}, but file has been updated with current timestamp`;
-      }
+      this.markEventScraped(eventId, !noChanges);
       
       return { 
         success: true, 
-        message: message,
+        message: noChanges 
+          ? `No changes detected for event ${eventId}, file timestamp updated for merge cycle` 
+          : `Processed ${uniqueRecords.length} records for event ${eventId}: ${recordsToAdd.length} added, ${recordsToUpdate.length} updated, ${recordsToDelete.length} deleted`,
         csvPath: eventCsvPath,
+        noChanges: noChanges,
         stats: {
           added: recordsToAdd.length,
           updated: recordsToUpdate.length,
-          deleted: recordsToDelete.length,
-          unchanged: dataChanged ? 0 : uniqueRecords.length
+          deleted: recordsToDelete.length
         }
       };
     } catch (error) {
@@ -538,7 +520,7 @@ class InventoryController {
   /**
    * Update an existing inventory record
    */
-  async updateInventory(inventoryId, updates) {
+  updateInventory(inventoryId, updates) {
     try {
       // Find the record
       const index = this.inventoryData.findIndex(
@@ -579,7 +561,7 @@ class InventoryController {
   /**
    * Delete an inventory record
    */
-  async deleteInventory(inventoryId) {
+  deleteInventory(inventoryId) {
     try {
       const initialLength = this.inventoryData.length;
       this.inventoryData = this.inventoryData.filter(
@@ -591,7 +573,7 @@ class InventoryController {
       }
       
       // Save changes
-      await this.saveInventory();
+      this.saveInventory();
       
       return { success: true, message: 'Inventory deleted successfully' };
     } catch (error) {
@@ -602,7 +584,7 @@ class InventoryController {
   /**
    * Check and fix seats for an inventory record
    */
-  async checkAndFixSeats(inventoryId) {
+  checkAndFixSeats(inventoryId) {
     try {
       // Find the record
       const index = this.inventoryData.findIndex(
@@ -639,7 +621,7 @@ class InventoryController {
       this.inventoryData[index] = validatedRecord;
       
       // Save changes
-      await this.saveInventory();
+      this.saveInventory();
       
       return { 
         success: true, 
@@ -655,10 +637,10 @@ class InventoryController {
   /**
    * Export inventory to CSV file
    */
-  async exportInventory(filePath) {
+  exportInventory(filePath) {
     try {
       const formattedData = this.inventoryData.map(record => formatInventoryForExport(record));
-      await saveInventoryToCSV(formattedData, filePath);
+      saveInventoryToCSV(formattedData, filePath);
       return { 
         success: true, 
         message: `Exported ${this.inventoryData.length} records to ${filePath}` 
@@ -671,13 +653,13 @@ class InventoryController {
   /**
    * Import inventory from CSV file
    */
-  async importInventory(filePath, replaceExisting = false) {
+  importInventory(filePath, replaceExisting = false) {
     try {
       if (!fs.existsSync(filePath)) {
         return { success: false, message: `File not found: ${filePath}` };
       }
       
-      const importedData = await readInventoryFromCSV(filePath);
+      const importedData = readInventoryFromCSV(filePath);
       
       if (importedData.length === 0) {
         return { success: false, message: 'No records found in import file' };
@@ -702,7 +684,7 @@ class InventoryController {
       }
       
       // Save changes
-      await this.saveInventory();
+      this.saveInventory();
       
       return { 
         success: true, 
@@ -718,7 +700,7 @@ class InventoryController {
    * Checks all event CSV files and ensures each only contains records
    * for the event it's named after
    */
-  async cleanupEventCsvFiles() {
+  cleanupEventCsvFiles() {
     try {
       // Get all event_*.csv files in the data directory
       const files = fs.readdirSync(DATA_DIR).filter(file => 
@@ -735,7 +717,7 @@ class InventoryController {
         
         try {
           // Read file data
-          const data = await readInventoryFromCSV(filePath);
+          const data = readInventoryFromCSV(filePath);
           if (data.length === 0) continue;
           
           // Check for event name contamination
@@ -753,7 +735,7 @@ class InventoryController {
             
             if (eventData.length > 0) {
               // Rewrite file with only the proper records
-              await saveInventoryToCSV(eventData, filePath);
+              saveInventoryToCSV(eventData, filePath);
               console.log(`Fixed event ${eventId} CSV - removed ${data.length - eventData.length} records from other events`);
               cleanedFiles++;
             } else {
@@ -784,14 +766,32 @@ class InventoryController {
    * Generate a combined CSV file with all events' data
    * @param {boolean} isNewCycle - Whether this is a new scrape cycle
    */
-  async generateCombinedEventsCSV(isNewCycle = false) {
+  generateCombinedEventsCSV(isNewCycle = false) {
     try {
       // Get all event CSV files from the data directory
       const eventFiles = fs.readdirSync(DATA_DIR)
         .filter(file => file.startsWith('event_') && file.endsWith('.csv'))
-        .map(file => path.join(DATA_DIR, file));
+        .map(file => {
+          const filePath = path.join(DATA_DIR, file);
+          // Get file stats to check modification time
+          const stats = fs.statSync(filePath);
+          // Extract eventId from filename
+          const eventId = file.replace('event_', '').replace('.csv', '');
+          
+          // Check if this event had changes in the current cycle
+          const hadChanges = this.scrapeCycle.events[eventId]?.hadChanges === true;
+          
+          return {
+            path: filePath,
+            fileName: file,
+            eventId: eventId,
+            lastModified: stats.mtime,
+            size: stats.size,
+            hadChanges: hadChanges
+          };
+        });
       
-      console.log(`Found ${eventFiles.length} event CSV files to combine`);
+      console.log(`Found ${eventFiles.length} total event CSV files`);
       
       if (eventFiles.length === 0) {
         return {
@@ -801,28 +801,21 @@ class InventoryController {
         };
       }
       
-      // Filter only recently updated files (within the last scrape cycle)
-      // The scrape cycle is 3 minutes and merge cycle is 6 minutes
-      // Only include files that have been modified within the last 6 minutes
+      // Only include files that have been recently updated (within last 6 minutes)
+      // This ensures only data from the current merge cycle is included
       const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
-      const updatedEventFiles = eventFiles.filter(filePath => {
-        try {
-          const stats = fs.statSync(filePath);
-          const isRecent = stats.mtime > sixMinutesAgo;
-          if (!isRecent) {
-            const eventId = path.basename(filePath).replace('event_', '').replace('.csv', '');
-            console.log(`Skipping event ${eventId} CSV file as it hasn't been updated in the current scrape cycle`);
-          }
-          return isRecent;
-        } catch (err) {
-          console.error(`Error checking file stats for ${filePath}: ${err.message}`);
-          return false;
-        }
-      });
+      const recentlyUpdatedFiles = eventFiles.filter(file => 
+        file.lastModified > sixMinutesAgo && file.size > 0
+      );
       
-      console.log(`${updatedEventFiles.length} of ${eventFiles.length} event files were updated within the current scrape cycle`);
+      // Count events with and without changes
+      const eventsWithChanges = recentlyUpdatedFiles.filter(file => file.hadChanges).length;
+      const eventsWithoutChanges = recentlyUpdatedFiles.length - eventsWithChanges;
       
-      if (updatedEventFiles.length === 0) {
+      console.log(`Found ${recentlyUpdatedFiles.length} recently updated event CSV files (within last 6 minutes)`);
+      console.log(`Events with changes: ${eventsWithChanges}, Events without changes (timestamp only): ${eventsWithoutChanges}`);
+      
+      if (recentlyUpdatedFiles.length === 0 && !isNewCycle) {
         return {
           success: false,
           message: 'No recently updated event CSV files found to combine',
@@ -836,7 +829,7 @@ class InventoryController {
       
       if (!isNewCycle && fs.existsSync(COMBINED_EVENTS_FILE)) {
         try {
-          existingRecords = await readInventoryFromCSV(COMBINED_EVENTS_FILE);
+          existingRecords = readInventoryFromCSV(COMBINED_EVENTS_FILE);
           console.log(`Loaded ${existingRecords.length} existing records from combined file`);
           
           // Create a map of existing records using section-row-seats as key
@@ -853,19 +846,30 @@ class InventoryController {
         console.log(`Deleted previous combined events file for new scrape cycle`);
       }
       
-      // Collect all records from UPDATED event files only
+      // Collect all records from recently updated event files
       let allRecords = [];
-      for (const filePath of updatedEventFiles) {
+      for (const fileInfo of recentlyUpdatedFiles) {
         try {
-          const data = await readInventoryFromCSV(filePath);
+          const data = readInventoryFromCSV(fileInfo.path);
+          console.log(`Loaded ${data.length} records from ${fileInfo.fileName} (last modified: ${fileInfo.lastModified.toISOString()})`);
           allRecords = allRecords.concat(data);
         } catch (error) {
-          console.error(`Error reading file ${filePath}: ${error.message}`);
+          console.error(`Error reading file ${fileInfo.path}: ${error.message}`);
           // Continue with next file if there was an error
         }
       }
       
-      console.log(`Loaded a total of ${allRecords.length} records from all updated event files`);
+      console.log(`Loaded a total of ${allRecords.length} records from all recently updated event files`);
+      
+      // If no new records in this cycle, keep existing combined file
+      if (allRecords.length === 0 && existingRecords.length > 0) {
+        return {
+          success: true,
+          message: `No new records to add. Kept existing combined CSV with ${existingRecords.length} records.`,
+          filePath: COMBINED_EVENTS_FILE,
+          noChanges: true
+        };
+      }
       
       // Create a Map to track processed records and detect duplicates
       const processedKeys = new Map();
@@ -932,22 +936,38 @@ class InventoryController {
         finalRecords.push(record);
       });
       
-      console.log(`Final record count after deduplication: ${finalRecords.length}`);
+      // Add all existing records that weren't in any of the updated files
+      let preservedRecordsCount = 0;
+      existingRecords.forEach(record => {
+        const key = `${record.section}-${record.row}-${record.seats}`;
+        if (!processedKeys.has(key)) {
+          // Add this existing record since it wasn't updated
+          finalRecords.push(record);
+          processedKeys.set(key, record);
+          preservedRecordsCount++;
+        }
+      });
+      
+      if (preservedRecordsCount > 0) {
+        console.log(`Preserved ${preservedRecordsCount} records from existing combined file that weren't in updated event files`);
+      }
+      
+      console.log(`Final record count after processing: ${finalRecords.length}`);
       
       // Format for export
       const formattedData = finalRecords.map(record => {
         // Ensure event_id is always present before formatting
         if (!record.event_id && record.mapping_id) {
           record.event_id = record.mapping_id;
-          // console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
+          console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
         } else if (!record.mapping_id && record.event_id) {
           record.mapping_id = record.event_id;
-          // console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
+          console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
         } else if (!record.event_id && !record.mapping_id && record.source_event_id) {
           // Use source_event_id as a fallback
           record.event_id = record.source_event_id;
           record.mapping_id = record.source_event_id;
-          // console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
+          console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
         }
         
         // Final check to ensure neither is empty
@@ -973,7 +993,7 @@ class InventoryController {
       }
       
       // Save to combined file
-      await saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
+      saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
       
       // Verify the saved file has the correct headers
       try {
@@ -996,7 +1016,7 @@ class InventoryController {
       
       return {
         success: true,
-        message: `Combined ${eventFiles.length} event files into a single CSV with ${finalRecords.length} records`,
+        message: `Combined ${recentlyUpdatedFiles.length} recently updated event files into a single CSV with ${finalRecords.length} records`,
         filePath: COMBINED_EVENTS_FILE
       };
     } catch (error) {
@@ -1014,22 +1034,22 @@ class InventoryController {
 const inventoryController = new InventoryController();
 
 // Add cleanup method to be accessible from outside
-export const cleanupEventCsvFiles = async () => {
-  return await inventoryController.cleanupEventCsvFiles();
+export const cleanupEventCsvFiles = () => {
+  return inventoryController.cleanupEventCsvFiles();
 };
 
 // Export method to generate combined events CSV
-export const generateCombinedEventsCSV = async (isNewCycle = false) => {
-  return await inventoryController.generateCombinedEventsCSV(isNewCycle);
+export const generateCombinedEventsCSV = (isNewCycle = false) => {
+  return inventoryController.generateCombinedEventsCSV(isNewCycle);
 };
 
 // Export methods to manage scrape cycles
-export const startScrapeCycle = async (eventIds) => {
-  return await inventoryController.startScrapeCycle(eventIds);
+export const startScrapeCycle = (eventIds) => {
+  return inventoryController.startScrapeCycle(eventIds);
 };
 
-export const markEventScraped = async (eventId) => {
-  return await inventoryController.markEventScraped(eventId);
+export const markEventScraped = (eventId) => {
+  return inventoryController.markEventScraped(eventId);
 };
 
 export default inventoryController; 
