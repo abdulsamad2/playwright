@@ -436,7 +436,7 @@ export class ScraperManager {
 
         // Get a random proxy for refreshing headers
         const { proxy: cookieProxy } =
-          this.proxyManager.getProxyForEvent(eventToUse);
+          await this.proxyManager.getProxyForEvent(eventToUse);
 
         // Try to refresh headers with the proxy
         let capturedState = null;
@@ -481,7 +481,7 @@ export class ScraperManager {
           const poolFp = randomFingerprint();
           const mergedFp = { ...capturedState.fingerprint, ...poolFp };
           // Generate varied headers
-          const enhanced = generateEnhancedHeaders(mergedFp, cookieString);
+          const enhanced = await generateEnhancedHeaders(mergedFp, cookieString);
           // Inject anti-bot fields
           enhanced["Referer"] = refererUrl;
           enhanced["X-Forwarded-For"] = refreshedIpAndId["X-Forwarded-For"];
@@ -3248,7 +3248,7 @@ export class ScraperManager {
       }
 
       // Try rotating proxy and headers for this event
-      if (this.proxyManager.getAvailableProxyCount() > 1) {
+      if (await this.proxyManager.getAvailableProxyCount() > 1) {
         if (LOG_LEVEL >= 2) {
           this.logWithTime(
             `Rotating proxy for event ${eventId} due to ${
@@ -3257,7 +3257,7 @@ export class ScraperManager {
             "info"
           );
         }
-        this.proxyManager.blacklistCurrentProxy(eventId);
+        await this.proxyManager.blacklistCurrentProxy(eventId);
         return true; // Error handled by proxy rotation
       }
     }
@@ -3320,7 +3320,7 @@ export class ScraperManager {
             const { generateCombinedEventsCSV } = await import('./controllers/inventoryController.js');
             
             // Generate a new combined CSV
-            const result = generateCombinedEventsCSV(false);
+            const result = await generateCombinedEventsCSV(false);
             
             if (result.success) {
               console.log(`[${new Date().toISOString()}] CSV UPLOAD: Successfully regenerated combined CSV file`);
