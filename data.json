@@ -2,11 +2,11 @@
   "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
   "meta": {
     "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
-    "modified": "2025-05-11T13:20:31.838542763Z",
-    "expires": "2025-05-11T13:30:31.838542763Z"
+    "modified": "2025-05-12T13:54:06.650821101Z",
+    "expires": "2025-05-12T14:04:06.650821101Z"
   },
-  "offerId": "GJ6DC7BVGA",
-  "name": "Standard Ticket",
+  "offerId": "GJ6DC7BUHE",
+  "name": "Standard Admission",
   "rank": 0,
   "online": true,
   "protected": false,
@@ -14,36 +14,26 @@
   "inventoryType": "primary",
   "offerType": "standard",
   "ticketTypeId": "000000000001",
-  "auditPriceLevel": "3",
-  "priceLevelId": "50",
-  "priceLevelSecname": "P3",
-  "description": "Standard Ticket",
+  "auditPriceLevel": "2",
+  "priceLevelId": "49",
+  "priceLevelSecname": "P2",
+  "description": "Standard Admission",
   "currency": "USD",
-  "listPrice": 74.5,
-  "faceValue": 74.5,
-  "totalPrice": 99.05,
-  "noChargesPrice": 74.5,
+  "listPrice": 79.75,
+  "faceValue": 79.75,
+  "totalPrice": 106,
+  "noChargesPrice": 75.75,
   "charges": [
+    {
+      "reason": "service",
+      "type": "fee",
+      "amount": 26.25
+    },
     {
       "reason": "order_processing",
       "type": "fee",
       "subType": "default",
       "amount": 0
-    },
-    {
-      "reason": "service",
-      "type": "fee",
-      "amount": 17.95
-    },
-    {
-      "reason": "service_tax",
-      "type": "tax",
-      "amount": 1.6
-    },
-    {
-      "reason": "facility",
-      "type": "fee",
-      "amount": 5
     }
   ],
   "sellableQuantities": [
@@ -60,17 +50,17 @@
   "_links": {
     "self": [
       {
-        "href": "/host/0E00616E747A1458/offers/GJ6DC7BVGA"
+        "href": "/host/16006175B80A76A3/offers/GJ6DC7BUHE"
       }
     ],
     "event": [
       {
-        "href": "/event/0E00616E747A1458"
+        "href": "/event/16006175B80A76A3"
       }
     ],
     "tickettype": [
       {
-        "href": "/host/0E00616E747A1458/tickettypes/000000000001"
+        "href": "/host/16006175B80A76A3/tickettypes/000000000001"
       }
     ]
   }

@@ -487,14 +487,24 @@ class InventoryController {
       // Mark this event as scraped in the current cycle
       this.markEventScraped(eventId);
       
+      let message = `Processed ${uniqueRecords.length} records for event ${eventId}: ${recordsToAdd.length} added, ${recordsToUpdate.length} updated, ${recordsToDelete.length} deleted`;
+      let dataChanged = recordsToAdd.length > 0 || recordsToUpdate.length > 0 || recordsToDelete.length > 0;
+      
+      if (!dataChanged) {
+        // No actual changes were made, but we want to ensure the file is still "touched"
+        // This will help the file be included in the merge cycle since its mtime is updated
+        message = `No changes detected for event ${eventId}, but file has been updated with current timestamp`;
+      }
+      
       return { 
         success: true, 
-        message: `Processed ${uniqueRecords.length} records for event ${eventId}: ${recordsToAdd.length} added, ${recordsToUpdate.length} updated, ${recordsToDelete.length} deleted`,
+        message: message,
         csvPath: eventCsvPath,
         stats: {
           added: recordsToAdd.length,
           updated: recordsToUpdate.length,
-          deleted: recordsToDelete.length
+          deleted: recordsToDelete.length,
+          unchanged: dataChanged ? 0 : uniqueRecords.length
         }
       };
     } catch (error) {
@@ -768,6 +778,35 @@ class InventoryController {
         };
       }
       
+      // Filter only recently updated files (within the last scrape cycle)
+      // The scrape cycle is 3 minutes and merge cycle is 6 minutes
+      // Only include files that have been modified within the last 6 minutes
+      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
+      const updatedEventFiles = eventFiles.filter(filePath => {
+        try {
+          const stats = fs.statSync(filePath);
+          const isRecent = stats.mtime > sixMinutesAgo;
+          if (!isRecent) {
+            const eventId = path.basename(filePath).replace('event_', '').replace('.csv', '');
+            console.log(`Skipping event ${eventId} CSV file as it hasn't been updated in the current scrape cycle`);
+          }
+          return isRecent;
+        } catch (err) {
+          console.error(`Error checking file stats for ${filePath}: ${err.message}`);
+          return false;
+        }
+      });
+      
+      console.log(`${updatedEventFiles.length} of ${eventFiles.length} event files were updated within the current scrape cycle`);
+      
+      if (updatedEventFiles.length === 0) {
+        return {
+          success: false,
+          message: 'No recently updated event CSV files found to combine',
+          filePath: null
+        };
+      }
+      
       // Load existing combined file data if it exists and this is not a new cycle
       let existingRecords = [];
       let existingRecordsMap = new Map(); // Map to quickly look up existing records
@@ -791,9 +830,9 @@ class InventoryController {
         console.log(`Deleted previous combined events file for new scrape cycle`);
       }
       
-      // Collect all records from event files
+      // Collect all records from UPDATED event files only
       let allRecords = [];
-      for (const filePath of eventFiles) {
+      for (const filePath of updatedEventFiles) {
         try {
           const data = readInventoryFromCSV(filePath);
           allRecords = allRecords.concat(data);
@@ -803,7 +842,7 @@ class InventoryController {
         }
       }
       
-      console.log(`Loaded a total of ${allRecords.length} records from all event files`);
+      console.log(`Loaded a total of ${allRecords.length} records from all updated event files`);
       
       // Create a Map to track processed records and detect duplicates
       const processedKeys = new Map();
