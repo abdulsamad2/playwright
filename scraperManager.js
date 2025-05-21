@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // Add this at the top of the file, after imports
-export const ENABLE_CSV_UPLOAD = true; // Set to false to disable all_events_combined.csv upload
+export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = Math.max(60, Math.floor(cpus().length * 5)); // Dramatically increased for maximum parallel processing
@@ -84,12 +84,12 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000,
-  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (changed from 30 minutes)
-  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000,
+  COOKIE_REFRESH_INTERVAL: 30 * 60 * 1000, // 20 minutes (changed from 30 minutes)
+  MAX_COOKIE_AGE:   30 * 60 * 60 * 1000,
   COOKIE_ROTATION: {
     ENABLED: true,
     MAX_STORED_COOKIES: 100,
-    ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes (changed from 4 hours)
+    ROTATION_INTERVAL: 30 * 60 * 1000, // 20 minutes (changed from 4 hours)
     LAST_ROTATION: Date.now(),
   },
 };
@@ -1149,6 +1149,8 @@ export class ScraperManager {
         cookieAge > COOKIE_EXPIRATION_MS / 2 ||
         retryCount > 0;
 
+      let headers;
+
       if (shouldRefreshHeaders) {
         if (LOG_LEVEL >= 2) {
           this.logWithTime(
@@ -1158,20 +1160,24 @@ export class ScraperManager {
             "debug"
           );
         }
-        await this.refreshEventHeaders(eventId);
-      } else if (LOG_LEVEL >= 3) {
-        this.logWithTime(
-          `Using cached headers for event ${eventId} (age: ${Math.floor(
-            cookieAge / 1000
-          )}s)`,
-          "debug"
-        );
+        headers = await this.refreshEventHeaders(eventId);
+      } else {
+        headers = this.headersCache.get(eventId);
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(
+            `Using cached headers for event ${eventId} (age: ${Math.floor(
+              cookieAge / 1000
+            )}s)`,
+            "debug"
+          );
+        }
       }
 
-      // Get the cached headers or defaults
-      const headers =
-        this.headersCache.get(eventId) ||
-        (await this.refreshEventHeaders(eventId));
+      // If headers aren't available through either method, try one last refresh
+      if (!headers) {
+        headers = await this.refreshEventHeaders(eventId);
+      }
+
       if (!headers) {
         throw new Error("Failed to obtain valid headers");
       }
