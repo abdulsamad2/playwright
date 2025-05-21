@@ -35,7 +35,7 @@ const LONG_COOLDOWN_MINUTES = 1; // Reduced to 1 minute for more frequent retrie
 const LOG_LEVEL = 1; // Default to warnings and errors only
 
 // Cookie expiration threshold: refresh cookies every 20 minutes
-const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (changed from 30 minutes)
+const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (matched with COOKIE_EXPIRATION_MS)
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const USER_AGENT_POOL = [
@@ -84,12 +84,12 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000,
-  COOKIE_REFRESH_INTERVAL: 30 * 60 * 1000, // 20 minutes (changed from 30 minutes)
+  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (matched with COOKIE_EXPIRATION_MS)
   MAX_COOKIE_AGE:   30 * 60 * 60 * 1000,
   COOKIE_ROTATION: {
     ENABLED: true,
     MAX_STORED_COOKIES: 100,
-    ROTATION_INTERVAL: 30 * 60 * 1000, // 20 minutes (changed from 4 hours)
+    ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes (matched with COOKIE_EXPIRATION_MS)
     LAST_ROTATION: Date.now(),
   },
 };
@@ -1054,7 +1054,7 @@ export class ScraperManager {
     }
   }
 
-  async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null) {
+  async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null, passedHeaders = null) {
     // Skip if the event should be skipped
     if (this.shouldSkipEvent(eventId)) {
       return false;
@@ -1138,44 +1138,55 @@ export class ScraperManager {
         return true;
       }
 
-      // Check if cookies have been refreshed recently
-      const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
-      const cookieAge = Date.now() - lastRefresh;
-
-      // Force header refresh if cookies are more than 15 minutes old
-      // or if this is a retry attempt (to get fresh cookies)
-      const shouldRefreshHeaders =
-        !this.headersCache.has(eventId) ||
-        cookieAge > COOKIE_EXPIRATION_MS / 2 ||
-        retryCount > 0;
-
       let headers;
-
-      if (shouldRefreshHeaders) {
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Getting fresh headers for event ${eventId}${
-              retryCount > 0 ? " (retry attempt)" : ""
-            }`,
-            "debug"
-          );
-        }
-        headers = await this.refreshEventHeaders(eventId);
-      } else {
-        headers = this.headersCache.get(eventId);
+      
+      // If headers were passed from batch processing, use them directly
+      if (passedHeaders) {
+        headers = passedHeaders;
         if (LOG_LEVEL >= 3) {
           this.logWithTime(
-            `Using cached headers for event ${eventId} (age: ${Math.floor(
-              cookieAge / 1000
-            )}s)`,
+            `Using passed headers for event ${eventId} from batch processing`,
             "debug"
           );
         }
-      }
+      } else {
+        // Check if cookies have been refreshed recently
+        const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
+        const cookieAge = Date.now() - lastRefresh;
 
-      // If headers aren't available through either method, try one last refresh
-      if (!headers) {
-        headers = await this.refreshEventHeaders(eventId);
+        // Force header refresh if cookies are more than half the expiration time
+        // or if this is a retry attempt (to get fresh cookies)
+        const shouldRefreshHeaders =
+          !this.headersCache.has(eventId) ||
+          cookieAge > COOKIE_EXPIRATION_MS / 2 ||
+          retryCount > 0;
+
+        if (shouldRefreshHeaders) {
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Getting fresh headers for event ${eventId}${
+                retryCount > 0 ? " (retry attempt)" : ""
+              }`,
+              "debug"
+            );
+          }
+          headers = await this.refreshEventHeaders(eventId);
+        } else {
+          headers = this.headersCache.get(eventId);
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(
+              `Using cached headers for event ${eventId} (age: ${Math.floor(
+                cookieAge / 1000
+              )}s)`,
+              "debug"
+            );
+          }
+        }
+
+        // If headers aren't available through either method, try one last refresh
+        if (!headers) {
+          headers = await this.refreshEventHeaders(eventId);
+        }
       }
 
       if (!headers) {
@@ -1728,216 +1739,166 @@ export class ScraperManager {
       return { results, failed };
     }
 
-    // Get a shared set of headers for this batch to reduce header generation overhead
+    // Get fresh domain-specific headers for each domain to fix cookie expiration issues
     try {
-      sharedHeaders = await this.refreshEventHeaders(
-        validEventDetails[0].eventId
-      );
-      if (!sharedHeaders) {
-        this.logWithTime(
-          "Primary header retrieval failed, trying alternative events",
-          "warning"
-        );
-
-        // Try up to 3 other events in case the first one fails
-        for (let i = 1; i < Math.min(validEventDetails.length, 4); i++) {
-          try {
-            sharedHeaders = await this.refreshEventHeaders(
-              validEventDetails[i].eventId
-            );
-            if (sharedHeaders) {
+      // Process domains in parallel for better efficiency
+      await Promise.all(
+        Object.entries(eventsByDomain).map(async ([domain, domainEvents]) => {
+          if (domainEvents.length === 0) return;
+      
+          // Get fresh domain-specific headers
+          const firstEventId = domainEvents[0];
+          
+          // Check if the headers need refresh
+          const lastRefresh = this.headerRefreshTimestamps.get(firstEventId) || 0;
+          const cookieAge = Date.now() - lastRefresh;
+          const shouldRefreshHeaders = 
+            !this.headersCache.has(firstEventId) ||
+            cookieAge > COOKIE_EXPIRATION_MS / 2;
+          
+          let domainHeaders;
+          
+          if (shouldRefreshHeaders) {
+            if (LOG_LEVEL >= 2) {
               this.logWithTime(
-                `Successfully obtained headers from alternative event ${validEventDetails[i].eventId}`,
-                "info"
+                `Getting fresh headers for domain ${domain} batch using event ${firstEventId}`,
+                "debug"
               );
-              break;
             }
-          } catch (err) {
+            domainHeaders = await this.refreshEventHeaders(firstEventId);
+          } else {
+            domainHeaders = this.headersCache.get(firstEventId);
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(
+                `Using cached headers for domain ${domain} (age: ${Math.floor(cookieAge / 1000)}s)`,
+                "debug"
+              );
+            }
+          }
+          
+          // If headers aren't available, try one last refresh
+          if (!domainHeaders) {
+            domainHeaders = await this.refreshEventHeaders(firstEventId);
+          }
+          
+          if (!domainHeaders) {
             this.logWithTime(
-              `Alternative header attempt ${i} failed: ${err.message}`,
+              `Failed to obtain valid headers for domain ${domain}`,
               "warning"
             );
+            return;
           }
-        }
+          
+          // Process up to 20 events at a time per domain for maximum throughput
+          const domainConcurrentLimit = 20; // Doubled from 10 to 20
 
-        // If still no headers, create basic fallback headers
-        if (!sharedHeaders) {
-          this.logWithTime("Creating fallback headers for batch", "warning");
-          sharedHeaders = {
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
-              Accept:
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-              "Accept-Language": "en-US,en;q=0.5",
-              Referer: "https://www.ticketmaster.com/",
-              "X-Forwarded-For": generateRandomIp(),
-              "X-Request-Id":
-                Math.random().toString(36).substring(2, 10) +
-                "-" +
-                Date.now().toString(36),
-            },
-            cookies: [],
-            fingerprint: {},
-          };
-        }
-      }
-    } catch (error) {
-      this.logWithTime(
-        `Failed to obtain shared headers for batch: ${error.message}`,
-        "error"
-      );
-
-      // Create emergency fallback headers instead of failing the whole batch
-      this.logWithTime(
-        "Creating emergency fallback headers after error",
-        "warning"
-      );
-      sharedHeaders = {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          Referer: "https://www.ticketmaster.com/",
-          "X-Forwarded-For": generateRandomIp(),
-          "X-Request-Id":
-            Math.random().toString(36).substring(2, 10) +
-            "-" +
-            Date.now().toString(36),
-        },
-        cookies: [],
-        fingerprint: {},
-      };
-    }
-
-    // Process domains in parallel for better efficiency
-    await Promise.all(
-      Object.entries(eventsByDomain).map(async ([domain, domainEvents]) => {
-        // Get domain-specific headers if possible
-        let domainHeaders = sharedHeaders;
-        if (domain !== "default" && domainEvents.length > 0) {
-          try {
-            domainHeaders = await this.refreshEventHeaders(domainEvents[0]);
-            if (!domainHeaders) {
-              // Fall back to shared headers
-              domainHeaders = sharedHeaders;
-            }
-          } catch (error) {
-            // Fall back to shared headers
-            this.logWithTime(
-              `Failed to get domain-specific headers: ${error.message}`,
-              "warning"
+          // Split domain events into smaller groups
+          for (let i = 0; i < domainEvents.length; i += domainConcurrentLimit) {
+            const concurrentBatch = domainEvents.slice(
+              i,
+              i + domainConcurrentLimit
             );
-            domainHeaders = sharedHeaders;
-          }
-        }
 
-        // Process up to 20 events at a time per domain for maximum throughput
-        const domainConcurrentLimit = 20; // Doubled from 10 to 20
+            // Process events in this domain batch concurrently
+            await Promise.all(
+              concurrentBatch.map(async (eventId) => {
+                // Skip if invalidated
+                if (!validations.find((v) => v.eventId === eventId && v.valid)) {
+                  return;
+                }
 
-        // Split domain events into smaller groups
-        for (let i = 0; i < domainEvents.length; i += domainConcurrentLimit) {
-          const concurrentBatch = domainEvents.slice(
-            i,
-            i + domainConcurrentLimit
-          );
+                try {
+                  // Get event-specific proxy from map if available
+                  let eventProxyAgent = proxyAgent;
+                  let eventProxy = proxy;
+                  let usingEventSpecificProxy = false;
 
-          // Process events in this domain batch concurrently
-          await Promise.all(
-            concurrentBatch.map(async (eventId) => {
-              // Skip if invalidated
-              if (!validations.find((v) => v.eventId === eventId && v.valid)) {
-                return;
-              }
+                  if (eventProxyMap && eventProxyMap.has(eventId)) {
+                    const eventProxyData = eventProxyMap.get(eventId);
+                    if (eventProxyData && eventProxyData.proxyAgent) {
+                      eventProxyAgent = eventProxyData.proxyAgent;
+                      eventProxy = eventProxyData.proxy;
+                      usingEventSpecificProxy = true;
 
-              try {
-                // Get event-specific proxy from map if available
-                let eventProxyAgent = proxyAgent;
-                let eventProxy = proxy;
-                let usingEventSpecificProxy = false;
+                      if (LOG_LEVEL >= 3) {
+                        this.logWithTime(
+                          `Using dedicated proxy ${eventProxy.proxy.substring(
+                            0,
+                            15
+                          )}... for event ${eventId}`,
+                          "debug"
+                        );
+                      }
+                    }
+                  }
 
-                if (eventProxyMap && eventProxyMap.has(eventId)) {
-                  const eventProxyData = eventProxyMap.get(eventId);
-                  if (eventProxyData && eventProxyData.proxyAgent) {
-                    eventProxyAgent = eventProxyData.proxyAgent;
-                    eventProxy = eventProxyData.proxy;
-                    usingEventSpecificProxy = true;
+                  if (!usingEventSpecificProxy && LOG_LEVEL >= 3) {
+                    this.logWithTime(
+                      `No dedicated proxy for event ${eventId}, using shared proxy`,
+                      "debug"
+                    );
+                  }
 
-                    if (LOG_LEVEL >= 3) {
-                      this.logWithTime(
-                        `Using dedicated proxy ${eventProxy.proxy.substring(
-                          0,
-                          15
-                        )}... for event ${eventId}`,
-                        "debug"
+                  // Process this individual event with the domain-specific headers
+                  const result = await this.scrapeEvent(
+                    eventId,
+                    0, // retryCount = 0 for initial attempt
+                    eventProxyAgent,
+                    eventProxy,
+                    domainHeaders // Use fresh domain-specific headers
+                  );
+
+                  if (result !== false) {
+                    results.push({ eventId, result });
+
+                    // Mark this proxy as successful
+                    if (usingEventSpecificProxy && eventProxy) {
+                      this.proxyManager.updateProxyHealth(eventProxy.proxy, true);
+                    }
+                  } else {
+                    // If using a dedicated proxy for this event and it failed, mark it as having issues
+                    if (usingEventSpecificProxy && eventProxy) {
+                      this.proxyManager.updateProxyHealth(
+                        eventProxy.proxy,
+                        false
                       );
                     }
                   }
-                }
+                } catch (error) {
+                  failed.push({ eventId, error });
 
-                if (!usingEventSpecificProxy && LOG_LEVEL >= 3) {
-                  this.logWithTime(
-                    `No dedicated proxy for event ${eventId}, using shared proxy`,
-                    "debug"
-                  );
-                }
-
-                // Use domain-specific headers if available
-                const result = await this.scrapeEvent(
-                  eventId,
-                  0, // retryCount = 0 for initial attempt
-                  eventProxyAgent,
-                  eventProxy,
-                  domainHeaders // Pass domain-specific headers
-                );
-
-                if (result !== false) {
-                  results.push({ eventId, result });
-
-                  // Mark this proxy as successful
-                  if (usingEventSpecificProxy && eventProxy) {
-                    this.proxyManager.updateProxyHealth(eventProxy.proxy, true);
+                  // Mark this proxy as having issues if using a dedicated one
+                  if (eventProxyMap && eventProxyMap.has(eventId)) {
+                    const eventProxyData = eventProxyMap.get(eventId);
+                    if (eventProxyData && eventProxyData.proxy) {
+                      this.proxyManager.updateProxyHealth(
+                        eventProxyData.proxy.proxy,
+                        false
+                      );
+                    }
                   }
-                } else {
-                  // If using a dedicated proxy for this event and it failed, mark it as having issues
-                  if (usingEventSpecificProxy && eventProxy) {
-                    this.proxyManager.updateProxyHealth(
-                      eventProxy.proxy,
-                      false
-                    );
+                } finally {
+                  // Release the proxy for this event
+                  if (eventProxyMap && eventProxyMap.has(eventId)) {
+                    this.proxyManager.releaseProxy(eventId);
                   }
                 }
-              } catch (error) {
-                failed.push({ eventId, error });
+              })
+            );
 
-                // Mark this proxy as having issues if using a dedicated one
-                if (eventProxyMap && eventProxyMap.has(eventId)) {
-                  const eventProxyData = eventProxyMap.get(eventId);
-                  if (eventProxyData && eventProxyData.proxy) {
-                    this.proxyManager.updateProxyHealth(
-                      eventProxyData.proxy.proxy,
-                      false
-                    );
-                  }
-                }
-              } finally {
-                // Release the proxy for this event
-                if (eventProxyMap && eventProxyMap.has(eventId)) {
-                  this.proxyManager.releaseProxy(eventId);
-                }
-              }
-            })
-          );
-
-          // Add a small delay between batches within the same domain
-          if (i + domainConcurrentLimit < domainEvents.length) {
-            await setTimeout(500);
+            // Add a small delay between batches within the same domain
+            if (i + domainConcurrentLimit < domainEvents.length) {
+              await setTimeout(500);
+            }
           }
-        }
-      })
-    );
+        })
+      );
+    } catch (error) {
+      this.logWithTime(
+        `Error in batch processing: ${error.message}`,
+        "error"
+      );
+    }
 
     return { results, failed };
   }
