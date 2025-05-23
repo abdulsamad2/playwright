@@ -8,9 +8,11 @@ import { refreshHeaders } from "../scraper.js";
 import config from "../config/scraperConfig.js";
 import { BrowserFingerprint } from '../browserFingerprint.js';
 import { ScraperManager } from '../scraperManager.js';
+import SessionManager from './SessionManager.js';
 
 /**
- * CookieManager handles cookie and header management for the scraper
+ * CookieManager handles cookie and session management for the scraper
+ * Now integrates with SessionManager for robust session handling
  */
 export class CookieManager {
   constructor(logger) {
@@ -28,6 +30,9 @@ export class CookieManager {
     };
     this.isRefreshingCookies = false;
     this.cookieRefreshQueue = [];
+
+    // Initialize SessionManager
+    this.sessionManager = new SessionManager(logger);
   }
 
   // Configuration constants
@@ -54,30 +59,56 @@ export class CookieManager {
   static AUTH_COOKIES = ['TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit'];
 
   /**
-   * Get headers for an event, refreshing if necessary
+   * Get headers for an event, using session management
    */
-  async getHeadersForEvent(eventId) {
-    return this.refreshEventHeaders(eventId);
+  async getHeadersForEvent(eventId, proxy = null) {
+    try {
+      // Get session data for this event
+      const sessionData = await this.sessionManager.getSessionForEvent(eventId, proxy);
+      
+      if (sessionData) {
+        // Get headers from session
+        const headers = await this.sessionManager.getSessionHeaders(eventId);
+        
+        if (headers) {
+          this.logger?.logWithTime(`Using session headers for event ${eventId}`, "debug");
+          return {
+            headers,
+            cookies: sessionData.cookies,
+            fingerprint: sessionData.fingerprint,
+            sessionId: sessionData.sessionId
+          };
+        }
+      }
+      
+      // Fallback to regular header refresh if session fails
+      this.logger?.logWithTime(`Session headers failed for event ${eventId}, falling back to regular refresh`, "warning");
+      return this.refreshEventHeaders(eventId, proxy);
+    } catch (error) {
+      this.logger?.logWithTime(`Error getting session headers for event ${eventId}: ${error.message}`, "error");
+      // Fallback to regular header refresh
+      return this.refreshEventHeaders(eventId, proxy);
+    }
   }
 
   /**
    * Refresh event headers if they're stale
    */
-  async refreshEventHeaders(eventId) {
+  async refreshEventHeaders(eventId, proxy = null) {
     const lastRefresh = this.headerRefreshTimestamps.get(eventId);
     
     // Only refresh headers if they haven't been refreshed in last 5 minutes
     if (!lastRefresh || moment().diff(lastRefresh) > config.HEADER_REFRESH_INTERVAL) {
       try {
-        this.logger.logWithTime(`Refreshing headers for ${eventId}`);
-        const headers = await refreshHeaders(eventId);
+        this.logger?.logWithTime(`Refreshing headers for ${eventId}`, "info");
+        const headers = await refreshHeaders(eventId, proxy);
         if (headers) {
           this.headersCache.set(eventId, headers);
           this.headerRefreshTimestamps.set(eventId, moment());
           return headers;
         }
       } catch (error) {
-        this.logger.logWithTime(
+        this.logger?.logWithTime(
           `Failed to refresh headers for ${eventId}: ${error.message}`,
           "error"
         );
@@ -88,13 +119,13 @@ export class CookieManager {
   }
 
   /**
-   * Reset cookies and clear header cache
+   * Reset cookies and clear header cache, also clears sessions
    */
   async resetCookiesAndHeaders() {
     // Avoid resetting cookies too frequently
     const now = moment();
     if (this.lastCookieReset && now.diff(this.lastCookieReset) < config.COOKIE_RESET_COOLDOWN) {
-      this.logger.logWithTime(
+      this.logger?.logWithTime(
         `Skipping cookie reset - last reset was ${moment.duration(now.diff(this.lastCookieReset)).humanize()} ago`,
         "warning"
       );
@@ -102,7 +133,10 @@ export class CookieManager {
     }
     
     try {
-      this.logger.logWithTime("Detected multiple API failures - resetting cookies and headers", "warning");
+      this.logger?.logWithTime("Detected multiple API failures - resetting cookies, headers and sessions", "warning");
+      
+      // Reset sessions first
+      await this.sessionManager.forceSessionRotation();
       
       // Check if cookies.json exists before trying to delete it
       try {
@@ -110,10 +144,10 @@ export class CookieManager {
         
         // Delete cookies.json
         await fs.promises.unlink(this.cookiesPath);
-        this.logger.logWithTime("Deleted cookies.json", "info");
+        this.logger?.logWithTime("Deleted cookies.json", "info");
       } catch (e) {
         // File doesn't exist, that's fine
-        this.logger.logWithTime("No cookies.json file found to delete", "info");
+        this.logger?.logWithTime("No cookies.json file found to delete", "info");
       }
       
       // Clear all cached headers
@@ -122,21 +156,58 @@ export class CookieManager {
       this.lastCookieReset = now;
       
       // Apply a system-wide cooldown to allow for fresh cookie generation
-      this.logger.logWithTime("Applying cooldown to allow for cookie regeneration", "info");
+      this.logger?.logWithTime("Applying cooldown to allow for cookie regeneration", "info");
       await setTimeout(config.COOKIE_REGENERATION_DELAY);
       
       return true;
     } catch (error) {
-      this.logger.logWithTime(`Error resetting cookies: ${error.message}`, "error");
+      this.logger?.logWithTime(`Error resetting cookies: ${error.message}`, "error");
       return false;
     }
   }
   
   /**
-   * Check if headers exist for an event
+   * Check if headers exist for an event (now checks sessions too)
    */
   hasHeadersForEvent(eventId) {
+    // Check if we have a session for this event
+    const sessionHeaders = this.sessionManager.activeSessions.has(eventId);
+    if (sessionHeaders) {
+      return true;
+    }
+    
+    // Fallback to header cache
     return this.headersCache.has(eventId);
+  }
+
+  /**
+   * Update session usage when scraping succeeds or fails
+   */
+  updateSessionUsage(eventId, success = true) {
+    const sessionId = this.sessionManager.activeSessions.get(eventId);
+    if (sessionId) {
+      this.sessionManager.updateSessionUsage(sessionId, success);
+    }
+  }
+
+  /**
+   * Get session and cookie statistics
+   */
+  getStats() {
+    const sessionStats = this.sessionManager.getSessionStats();
+    
+    return {
+      sessions: sessionStats,
+      cookies: {
+        cachedHeaders: this.headersCache.size,
+        lastCookieReset: this.lastCookieReset ? moment(this.lastCookieReset).fromNow() : 'Never',
+        capturedState: {
+          hasCookies: !!this.capturedState.cookies,
+          cookieCount: this.capturedState.cookies?.length || 0,
+          lastRefresh: this.capturedState.lastRefresh ? moment(this.capturedState.lastRefresh).fromNow() : 'Never'
+        }
+      }
+    };
   }
 
   async loadCookiesFromFile() {

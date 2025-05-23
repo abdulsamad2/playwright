@@ -12,6 +12,7 @@ import SyncService from './services/syncService.js';
 import nodeFs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import SessionManager from './helpers/SessionManager.js';
 
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
@@ -109,6 +110,7 @@ const CSV_UPLOAD_INTERVAL = 6 * 60 * 1000; // 6 minutes in milliseconds
 
 /**
  * ScraperManager class that maintains the original API while using the modular architecture internally
+ * Now includes robust session management for difficult-to-scrape sites
  */
 export class ScraperManager {
   constructor() {
@@ -136,6 +138,9 @@ export class ScraperManager {
     // Initialize the proxy manager
     this.proxyManager = new ProxyManager(this);
     this.batchProxies = new Map(); // Map batch ID to proxy
+
+    // Initialize SessionManager for robust session handling
+    this.sessionManager = new SessionManager(this);
 
     // New: Data caching and API error handling
     this.headerRotationPool = []; // Pool of working headers
@@ -1150,42 +1155,78 @@ export class ScraperManager {
           );
         }
       } else {
-        // Check if cookies have been refreshed recently
-        const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
-        const cookieAge = Date.now() - lastRefresh;
-
-        // Force header refresh if cookies are more than half the expiration time
-        // or if this is a retry attempt (to get fresh cookies)
-        const shouldRefreshHeaders =
-          !this.headersCache.has(eventId) ||
-          cookieAge > COOKIE_EXPIRATION_MS / 2 ||
-          retryCount > 0;
-
-        if (shouldRefreshHeaders) {
+        // Try to get session-based headers first (30-minute rotation)
+        let sessionData = null;
+        try {
+          sessionData = await this.sessionManager.getSessionForEvent(eventId, proxyToUse);
+          
+          if (sessionData) {
+            const sessionHeaders = await this.sessionManager.getSessionHeaders(eventId);
+            
+            if (sessionHeaders) {
+              headers = {
+                headers: sessionHeaders,
+                cookies: sessionData.cookies,
+                fingerprint: sessionData.fingerprint,
+                sessionId: sessionData.sessionId
+              };
+              
+              if (LOG_LEVEL >= 3) {
+                this.logWithTime(
+                  `Using session headers for event ${eventId} (session: ${sessionData.sessionId})`,
+                  "debug"
+                );
+              }
+            }
+          }
+        } catch (sessionError) {
           if (LOG_LEVEL >= 2) {
             this.logWithTime(
-              `Getting fresh headers for event ${eventId}${
-                retryCount > 0 ? " (retry attempt)" : ""
-              }`,
-              "debug"
-            );
-          }
-          headers = await this.refreshEventHeaders(eventId);
-        } else {
-          headers = this.headersCache.get(eventId);
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(
-              `Using cached headers for event ${eventId} (age: ${Math.floor(
-                cookieAge / 1000
-              )}s)`,
-              "debug"
+              `Session management failed for event ${eventId}: ${sessionError.message}, falling back to regular headers`,
+              "warning"
             );
           }
         }
 
-        // If headers aren't available through either method, try one last refresh
+        // Fallback to regular header management if session approach fails
         if (!headers) {
-          headers = await this.refreshEventHeaders(eventId);
+          // Check if cookies have been refreshed recently
+          const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
+          const cookieAge = Date.now() - lastRefresh;
+
+          // Force header refresh if cookies are more than half the expiration time
+          // or if this is a retry attempt (to get fresh cookies)
+          const shouldRefreshHeaders =
+            !this.headersCache.has(eventId) ||
+            cookieAge > COOKIE_EXPIRATION_MS / 2 ||
+            retryCount > 0;
+
+          if (shouldRefreshHeaders) {
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(
+                `Getting fresh headers for event ${eventId}${
+                  retryCount > 0 ? " (retry attempt)" : ""
+                }`,
+                "debug"
+              );
+            }
+            headers = await this.refreshEventHeaders(eventId);
+          } else {
+            headers = this.headersCache.get(eventId);
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(
+                `Using cached headers for event ${eventId} (age: ${Math.floor(
+                  cookieAge / 1000
+                )}s)`,
+                "debug"
+              );
+            }
+          }
+
+          // If headers aren't available through either method, try one last refresh
+          if (!headers) {
+            headers = await this.refreshEventHeaders(eventId);
+          }
         }
       }
 
@@ -1218,28 +1259,41 @@ export class ScraperManager {
       // Mark this header as successful
       if (headers) {
         const headerKey =
-          headers.headers.Cookie?.substring(0, 20) ||
-          headers.headers["User-Agent"]?.substring(0, 20);
-        const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
-          success: 0,
-          failure: 0,
-        };
-        currentSuccessRate.success++;
-        this.headerSuccessRates.set(headerKey, currentSuccessRate);
+          headers.headers?.Cookie?.substring(0, 20) ||
+          headers.headers?.["User-Agent"]?.substring(0, 20);
+        if (headerKey) {
+          const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
+            success: 0,
+            failure: 0,
+          };
+          currentSuccessRate.success++;
+          this.headerSuccessRates.set(headerKey, currentSuccessRate);
 
-        // Add to rotation pool if not already there
-        if (
-          !this.headerRotationPool.some(
-            (h) =>
-              h.headers.Cookie?.substring(0, 20) === headerKey ||
-              h.headers["User-Agent"]?.substring(0, 20) === headerKey
-          )
-        ) {
-          this.headerRotationPool.push(headers);
-          // Limit pool size
-          if (this.headerRotationPool.length > 10) {
-            this.headerRotationPool.shift();
+          // Add to rotation pool if not already there
+          if (
+            !this.headerRotationPool.some(
+              (h) =>
+                h.headers?.Cookie?.substring(0, 20) === headerKey ||
+                h.headers?.["User-Agent"]?.substring(0, 20) === headerKey
+            )
+          ) {
+            this.headerRotationPool.push(headers);
+            // Limit pool size
+            if (this.headerRotationPool.length > 10) {
+              this.headerRotationPool.shift();
+            }
           }
+        }
+      }
+
+      // Update session usage on success
+      if (headers.sessionId) {
+        this.sessionManager.updateSessionUsage(headers.sessionId, true);
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(
+            `Updated session ${headers.sessionId} usage for successful scrape of event ${eventId}`,
+            "debug"
+          );
         }
       }
 
@@ -1294,487 +1348,230 @@ export class ScraperManager {
     } catch (error) {
       this.failedEvents.add(eventId);
 
+      // Update session usage on failure
+      if (headers?.sessionId) {
+        this.sessionManager.updateSessionUsage(headers.sessionId, false);
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(
+            `Updated session ${headers.sessionId} usage for failed scrape of event ${eventId}`,
+            "debug"
+          );
+        }
+      }
+
       // New: Try to handle the API error with smart strategies first
-      const errorHandled = await this.handleApiError(
-        eventId,
-        error,
-        this.headersCache.get(eventId)
-      );
+      const errorHandled = await this.handleApiError(eventId, error, headers);
 
+      // If the error was handled by the circuit breaker or proxy rotation, skip retry
       if (errorHandled) {
-        // If we handled the error with our special strategies, use a very short cooldown
-        // and don't increment the failure count (we're trying a different approach)
-        const shortCooldown = 1000; // 1 second
-        this.cooldownEvents.set(
-          eventId,
-          moment().add(shortCooldown, "milliseconds")
-        );
-
-        // Put directly into retry queue with same retry count (don't increment)
-        this.retryQueue.push({
-          eventId,
-          retryCount: retryCount, // Keep same retry count since we're trying a different approach
-          retryAfter: moment().add(shortCooldown, "milliseconds"),
-        });
-
-        this.logWithTime(
-          `API error for ${eventId} handled with special strategy, retrying in 1s`,
-          "warning"
-        );
-
         return false;
       }
 
-      // Normal error handling for non-API errors
+      // Track failure count
       this.incrementFailureCount(eventId);
 
-      await this.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
+      // Add to failed events
+      this.failedEvents.add(eventId);
 
-      // Get current failure count for this event
-      const recentFailures = this.getRecentFailureCount(eventId);
+      // Mark headers as potentially problematic
+      if (headers) {
+        const headerKey =
+          headers.headers?.Cookie?.substring(0, 20) ||
+          headers.headers?.["User-Agent"]?.substring(0, 20);
+        if (headerKey) {
+          const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
+            success: 0,
+            failure: 0,
+          };
+          currentSuccessRate.failure++;
+          this.headerSuccessRates.set(headerKey, currentSuccessRate);
+        }
+      }
 
-      // Apply the new short cooldown strategy
+      // Increment global error counter
+      this.globalConsecutiveErrors++;
+
+      // Track failures by type for batch processing
+      const errorType = this.categorizeError(error);
+      if (!this.failureTypeGroups.has(errorType)) {
+        this.failureTypeGroups.set(errorType, new Set());
+      }
+      this.failureTypeGroups.get(errorType).add(eventId);
+
+      // Calculate dynamic retry limit for this event
+      const baseRetryLimit = MAX_RETRIES;
+      const eventRetryLimit = this.eventMaxRetries.get(eventId) || baseRetryLimit;
+
+      // Determine if we should retry this event
+      if (retryCount >= eventRetryLimit) {
+        const lastUpdate = this.eventUpdateTimestamps.get(eventId);
+        const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
+
+        // If approaching max allowed update interval, force one more retry
+        if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
+          this.logWithTime(
+            `Event ${eventId} exceeded retry limit but approaching max update deadline - forcing retry`,
+            "warning"
+          );
+        } else {
+          this.logWithTime(
+            `Event ${eventId} exceeded retry limit (${retryCount}/${eventRetryLimit}) - stopping retries`,
+            "error"
+          );
+          
+          // Log to database for critical events that have stopped updating
+          await this.logError(
+            eventId,
+            "MAX_RETRIES_EXCEEDED",
+            new Error(`Event exceeded maximum retry limit of ${eventRetryLimit}`),
+            { retryCount, eventRetryLimit, timeSinceUpdate }
+          );
+
+          // Don't add to retry queue - this event will be marked as failed
+          return false;
+        }
+      }
+
+      // Calculate backoff time based on retry count and error type
       let backoffTime;
-      let shouldMarkStopped = false;
-
-      // Use API-specific message for API errors
-      const isApiError =
-        error.message.includes("403") ||
-        error.message.includes("400") ||
-        error.message.includes("429") ||
-        error.message.includes("API");
+      const isApiError = error.message.includes("403") || 
+                        error.message.includes("400") || 
+                        error.message.includes("429") ||
+                        error.message.includes("API");
 
       if (retryCount < SHORT_COOLDOWNS.length) {
-        // Use the short, progressive cooldowns for initial retries
+        // Use progressive short cooldowns for initial retries
         backoffTime = SHORT_COOLDOWNS[retryCount];
-
-        // Log only at appropriate levels
+        
         if (LOG_LEVEL >= 1) {
           this.logWithTime(
-            `${isApiError ? "API error" : "Error"} for ${eventId}: ${
-              error.message
-            }. Short cooldown for ${backoffTime / 1000}s`,
+            `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Retry ${retryCount + 1}/${eventRetryLimit} in ${backoffTime/1000}s`,
             "warning"
           );
         }
       } else {
-        // For persistent failures, use a longer cooldown
-        backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // Convert minutes to ms
-
-        // Only mark as stopped if the event hasn't been updated in 10 minutes
-        const lastUpdate = this.eventLastUpdates.get(eventId);
-        const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : 0;
-        shouldMarkStopped = timeSinceUpdate >= EVENT_FAILURE_THRESHOLD;
-
-        if (shouldMarkStopped) {
-          this.logWithTime(
-            `Persistent ${
-              isApiError ? "API errors" : "errors"
-            } for ${eventId}: ${
-              error.message
-            }. Event hasn't been successfully updated for ${
-              timeSinceUpdate / 1000
-            }s. Marking as stopped.`,
-            "error"
-          );
-        } else {
-          this.logWithTime(
-            `Persistent ${
-              isApiError ? "API errors" : "errors"
-            } for ${eventId}: ${
-              error.message
-            }. ${LONG_COOLDOWN_MINUTES} minute cooldown before retry.`,
-            "warning"
-          );
-        }
+        // Use longer cooldown for persistent failures
+        backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000;
+        
+        this.logWithTime(
+          `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. Long cooldown retry in ${LONG_COOLDOWN_MINUTES} minute`,
+          "error"
+        );
 
         // Log long cooldown to error logs
         await this.logError(
           eventId,
           "LONG_COOLDOWN",
-          new Error(
-            `Event put in ${LONG_COOLDOWN_MINUTES} minute cooldown after persistent failures`
-          ),
+          new Error(`Event put in ${LONG_COOLDOWN_MINUTES} minute cooldown after persistent failures`),
           {
-            cooldownDuration: LONG_COOLDOWN_MINUTES * 60 * 1000,
+            cooldownDuration: backoffTime,
             isApiError,
             originalError: error.message,
-            failureCount: recentFailures,
-            retryCount,
+            retryCount
           }
         );
       }
 
-      // If we've had 3 consecutive API errors, trigger a cookie reset
-      if (isApiError) {
-        this.globalConsecutiveErrors++;
-        if (this.globalConsecutiveErrors >= 3) {
-          // Don't await here to prevent blocking the current event processing
-          this.resetCookiesAndHeaders().catch((e) =>
-            console.error("Error during cookie reset:", e)
-          );
-        }
-      }
-
-      // Set the cooldown
+      // Set cooldown
       const cooldownUntil = moment().add(backoffTime, "milliseconds");
       this.cooldownEvents.set(eventId, cooldownUntil);
 
-      // Only update the database if the event has been inactive for 10 minutes
-      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
-      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : 0;
-      const shouldMarkStoppedInDB = timeSinceUpdate >= EVENT_FAILURE_THRESHOLD;
+      // Add to retry queue
+      this.retryQueue.push({
+        eventId,
+        retryCount: retryCount + 1,
+        retryAfter: cooldownUntil,
+        priority: Math.max(1, 10 - retryCount), // Higher priority for fewer retries
+      });
 
-      if (shouldMarkStoppedInDB) {
-        // Mark event as stopped in database
-        try {
-          await Event.updateOne(
-            { Event_ID: eventId },
-            {
-              $set: {
-                Skip_Scraping: true,
-                status: "stopped",
-                stopReason: isApiError ? "API Error" : "Persistent Failure",
-                lastErrorMessage: error.message,
-                lastErrorTime: new Date(),
-              },
-            }
-          );
-          if (LOG_LEVEL >= 1) {
-            this.logWithTime(
-              `Marked event ${eventId} as stopped in database`,
-              "warning"
-            );
-          }
-        } catch (err) {
-          console.error(`Failed to update status for event ${eventId}:`, err);
-        }
-      }
-
-      // Still update the event schedule for 2-minute compliance
+      // Update event schedule for next update
       this.eventUpdateSchedule.set(
         eventId,
-        moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, "milliseconds")
+        moment().add(Math.min(backoffTime, MIN_TIME_BETWEEN_EVENT_SCRAPES), "milliseconds")
       );
 
-      const maxRetriesForEvent =
-        this.eventMaxRetries.get(eventId) ?? MAX_RETRIES;
-
-      // Instead of using retryCount < maxRetriesForEvent, we'll use time-based condition
-      // Only stop retrying if we've hit the failure threshold
-      if (!shouldMarkStopped) {
-        this.retryQueue.push({
-          eventId,
-          retryCount: retryCount + 1,
-          retryAfter: cooldownUntil,
-        });
-
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Queued for retry: ${eventId} (after ${
-              backoffTime / 1000
-            }s cooldown)`,
-            "info"
-          );
-        }
-      } else {
+      if (LOG_LEVEL >= 2) {
         this.logWithTime(
-          `Stopping retries for ${eventId} after ${
-            timeSinceUpdate / 1000
-          }s without successful updates`,
-          "error"
+          `Queued ${eventId} for retry ${retryCount + 1}/${eventRetryLimit} (cooldown: ${backoffTime/1000}s)`,
+          "info"
         );
       }
-    } finally {
-      this.activeJobs.delete(eventId);
-      this.processingEvents.delete(eventId);
-      this.releaseSemaphore();
 
-      // Only release proxy if we created it in this method (not if it was passed in)
-      if (!proxyAgent && !proxy) {
-        this.proxyManager.releaseProxy(eventId);
-      }
+      return false;
+    } finally {
+      this.processingEvents.delete(eventId);
+      this.activeJobs.delete(eventId);
+      this.releaseSemaphore();
     }
   }
 
-  getRecentFailureCount(eventId) {
-    const count = this.eventFailureCounts.get(eventId) || 0;
-    return count;
-  }
+  async processBatch(eventIds, eventProxyMap = null) {
+    if (!eventIds || eventIds.length === 0) {
+      return { results: [], failed: [] };
+    }
 
-  incrementFailureCount(eventId) {
-    const currentCount = this.eventFailureCounts.get(eventId) || 0;
-    this.eventFailureCounts.set(eventId, currentCount + 1);
-    this.eventFailureTimes.set(eventId, moment());
-  }
-
-  clearFailureCount(eventId) {
-    this.eventFailureCounts.delete(eventId);
-    this.eventFailureTimes.delete(eventId);
-  }
-
-  async processBatch(eventIds) {
-    // For very large batches, process parallel but with throttling
     const results = [];
     const failed = [];
 
-    if (eventIds.length <= 0) {
-      return { failed };
-    }
-
-    // Get available proxy count to better determine batch sizing
-    const availableProxies = this.proxyManager.getAvailableProxyCount();
-
-    // Dynamic chunk sizing based on available resources and event count
-    const optimalChunkSize = Math.min(
-      Math.max(25, Math.ceil(eventIds.length / Math.max(1, availableProxies))),
-      50 // Maximum chunk size to prevent memory issues
-    );
-
-    if (LOG_LEVEL >= 1) {
-      this.logWithTime(
-        `Processing ${eventIds.length} events using ${availableProxies} proxies with chunk size ${optimalChunkSize}`,
-        "info"
-      );
-    }
-
-    // Split into chunks for better control
-    const chunks = [];
-    for (let i = 0; i < eventIds.length; i += optimalChunkSize) {
-      chunks.push(eventIds.slice(i, i + optimalChunkSize));
-    }
-
-    // Process chunks with controlled parallelism and better error handling
-    let successCount = 0;
-    let failureCount = 0;
-
-    // Process in batches with maximum parallelism
-    const batchSize = Math.min(16, Math.ceil(chunks.length / 4)); // Process up to 16 chunks in parallel
-    const batchCount = Math.ceil(chunks.length / batchSize);
-
-    for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
-      const batchStart = batchIndex * batchSize;
-      const batchEnd = Math.min(batchStart + batchSize, chunks.length);
-      const batchChunks = chunks.slice(batchStart, batchEnd);
-
-      // Process each chunk in the batch
-      const batchProcesses = batchChunks.map(async (chunk) => {
-        const batchId =
-          Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-
+    try {
+      // Group events by domain for efficient proxy utilization
+      const domainGroups = new Map();
+      
+      // First, get event URLs and group by domain
+      const eventPromises = eventIds.map(async (eventId) => {
         try {
-          // Get proxy data for this chunk
-          const proxyData = await this.proxyManager.getProxyForBatch(chunk);
-
-          if (!proxyData || !proxyData.proxyAgent) {
-            throw new Error("Failed to obtain proxy for batch");
+          const event = await Event.findOne({ Event_ID: eventId })
+            .select("url Skip_Scraping")
+            .lean();
+          
+          if (!event || event.Skip_Scraping) {
+            return null;
           }
-
-          // Process the chunk efficiently
-          const result = await this.processBatchEfficiently(
-            chunk,
-            batchId,
-            proxyData.proxyAgent,
-            proxyData.proxy,
-            proxyData.eventProxyMap
-          );
-
-          successCount += result.results.length;
-          failureCount += result.failed.length;
-          results.push(...result.results);
-          failed.push(...result.failed);
-
-          // Update proxy health based on results
-          if (result.results.length > 0 && proxyData.proxy) {
-            this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, true);
-          }
-
-          if (
-            result.failed.length > result.results.length &&
-            result.failed.length > 0 &&
-            proxyData.proxy
-          ) {
-            this.proxyManager.updateProxyHealth(proxyData.proxy.proxy, false);
-          }
-        } catch (error) {
-          this.logWithTime(
-            `Error processing batch ${batchId}: ${error.message}`,
-            "error"
-          );
-
-          // Handle proxy errors
-          if (this.batchProxies.has(batchId)) {
-            const { proxy, chunk } = this.batchProxies.get(batchId);
-            if (proxy && proxy.proxy) {
-              this.proxyManager.updateProxyHealth(proxy.proxy, false);
-              this.proxyManager.releaseProxyBatch(chunk);
+          
+          let domain = "unknown";
+          if (event.url) {
+            try {
+              const url = new URL(event.url);
+              domain = url.hostname;
+            } catch (e) {
+              domain = `invalid-url-${eventId}`;
             }
           }
-
-          // Add failed events to retry queue
-          failed.push(
-            ...chunk.map((eventId) => ({
-              eventId,
-              error: new Error(`Batch processing error: ${error.message}`),
-            }))
-          );
-          failureCount += chunk.length;
-        } finally {
-          // Clean up batch tracking
-          this.batchProxies.delete(batchId);
+          
+          return { eventId, domain, url: event.url };
+        } catch (error) {
+          this.logWithTime(`Error fetching event ${eventId}: ${error.message}`, "error");
+          return null;
         }
       });
 
-      // Wait for this batch of chunks to complete
-      await Promise.all(batchProcesses);
-
-      // Add a small delay between batches to prevent rate limiting
-      if (batchIndex < batchCount - 1) {
-        await setTimeout(500); // Increased delay between batches
-      }
-    }
-
-    // Log final statistics
-    if (LOG_LEVEL >= 1) {
-      this.logWithTime(
-        `Completed processing ${eventIds.length} events: ${successCount} successful, ${failureCount} failed`,
-        "info"
-      );
-    }
-
-    return { results, failed };
-  }
-
-  // New method to process a batch of events efficiently by handling API requests together
-  async processBatchEfficiently(
-    eventIds,
-    batchId,
-    proxyAgent,
-    proxy,
-    eventProxyMap
-  ) {
-    const results = [];
-    const failed = [];
-
-    // Define sharedHeaders at the top level of the function
-    let sharedHeaders = null;
-
-    // Skip excessive logging for small batches to reduce log noise
-    const shouldLogDetails = LOG_LEVEL >= 2 && eventIds.length > 5;
-
-    // Pre-filter events that should be skipped to avoid unnecessary DB lookups
-    const filteredIds = eventIds.filter(
-      (eventId) => !this.shouldSkipEvent(eventId)
-    );
-
-    if (filteredIds.length === 0) {
-      if (LOG_LEVEL >= 1) {
-        this.logWithTime(
-          `All events in batch ${batchId} should be skipped, skipping validation`,
-          "warning"
-        );
-      }
-      return { results, failed };
-    }
-
-    // Group events by domain for better efficiency
-    const eventsByDomain = {};
-
-    // Preload all event validations in parallel to save time
-    const validationPromises = filteredIds.map(async (eventId) => {
-      try {
-        const event = await Event.findOne({ Event_ID: eventId })
-          .select("Skip_Scraping inHandDate url")
-          .lean();
-
-        if (!event) {
-          this.cooldownEvents.set(eventId, moment().add(60, "minutes"));
-          return { eventId, valid: false, reason: "not_found" };
-        }
-
-        if (event.Skip_Scraping) {
-          this.eventUpdateSchedule.set(
-            eventId,
-            moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, "milliseconds")
-          );
-          return { eventId, valid: false, reason: "flagged" };
-        }
-
-        // Group by domain
-        if (event.url) {
-          try {
-            const url = new URL(event.url);
-            const domain = url.hostname;
-            if (!eventsByDomain[domain]) {
-              eventsByDomain[domain] = [];
-            }
-            eventsByDomain[domain].push(eventId);
-          } catch (e) {
-            // Invalid URL, just add to default group
-            if (!eventsByDomain["default"]) {
-              eventsByDomain["default"] = [];
-            }
-            eventsByDomain["default"].push(eventId);
-          }
-        } else {
-          // No URL, add to default group
-          if (!eventsByDomain["default"]) {
-            eventsByDomain["default"] = [];
-          }
-          eventsByDomain["default"].push(eventId);
-        }
-
-        return { eventId, valid: true, url: event.url };
-      } catch (error) {
-        return { eventId, valid: false, reason: "error", error };
-      }
-    });
-
-    const validations = await Promise.all(validationPromises);
-
-    // Filter to valid events
-    const validEventDetails = validations.filter((v) => v.valid);
-
-    if (validEventDetails.length === 0) {
-      return { results, failed };
-    }
-
-    // Get fresh domain-specific headers for each domain to fix cookie expiration issues
-    try {
-      // Process domains in parallel for better efficiency
-      await Promise.all(
-        Object.entries(eventsByDomain).map(async ([domain, domainEvents]) => {
-          if (domainEvents.length === 0) return;
+      const eventDetails = (await Promise.all(eventPromises)).filter(Boolean);
       
-          // Get fresh domain-specific headers
+      // Group events by domain
+      eventDetails.forEach(({ eventId, domain }) => {
+        if (!domainGroups.has(domain)) {
+          domainGroups.set(domain, []);
+        }
+        domainGroups.get(domain).push(eventId);
+      });
+
+      // Validate events before processing
+      const validations = await Promise.all(
+        eventIds.map(async (eventId) => ({
+          eventId,
+          valid: !this.shouldSkipEvent(eventId)
+        }))
+      );
+
+      // Process each domain group
+      await Promise.all(
+        Array.from(domainGroups.entries()).map(async ([domain, domainEvents]) => {
+          // Get a shared proxy for this domain
+          const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(domainEvents);
+          
+          // Get fresh headers for the first event in this domain
           const firstEventId = domainEvents[0];
-          
-          // Check if the headers need refresh
-          const lastRefresh = this.headerRefreshTimestamps.get(firstEventId) || 0;
-          const cookieAge = Date.now() - lastRefresh;
-          const shouldRefreshHeaders = 
-            !this.headersCache.has(firstEventId) ||
-            cookieAge > COOKIE_EXPIRATION_MS / 2;
-          
-          let domainHeaders;
-          
-          if (shouldRefreshHeaders) {
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `Getting fresh headers for domain ${domain} batch using event ${firstEventId}`,
-                "debug"
-              );
-            }
-            domainHeaders = await this.refreshEventHeaders(firstEventId);
-          } else {
-            domainHeaders = this.headersCache.get(firstEventId);
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(
-                `Using cached headers for domain ${domain} (age: ${Math.floor(cookieAge / 1000)}s)`,
-                "debug"
-              );
-            }
-          }
+          let domainHeaders = await this.refreshEventHeaders(firstEventId);
           
           // If headers aren't available, try one last refresh
           if (!domainHeaders) {
@@ -1901,266 +1698,6 @@ export class ScraperManager {
     }
 
     return { results, failed };
-  }
-
-  // Helper method to handle event errors consistently
-  async handleEventError(eventId, error, retryCount, failedList) {
-    this.failedEvents.add(eventId);
-
-    // Track failures by event ID
-    if (!this.eventFailures.has(eventId)) {
-      this.eventFailures.set(eventId, []);
-    }
-
-    // Keep only the most recent failures (sliding window)
-    const failures = this.eventFailures.get(eventId);
-    failures.push({
-      time: moment(),
-      error: error.message,
-      isApiError: error.isApiError || false,
-    });
-
-    // Limit failure history to last 20 failures
-    if (failures.length > 20) {
-      failures.shift();
-    }
-
-    // Get the last update time for the event
-    const lastUpdate = this.eventLastUpdates.get(eventId);
-    const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : 0;
-
-    // Determine if this is a persistent failure that should be marked as stopped
-    const shouldMarkStopped = timeSinceUpdate >= EVENT_FAILURE_THRESHOLD;
-
-    // Apply the cooldown strategy
-    let backoffTime;
-
-    // Use API-specific message for API errors
-    const isApiError =
-      error.message.includes("403") ||
-      error.message.includes("400") ||
-      error.message.includes("429") ||
-      error.message.includes("API");
-
-    const recentFailures = this.getRecentFailureCount(eventId);
-
-    if (retryCount < SHORT_COOLDOWNS.length) {
-      // Use the short, progressive cooldowns for initial retries
-      backoffTime = SHORT_COOLDOWNS[retryCount];
-
-      // Log only at appropriate levels
-      if (LOG_LEVEL >= 1) {
-        this.logWithTime(
-          `${isApiError ? "API error" : "Error"} for ${eventId}: ${
-            error.message
-          }. Aggressive retry in ${backoffTime / 1000}s`,
-          "warning"
-        );
-      }
-    } else {
-      // For persistent failures, use a shorter cooldown
-      backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000; // 1 minute cooldown
-
-      if (shouldMarkStopped) {
-        this.logWithTime(
-          `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${
-            error.message
-          }. Event hasn't been successfully updated for ${
-            timeSinceUpdate / 1000
-          }s. Marking as stopped.`,
-          "error"
-        );
-      } else {
-        this.logWithTime(
-          `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${
-            error.message
-          }. Aggressive retry in ${LONG_COOLDOWN_MINUTES} minute.`,
-          "warning"
-        );
-      }
-
-      // Log long cooldown to error logs if needed
-      await this.logError(
-        eventId,
-        "AGGRESSIVE_RETRY",
-        new Error(
-          `Event put in ${LONG_COOLDOWN_MINUTES} minute aggressive retry after persistent failures`
-        ),
-        {
-          cooldownDuration: LONG_COOLDOWN_MINUTES * 60 * 1000,
-          isApiError,
-          originalError: error.message,
-          failureCount: recentFailures,
-          retryCount,
-        }
-      );
-    }
-
-    // If we've had 2 consecutive API errors, trigger a cookie reset (reduced from 3)
-    if (isApiError) {
-      this.globalConsecutiveErrors++;
-      if (this.globalConsecutiveErrors >= 2) {
-        // Don't await here to prevent blocking the current event processing
-        this.resetCookiesAndHeaders().catch((e) =>
-          console.error("Error during cookie reset:", e)
-        );
-      }
-    }
-
-    // Set the cooldown
-    const cooldownUntil = moment().add(backoffTime, "milliseconds");
-    this.cooldownEvents.set(eventId, cooldownUntil);
-
-    // Mark event as stopped in database if it's a persistent failure
-    if (shouldMarkStopped) {
-      try {
-        await Event.updateOne(
-          { Event_ID: eventId },
-          {
-            $set: {
-              Skip_Scraping: true,
-              status: "stopped",
-              stopReason: isApiError ? "API Error" : "Persistent Failure",
-              lastErrorMessage: error.message,
-              lastErrorTime: new Date(),
-            },
-          }
-        );
-        if (LOG_LEVEL >= 1) {
-          this.logWithTime(
-            `Marked event ${eventId} as stopped in database`,
-            "warning"
-          );
-        }
-      } catch (err) {
-        console.error(`Failed to update status for event ${eventId}:`, err);
-      }
-    }
-
-    // Still update the event schedule for 2-minute compliance
-    this.eventUpdateSchedule.set(
-      eventId,
-      moment().add(Math.min(backoffTime, 60000), "milliseconds")
-    );
-
-    // Only add to retry queue if we haven't hit the failure threshold
-    if (!shouldMarkStopped) {
-      this.retryQueue.push({
-        eventId,
-        retryCount: retryCount + 1,
-        retryAfter: cooldownUntil,
-        priority: Math.min(retryCount + 1, 10), // Higher priority for fewer retries
-      });
-
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
-          `Queued for aggressive retry: ${eventId} (after ${
-            backoffTime / 1000
-          }s cooldown)`,
-          "info"
-        );
-      }
-    } else {
-      this.logWithTime(
-        `Stopping retries for ${eventId} after ${
-          timeSinceUpdate / 1000
-        }s without successful updates`,
-        "error"
-      );
-    }
-  }
-
-  async processRetryQueue() {
-    const now = moment();
-
-    // Filter the retry queue to only include items ready for retry
-    const readyForRetry = this.retryQueue.filter(
-      (job) => !job.retryAfter || now.isAfter(job.retryAfter)
-    );
-
-    if (readyForRetry.length === 0) {
-      return;
-    }
-
-    // Update retry queue to remove items we're processing
-    this.retryQueue = this.retryQueue.filter(
-      (job) => job.retryAfter && now.isBefore(job.retryAfter)
-    );
-
-    if (LOG_LEVEL >= 1) {
-      this.logWithTime(
-        `Processing ${readyForRetry.length} events from retry queue`,
-        "info"
-      );
-    }
-
-    // For larger retry queues, process them all at once rather than by retry count
-    if (readyForRetry.length > 30) {
-      // Extract all event IDs, regardless of retry count
-      const allRetryEventIds = readyForRetry.map((job) => job.eventId);
-
-      // Process all at once using the main batch processor
-      await this.processBatch(allRetryEventIds);
-      return;
-    }
-
-    // For smaller queues, continue with grouped processing
-    // Group by retry count for better handling
-    const retryGroups = {};
-    readyForRetry.forEach((job) => {
-      if (!retryGroups[job.retryCount]) {
-        retryGroups[job.retryCount] = [];
-      }
-      retryGroups[job.retryCount].push(job.eventId);
-    });
-
-    // Process each retry group as a batch, prioritizing lower retry counts first
-    const prioritizedGroups = Object.entries(retryGroups).sort(
-      ([countA], [countB]) => parseInt(countA) - parseInt(countB)
-    );
-
-    for (const [retryCount, eventIds] of prioritizedGroups) {
-      if (!this.isRunning) break;
-
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
-          `Processing batch of ${eventIds.length} retries (attempt ${
-            parseInt(retryCount) + 1
-          })`,
-          "info"
-        );
-      }
-
-      // Determine optimal batch size - use larger batches for better efficiency
-      const batchSize = Math.min(
-        eventIds.length,
-        Math.max(30, Math.ceil(CONCURRENT_LIMIT / 2))
-      );
-
-      // Split into batches if needed
-      const batches = [];
-      for (let i = 0; i < eventIds.length; i += batchSize) {
-        batches.push(eventIds.slice(i, i + batchSize));
-      }
-
-      // Process all batches of this retry count in parallel
-      await Promise.all(
-        batches.map(async (batch) => {
-          try {
-            // Use processBatch directly for maximum efficiency
-            await this.processBatch(batch);
-          } catch (error) {
-            this.logWithTime(
-              `Error processing retry batch: ${error.message}`,
-              "error"
-            );
-          }
-        })
-      );
-
-      // Very minimal delay between different retry count groups to maximize throughput
-      await setTimeout(200);
-    }
   }
 
   async getEventsToProcess() {
