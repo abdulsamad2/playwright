@@ -1800,25 +1800,56 @@ async function refreshCookiesPeriodically() {
     try {
       console.log("Starting periodic cookie refresh...");
       
-      // Get a stable event ID to use for refreshing - choose one from active scrapes or use a default
+      // Get a random active event ID from the database
       let eventId = null;
       
-      // Try to find an active event ID from scraper manager
-      if (typeof ScraperManager !== 'undefined' && ScraperManager.getActiveEvents) {
-        const activeEvents = ScraperManager.getActiveEvents();
-        if (activeEvents.length > 0) {
-          // Choose a random event from active ones
-          eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
-          console.log(`Using active event ${eventId} for periodic refresh`);
+      try {
+        // Import Event model to query the database
+        const { Event } = await import('./models/index.js');
+        
+        // Get random active events from the database
+        const randomEvents = await Event.aggregate([
+          {
+            $match: {
+              Skip_Scraping: { $ne: true },
+              url: { $exists: true, $ne: "" },
+            },
+          },
+          { $sample: { size: 5 } }, // Get 5 random events
+          { $project: { Event_ID: 1, url: 1 } },
+        ]);
+
+        if (randomEvents && randomEvents.length > 0) {
+          // Select one random event from the results
+          const selectedEvent = randomEvents[Math.floor(Math.random() * randomEvents.length)];
+          eventId = selectedEvent.Event_ID;
+          console.log(`Using random database event ${eventId} for cookie refresh`);
+        } else {
+          console.warn('No active events found in database for cookie refresh');
+          // If no events found, we'll try ScraperManager as fallback
+        }
+      } catch (dbError) {
+        console.warn(`Failed to get random event from database: ${dbError.message}`);
+        // Continue to fallback approach
+      }
+      
+      // Fallback: Try to find an active event ID from scraper manager
+      if (!eventId && typeof ScraperManager !== 'undefined' && ScraperManager.getActiveEvents) {
+        try {
+          const activeEvents = ScraperManager.getActiveEvents();
+          if (activeEvents.length > 0) {
+            // Choose a random event from active ones
+            eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
+            console.log(`Using ScraperManager event ${eventId} for cookie refresh (database fallback)`);
+          }
+        } catch (error) {
+          console.warn('Failed to get active events from ScraperManager:', error.message);
         }
       }
       
-      // If no active events, use a default event ID
+      // If still no event ID found, we cannot proceed
       if (!eventId) {
-        // Default to a known stable event ID for refreshing cookies
-        // Using a popular event that's likely to stay active
-        eventId = "0400619496250E05";
-        console.log(`Using default event ${eventId} for periodic refresh`);
+        throw new Error('No active events available for cookie refresh - cannot proceed without a valid event ID');
       }
       
       // Get the proxy to use for refresh
@@ -1829,12 +1860,11 @@ async function refreshCookiesPeriodically() {
         refreshRecord = await CookieRefreshTracker.startRefresh(eventId, proxyData.proxy);
       }
       
-      // Call refreshHeaders to get fresh cookies
-      // Pass only the proxy object, not the entire proxyData object
+      // Call refreshHeaders with the random event ID from database
       const newState = await refreshHeaders(eventId, proxyData.proxy);
       
       if (newState?.cookies?.length) {
-        console.log('Successfully refreshed cookies in periodic refresh');
+        console.log(`Successfully refreshed cookies using event ${eventId} in periodic refresh`);
         
         // Update the captured state
         cookieManager.capturedState = {
@@ -1845,8 +1875,6 @@ async function refreshCookiesPeriodically() {
         // Save to file
         await cookieManager.saveCookiesToFile(newState.cookies);
         
-        // Don't close context - keep browser session alive
-        
         // Track successful refresh in database
         await CookieRefreshTracker.markSuccess(
           refreshRecord.refreshId, 
@@ -1856,16 +1884,12 @@ async function refreshCookiesPeriodically() {
         
         return; // Success, exit the retry loop
       } else {
-        console.warn('Failed to refresh cookies in periodic refresh - no cookies returned');
-        lastError = new Error('No cookies returned from refresh');
-        
-        // Don't mark as failed yet, we'll retry
+        console.warn(`Failed to refresh cookies using event ${eventId} - no cookies returned`);
+        lastError = new Error(`No cookies returned from refresh for event ${eventId}`);
       }
     } catch (error) {
       console.error(`Error in periodic cookie refresh (attempt ${retryCount + 1}):`, error.message);
       lastError = error;
-      
-      // Don't close context - keep browser session alive
     }
 
     // If we get here, we need to retry

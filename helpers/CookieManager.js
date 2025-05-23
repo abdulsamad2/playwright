@@ -366,20 +366,66 @@ export class CookieManager {
     try {
       console.log('Starting periodic cookie refresh...');
       
-      // Get a random active event ID
-      const activeEvents = await ScraperManager.getEventsToProcess();
-      if (!activeEvents || activeEvents.length === 0) {
-        console.warn('No active events found for cookie refresh');
+      // Get a random active event ID from the database
+      let eventId = null;
+      
+      try {
+        // Import Event model to query the database
+        const { Event } = await import('../models/index.js');
+        
+        // Get random active events from the database
+        const randomEvents = await Event.aggregate([
+          {
+            $match: {
+              Skip_Scraping: { $ne: true },
+              url: { $exists: true, $ne: "" },
+            },
+          },
+          { $sample: { size: 5 } }, // Get 5 random events
+          { $project: { Event_ID: 1, url: 1 } },
+        ]);
+
+        if (randomEvents && randomEvents.length > 0) {
+          // Select one random event from the results
+          const selectedEvent = randomEvents[Math.floor(Math.random() * randomEvents.length)];
+          eventId = selectedEvent.Event_ID;
+          console.log(`Using random database event ${eventId} for cookie refresh`);
+        } else {
+          console.warn('No active events found in database for cookie refresh');
+        }
+      } catch (dbError) {
+        console.warn(`Failed to get random event from database: ${dbError.message}`);
+      }
+      
+      // Fallback: Try to get events from ScraperManager if available
+      if (!eventId) {
+        try {
+          const activeEvents = await ScraperManager.getEventsToProcess();
+          if (!activeEvents || activeEvents.length === 0) {
+            console.warn('No active events found for cookie refresh');
+            return;
+          }
+          
+          eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
+          console.log(`Using ScraperManager event ${eventId} for cookie refresh (database fallback)`);
+        } catch (error) {
+          console.warn('Failed to get events from ScraperManager:', error.message);
+          return;
+        }
+      }
+      
+      // If still no event ID found, we cannot proceed
+      if (!eventId) {
+        console.warn('No active events available for cookie refresh');
         return;
       }
       
-      const randomEventId = activeEvents[Math.floor(Math.random() * activeEvents.length)];
       const { proxy } = GetProxy();
       
-      const newState = await refreshHeaders(randomEventId, proxy, null);
+      const newState = await refreshHeaders(eventId, proxy, null);
       
       if (newState?.cookies?.length) {
-        console.log('Successfully refreshed cookies in periodic refresh');
+        console.log(`Successfully refreshed cookies using event ${eventId} in periodic refresh`);
         
         this.capturedState = {
           ...newState,
@@ -388,7 +434,7 @@ export class CookieManager {
         
         await this.saveCookiesToFile(newState.cookies);
       } else {
-        console.warn('Failed to refresh cookies in periodic refresh');
+        console.warn(`Failed to refresh cookies using event ${eventId}`);
       }
     } catch (error) {
       console.error('Error in periodic cookie refresh:', error);
