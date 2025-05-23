@@ -1099,6 +1099,9 @@ export class ScraperManager {
     this.processingEvents.add(eventId);
     this.activeJobs.set(eventId, moment());
 
+    // Declare headers variable outside try block so it's accessible in catch block
+    let headers;
+
     try {
       // Only log at higher verbosity levels
       if (LOG_LEVEL >= 2) {
@@ -1143,8 +1146,6 @@ export class ScraperManager {
         return true;
       }
 
-      let headers = null;
-      
       // If headers were passed from batch processing, use them directly
       if (passedHeaders) {
         headers = passedHeaders;
@@ -1287,7 +1288,7 @@ export class ScraperManager {
       }
 
       // Update session usage on success
-      if (headers?.sessionId) {
+      if (headers.sessionId) {
         this.sessionManager.updateSessionUsage(headers.sessionId, true);
         if (LOG_LEVEL >= 3) {
           this.logWithTime(
@@ -2787,6 +2788,8 @@ export class ScraperManager {
             "warning"
           );
         }
+        // Simple console log
+        console.log(`[${new Date().toISOString()}] CSV UPLOAD: File not found - ${allEventsCsvPath}`);
         return;
       }
       
@@ -2806,6 +2809,8 @@ export class ScraperManager {
         hasMappingId = firstLine.includes('mapping_id');
         hasEventId = firstLine.includes('event_id');
         
+        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK: mapping_id=${hasMappingId ? 'YES' : 'NO'}, event_id=${hasEventId ? 'YES' : 'NO'}`);
+        
         if (!hasMappingId || !hasEventId) {
           this.logWithTime(
             `CSV WARNING: Combined CSV file is missing required fields: ${!hasMappingId ? 'mapping_id ' : ''}${!hasEventId ? 'event_id' : ''}`,
@@ -2814,6 +2819,8 @@ export class ScraperManager {
           
           // If the combined CSV is missing required fields, try to regenerate it
           try {
+            console.log(`[${new Date().toISOString()}] CSV UPLOAD: Attempting to regenerate combined CSV file with missing fields`);
+            
             // Import the generateCombinedEventsCSV function dynamically
             const { generateCombinedEventsCSV } = await import('./controllers/inventoryController.js');
             
@@ -2821,16 +2828,16 @@ export class ScraperManager {
             const result = generateCombinedEventsCSV(false);
             
             if (result.success) {
-              this.logWithTime("Successfully regenerated combined CSV file", "info");
+              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Successfully regenerated combined CSV file`);
             } else {
-              this.logWithTime(`Failed to regenerate combined CSV file: ${result.message}`, "warning");
+              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Failed to regenerate combined CSV file: ${result.message}`);
             }
           } catch (regenerateError) {
-            this.logWithTime(`Error regenerating combined CSV: ${regenerateError.message}`, "error");
+            console.error(`[${new Date().toISOString()}] CSV UPLOAD: Error regenerating combined CSV: ${regenerateError.message}`);
           }
         }
       } catch (checkError) {
-        this.logWithTime(`CSV check error: ${checkError.message}`, "warning");
+        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK ERROR: ${checkError.message}`);
       }
       
       // Log the start of upload process
@@ -2838,6 +2845,9 @@ export class ScraperManager {
         `Starting CSV upload cycle for all_events_combined.csv (${fileSizeMB} MB)`, 
         "info"
       );
+      
+      // Simple console log for upload start
+      console.log(`[${new Date().toISOString()}] CSV UPLOAD: Starting upload of all_events_combined.csv (${fileSizeMB} MB)`);
       
       // Initialize the SyncService
       const syncService = new SyncService(COMPANY_ID, API_TOKEN);
@@ -2859,6 +2869,9 @@ export class ScraperManager {
             "success"
           );
           
+          // Simple console log for success
+          console.log(`[${new Date().toISOString()}] CSV UPLOAD: SUCCESS - Uploaded ${fileSizeMB} MB in ${uploadDuration}s`);
+          
           // Track last successful upload time
           this.lastCsvUploadTime = moment();
         } else {
@@ -2866,6 +2879,9 @@ export class ScraperManager {
             `CSV upload completed but reported failure: ${result.message || 'Unknown error'}`,
             "warning"
           );
+          
+          // Simple console log for failure
+          console.log(`[${new Date().toISOString()}] CSV UPLOAD: FAILED - ${result.message || 'Unknown error'}`);
         }
       } catch (uploadError) {
         // More detailed error logging
@@ -2873,6 +2889,9 @@ export class ScraperManager {
           `Error uploading CSV file (${fileSizeMB} MB): ${uploadError.message}`,
           "error"
         );
+        
+        // Simple console log for error
+        console.log(`[${new Date().toISOString()}] CSV UPLOAD: ERROR - ${uploadError.message}`);
         
         // Check for specific types of errors
         if (uploadError.message.includes('network') || uploadError.message.includes('timeout')) {
@@ -2896,6 +2915,9 @@ export class ScraperManager {
         `Error in CSV upload cycle: ${error.message}`,
         "error"
       );
+      
+      // Simple console log for cycle error
+      console.log(`[${new Date().toISOString()}] CSV UPLOAD: CYCLE ERROR - ${error.message}`);
       
       console.error(`CSV upload cycle error:`, error);
     }

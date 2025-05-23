@@ -959,61 +959,59 @@ class InventoryController {
         // Ensure event_id is always present before formatting
         if (!record.event_id && record.mapping_id) {
           record.event_id = record.mapping_id;
+          console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
         } else if (!record.mapping_id && record.event_id) {
           record.mapping_id = record.event_id;
+          console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
         } else if (!record.event_id && !record.mapping_id && record.source_event_id) {
           // Use source_event_id as a fallback
           record.event_id = record.source_event_id;
           record.mapping_id = record.source_event_id;
+          console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
+        }
+        
+        // Final check to ensure neither is empty
+        if (!record.event_id || !record.mapping_id) {
+          console.warn(`WARNING: Record may have missing ID fields: section=${record.section}, row=${record.row}, event_id=${record.event_id || 'MISSING'}, mapping_id=${record.mapping_id || 'MISSING'}`);
         }
         
         return formatInventoryForExport(record);
       });
       
-      // Count fixes for summary logging
-      let eventIdFixes = 0;
-      let mappingIdFixes = 0;
-      let sourceEventIdFixes = 0;
-      
-      finalRecords.forEach(record => {
-        if (!record.event_id && record.mapping_id) {
-          eventIdFixes++;
-        } else if (!record.mapping_id && record.event_id) {
-          mappingIdFixes++;
-        } else if (!record.event_id && !record.mapping_id && record.source_event_id) {
-          sourceEventIdFixes++;
+      // Verify fields are correctly included in formatted data
+      if (formattedData.length > 0) {
+        const firstRecord = formattedData[0];
+        console.log(`CSV Export Verification: First record contains event_id=${firstRecord.event_id || 'MISSING'}, mapping_id=${firstRecord.mapping_id || 'MISSING'}`);
+        
+        // Count records with missing IDs for reporting
+        const missingEventId = formattedData.filter(r => !r.event_id).length;
+        const missingMappingId = formattedData.filter(r => !r.mapping_id).length;
+        
+        if (missingEventId > 0 || missingMappingId > 0) {
+          console.warn(`WARNING: Found ${missingEventId} records without event_id and ${missingMappingId} records without mapping_id`);
         }
-      });
-      
-      // Log summary of fixes instead of individual records
-      if (eventIdFixes > 0 || mappingIdFixes > 0 || sourceEventIdFixes > 0) {
-        console.log(`Fixed ID fields: ${eventIdFixes} event_id fixes, ${mappingIdFixes} mapping_id fixes, ${sourceEventIdFixes} source_event_id fallbacks`);
       }
       
       // Save to combined file
       saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
       
-      // Verification step - check combined CSV file for required fields
+      // Verify the saved file has the correct headers
       try {
-        const combinedCsvPath = path.join(DATA_DIR, 'all_events_combined.csv');
-        if (fs.existsSync(combinedCsvPath)) {
-          const combinedContent = fs.readFileSync(combinedCsvPath, 'utf8');
-          const combinedLines = combinedContent.split('\n');
-          
-          if (combinedLines.length > 0) {
-            const headerLine = combinedLines[0];
-            const hasEventId = headerLine.includes('event_id');
-            const hasMappingId = headerLine.includes('mapping_id');
-            
-            console.log(`VERIFICATION: Combined CSV file headers - event_id=${hasEventId ? 'PRESENT' : 'MISSING'}, mapping_id=${hasMappingId ? 'PRESENT' : 'MISSING'}`);
-            
-            if (!hasEventId || !hasMappingId) {
-              console.warn(`WARNING: Combined CSV file is missing required headers: ${!hasEventId ? 'event_id ' : ''}${!hasMappingId ? 'mapping_id' : ''}`);
-            }
-          }
+        const fs = require('fs');
+        const fileContent = fs.readFileSync(COMBINED_EVENTS_FILE, 'utf8');
+        const firstLine = fileContent.split('\n')[0];
+        
+        // Check if the header line contains event_id and mapping_id
+        const hasEventId = firstLine.includes('event_id');
+        const hasMappingId = firstLine.includes('mapping_id');
+        
+        console.log(`VERIFICATION: Combined CSV file headers - event_id=${hasEventId ? 'PRESENT' : 'MISSING'}, mapping_id=${hasMappingId ? 'PRESENT' : 'MISSING'}`);
+        
+        if (!hasEventId || !hasMappingId) {
+          console.error(`ERROR: Combined CSV file is missing required fields in headers: ${!hasEventId ? 'event_id ' : ''}${!hasMappingId ? 'mapping_id' : ''}`);
         }
-      } catch (verificationError) {
-        console.error('Error during CSV verification:', verificationError.message);
+      } catch (verifyError) {
+        console.error(`Error verifying combined CSV file: ${verifyError.message}`);
       }
       
       return {
