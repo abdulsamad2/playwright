@@ -1143,7 +1143,7 @@ export class ScraperManager {
         return true;
       }
 
-      let headers;
+      let headers = null;
       
       // If headers were passed from batch processing, use them directly
       if (passedHeaders) {
@@ -1190,42 +1190,42 @@ export class ScraperManager {
 
         // Fallback to regular header management if session approach fails
         if (!headers) {
-          // Check if cookies have been refreshed recently
-          const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
-          const cookieAge = Date.now() - lastRefresh;
+        // Check if cookies have been refreshed recently
+        const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
+        const cookieAge = Date.now() - lastRefresh;
 
-          // Force header refresh if cookies are more than half the expiration time
-          // or if this is a retry attempt (to get fresh cookies)
-          const shouldRefreshHeaders =
-            !this.headersCache.has(eventId) ||
-            cookieAge > COOKIE_EXPIRATION_MS / 2 ||
-            retryCount > 0;
+        // Force header refresh if cookies are more than half the expiration time
+        // or if this is a retry attempt (to get fresh cookies)
+        const shouldRefreshHeaders =
+          !this.headersCache.has(eventId) ||
+          cookieAge > COOKIE_EXPIRATION_MS / 2 ||
+          retryCount > 0;
 
-          if (shouldRefreshHeaders) {
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `Getting fresh headers for event ${eventId}${
-                  retryCount > 0 ? " (retry attempt)" : ""
-                }`,
-                "debug"
-              );
-            }
-            headers = await this.refreshEventHeaders(eventId);
-          } else {
-            headers = this.headersCache.get(eventId);
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(
-                `Using cached headers for event ${eventId} (age: ${Math.floor(
-                  cookieAge / 1000
-                )}s)`,
-                "debug"
-              );
-            }
+        if (shouldRefreshHeaders) {
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Getting fresh headers for event ${eventId}${
+                retryCount > 0 ? " (retry attempt)" : ""
+              }`,
+              "debug"
+            );
           }
+          headers = await this.refreshEventHeaders(eventId);
+        } else {
+          headers = this.headersCache.get(eventId);
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(
+              `Using cached headers for event ${eventId} (age: ${Math.floor(
+                cookieAge / 1000
+              )}s)`,
+              "debug"
+            );
+          }
+        }
 
-          // If headers aren't available through either method, try one last refresh
-          if (!headers) {
-            headers = await this.refreshEventHeaders(eventId);
+        // If headers aren't available through either method, try one last refresh
+        if (!headers) {
+          headers = await this.refreshEventHeaders(eventId);
           }
         }
       }
@@ -1262,32 +1262,32 @@ export class ScraperManager {
           headers.headers?.Cookie?.substring(0, 20) ||
           headers.headers?.["User-Agent"]?.substring(0, 20);
         if (headerKey) {
-          const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
-            success: 0,
-            failure: 0,
-          };
-          currentSuccessRate.success++;
-          this.headerSuccessRates.set(headerKey, currentSuccessRate);
+        const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
+          success: 0,
+          failure: 0,
+        };
+        currentSuccessRate.success++;
+        this.headerSuccessRates.set(headerKey, currentSuccessRate);
 
-          // Add to rotation pool if not already there
-          if (
-            !this.headerRotationPool.some(
-              (h) =>
+        // Add to rotation pool if not already there
+        if (
+          !this.headerRotationPool.some(
+            (h) =>
                 h.headers?.Cookie?.substring(0, 20) === headerKey ||
                 h.headers?.["User-Agent"]?.substring(0, 20) === headerKey
-            )
-          ) {
-            this.headerRotationPool.push(headers);
-            // Limit pool size
-            if (this.headerRotationPool.length > 10) {
-              this.headerRotationPool.shift();
+          )
+        ) {
+          this.headerRotationPool.push(headers);
+          // Limit pool size
+          if (this.headerRotationPool.length > 10) {
+            this.headerRotationPool.shift();
             }
           }
         }
       }
 
       // Update session usage on success
-      if (headers.sessionId) {
+      if (headers?.sessionId) {
         this.sessionManager.updateSessionUsage(headers.sessionId, true);
         if (LOG_LEVEL >= 3) {
           this.logWithTime(
@@ -1409,10 +1409,10 @@ export class ScraperManager {
 
         // If approaching max allowed update interval, force one more retry
         if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
-          this.logWithTime(
+        this.logWithTime(
             `Event ${eventId} exceeded retry limit but approaching max update deadline - forcing retry`,
-            "warning"
-          );
+          "warning"
+        );
         } else {
           this.logWithTime(
             `Event ${eventId} exceeded retry limit (${retryCount}/${eventRetryLimit}) - stopping retries`,
@@ -1428,21 +1428,21 @@ export class ScraperManager {
           );
 
           // Don't add to retry queue - this event will be marked as failed
-          return false;
+        return false;
         }
       }
 
       // Calculate backoff time based on retry count and error type
       let backoffTime;
       const isApiError = error.message.includes("403") || 
-                        error.message.includes("400") || 
-                        error.message.includes("429") ||
-                        error.message.includes("API");
+        error.message.includes("400") ||
+        error.message.includes("429") ||
+        error.message.includes("API");
 
       if (retryCount < SHORT_COOLDOWNS.length) {
         // Use progressive short cooldowns for initial retries
         backoffTime = SHORT_COOLDOWNS[retryCount];
-        
+
         if (LOG_LEVEL >= 1) {
           this.logWithTime(
             `${isApiError ? "API error" : "Error"} for ${eventId}: ${error.message}. Retry ${retryCount + 1}/${eventRetryLimit} in ${backoffTime/1000}s`,
@@ -1453,10 +1453,10 @@ export class ScraperManager {
         // Use longer cooldown for persistent failures
         backoffTime = LONG_COOLDOWN_MINUTES * 60 * 1000;
         
-        this.logWithTime(
+          this.logWithTime(
           `Persistent ${isApiError ? "API errors" : "errors"} for ${eventId}: ${error.message}. Long cooldown retry in ${LONG_COOLDOWN_MINUTES} minute`,
-          "error"
-        );
+            "error"
+          );
 
         // Log long cooldown to error logs
         await this.logError(
@@ -1477,10 +1477,10 @@ export class ScraperManager {
       this.cooldownEvents.set(eventId, cooldownUntil);
 
       // Add to retry queue
-      this.retryQueue.push({
-        eventId,
-        retryCount: retryCount + 1,
-        retryAfter: cooldownUntil,
+        this.retryQueue.push({
+          eventId,
+          retryCount: retryCount + 1,
+          retryAfter: cooldownUntil,
         priority: Math.max(1, 10 - retryCount), // Higher priority for fewer retries
       });
 
@@ -1490,12 +1490,12 @@ export class ScraperManager {
         moment().add(Math.min(backoffTime, MIN_TIME_BETWEEN_EVENT_SCRAPES), "milliseconds")
       );
 
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(
           `Queued ${eventId} for retry ${retryCount + 1}/${eventRetryLimit} (cooldown: ${backoffTime/1000}s)`,
-          "info"
-        );
-      }
+            "info"
+          );
+        }
 
       return false;
     } finally {
@@ -1519,27 +1519,27 @@ export class ScraperManager {
       
       // First, get event URLs and group by domain
       const eventPromises = eventIds.map(async (eventId) => {
-        try {
-          const event = await Event.findOne({ Event_ID: eventId })
+      try {
+        const event = await Event.findOne({ Event_ID: eventId })
             .select("url Skip_Scraping")
-            .lean();
-          
+          .lean();
+
           if (!event || event.Skip_Scraping) {
             return null;
           }
           
           let domain = "unknown";
-          if (event.url) {
-            try {
-              const url = new URL(event.url);
+        if (event.url) {
+          try {
+            const url = new URL(event.url);
               domain = url.hostname;
-            } catch (e) {
+          } catch (e) {
               domain = `invalid-url-${eventId}`;
             }
           }
           
           return { eventId, domain, url: event.url };
-        } catch (error) {
+      } catch (error) {
           this.logWithTime(`Error fetching event ${eventId}: ${error.message}`, "error");
           return null;
         }
@@ -1568,7 +1568,7 @@ export class ScraperManager {
         Array.from(domainGroups.entries()).map(async ([domain, domainEvents]) => {
           // Get a shared proxy for this domain
           const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(domainEvents);
-          
+      
           // Get fresh headers for the first event in this domain
           const firstEventId = domainEvents[0];
           let domainHeaders = await this.refreshEventHeaders(firstEventId);
@@ -2787,8 +2787,6 @@ export class ScraperManager {
             "warning"
           );
         }
-        // Simple console log
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD: File not found - ${allEventsCsvPath}`);
         return;
       }
       
@@ -2808,8 +2806,6 @@ export class ScraperManager {
         hasMappingId = firstLine.includes('mapping_id');
         hasEventId = firstLine.includes('event_id');
         
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK: mapping_id=${hasMappingId ? 'YES' : 'NO'}, event_id=${hasEventId ? 'YES' : 'NO'}`);
-        
         if (!hasMappingId || !hasEventId) {
           this.logWithTime(
             `CSV WARNING: Combined CSV file is missing required fields: ${!hasMappingId ? 'mapping_id ' : ''}${!hasEventId ? 'event_id' : ''}`,
@@ -2818,8 +2814,6 @@ export class ScraperManager {
           
           // If the combined CSV is missing required fields, try to regenerate it
           try {
-            console.log(`[${new Date().toISOString()}] CSV UPLOAD: Attempting to regenerate combined CSV file with missing fields`);
-            
             // Import the generateCombinedEventsCSV function dynamically
             const { generateCombinedEventsCSV } = await import('./controllers/inventoryController.js');
             
@@ -2827,16 +2821,16 @@ export class ScraperManager {
             const result = generateCombinedEventsCSV(false);
             
             if (result.success) {
-              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Successfully regenerated combined CSV file`);
+              this.logWithTime("Successfully regenerated combined CSV file", "info");
             } else {
-              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Failed to regenerate combined CSV file: ${result.message}`);
+              this.logWithTime(`Failed to regenerate combined CSV file: ${result.message}`, "warning");
             }
           } catch (regenerateError) {
-            console.error(`[${new Date().toISOString()}] CSV UPLOAD: Error regenerating combined CSV: ${regenerateError.message}`);
+            this.logWithTime(`Error regenerating combined CSV: ${regenerateError.message}`, "error");
           }
         }
       } catch (checkError) {
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK ERROR: ${checkError.message}`);
+        this.logWithTime(`CSV check error: ${checkError.message}`, "warning");
       }
       
       // Log the start of upload process
@@ -2844,9 +2838,6 @@ export class ScraperManager {
         `Starting CSV upload cycle for all_events_combined.csv (${fileSizeMB} MB)`, 
         "info"
       );
-      
-      // Simple console log for upload start
-      console.log(`[${new Date().toISOString()}] CSV UPLOAD: Starting upload of all_events_combined.csv (${fileSizeMB} MB)`);
       
       // Initialize the SyncService
       const syncService = new SyncService(COMPANY_ID, API_TOKEN);
@@ -2868,9 +2859,6 @@ export class ScraperManager {
             "success"
           );
           
-          // Simple console log for success
-          console.log(`[${new Date().toISOString()}] CSV UPLOAD: SUCCESS - Uploaded ${fileSizeMB} MB in ${uploadDuration}s`);
-          
           // Track last successful upload time
           this.lastCsvUploadTime = moment();
         } else {
@@ -2878,9 +2866,6 @@ export class ScraperManager {
             `CSV upload completed but reported failure: ${result.message || 'Unknown error'}`,
             "warning"
           );
-          
-          // Simple console log for failure
-          console.log(`[${new Date().toISOString()}] CSV UPLOAD: FAILED - ${result.message || 'Unknown error'}`);
         }
       } catch (uploadError) {
         // More detailed error logging
@@ -2888,9 +2873,6 @@ export class ScraperManager {
           `Error uploading CSV file (${fileSizeMB} MB): ${uploadError.message}`,
           "error"
         );
-        
-        // Simple console log for error
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD: ERROR - ${uploadError.message}`);
         
         // Check for specific types of errors
         if (uploadError.message.includes('network') || uploadError.message.includes('timeout')) {
@@ -2914,9 +2896,6 @@ export class ScraperManager {
         `Error in CSV upload cycle: ${error.message}`,
         "error"
       );
-      
-      // Simple console log for cycle error
-      console.log(`[${new Date().toISOString()}] CSV UPLOAD: CYCLE ERROR - ${error.message}`);
       
       console.error(`CSV upload cycle error:`, error);
     }
@@ -2963,6 +2942,75 @@ export class ScraperManager {
       successCount: this.successCount,
       failedCount: this.failedEvents.size
     };
+  }
+
+  /**
+   * Get recent failure count for an event
+   * @param {string} eventId - The event ID
+   * @returns {number} Number of recent failures
+   */
+  getRecentFailureCount(eventId) {
+    const failures = this.eventFailureCounts.get(eventId) || [];
+    const now = Date.now();
+    const recentFailures = failures.filter(failure => 
+      now - failure.timestamp < 10 * 60 * 1000 // Last 10 minutes
+    );
+    return recentFailures.length;
+  }
+
+  /**
+   * Increment failure count for an event
+   * @param {string} eventId - The event ID
+   */
+  incrementFailureCount(eventId) {
+    if (!this.eventFailureCounts.has(eventId)) {
+      this.eventFailureCounts.set(eventId, []);
+    }
+    
+    const failures = this.eventFailureCounts.get(eventId);
+    failures.push({
+      timestamp: Date.now(),
+      count: failures.length + 1
+    });
+    
+    // Keep only recent failures (last 20)
+    if (failures.length > 20) {
+      failures.shift();
+    }
+  }
+
+  /**
+   * Clear failure count for an event
+   * @param {string} eventId - The event ID
+   */
+  clearFailureCount(eventId) {
+    this.eventFailureCounts.delete(eventId);
+    this.eventFailureTimes.delete(eventId);
+  }
+
+  /**
+   * Categorize error type for grouping
+   * @param {Error} error - The error object
+   * @returns {string} Error category
+   */
+  categorizeError(error) {
+    const message = error.message.toLowerCase();
+    
+    if (message.includes('403') || message.includes('forbidden')) {
+      return 'FORBIDDEN';
+    } else if (message.includes('429') || message.includes('rate limit')) {
+      return 'RATE_LIMIT';
+    } else if (message.includes('400') || message.includes('bad request')) {
+      return 'BAD_REQUEST';
+    } else if (message.includes('timeout')) {
+      return 'TIMEOUT';
+    } else if (message.includes('network') || message.includes('connection')) {
+      return 'NETWORK';
+    } else if (message.includes('empty') || message.includes('null')) {
+      return 'EMPTY_RESULT';
+    } else {
+      return 'OTHER';
+    }
   }
 }
 

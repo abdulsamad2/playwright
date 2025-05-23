@@ -258,9 +258,12 @@ export function formatInventoryForExport(data) {
   const event_id = data.mapping_id || "";
   const mapping_id = data.mapping_id || data.event_id || "";
   
-  // If both are missing, log a warning
+  // If both are missing, log a warning (but limit frequency)
   if (!event_id || !mapping_id) {
-    console.warn(`WARNING: Missing event_id or mapping_id for record with section=${data.section}, row=${data.row}`);
+    // Only log this warning occasionally to avoid log spam
+    if (Math.random() < 0.001) { // Only 0.1% of the time
+      console.warn(`WARNING: Missing event_id or mapping_id for records (showing 0.1% of warnings)`);
+    }
   }
   
   // Use original event name if it was preserved, otherwise use the event_name
@@ -273,6 +276,7 @@ export function formatInventoryForExport(data) {
     venue_name: data.venue_name || "",
     event_date: data.event_date || "",
     event_id: event_id,
+    mapping_id: mapping_id,
     quantity: quantity.toString(),
     section: data.section || "",
     row: data.row || "",
@@ -296,6 +300,5 @@ export function formatInventoryForExport(data) {
     zone: data.zone || "N",
     shown_quantity: "",
     passthrough: data.passthrough || "",
- 
   };
 }
