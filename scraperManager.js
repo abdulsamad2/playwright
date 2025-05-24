@@ -2145,10 +2145,32 @@ export class ScraperManager {
 
   // Get events to process in priority order (simplified version without domain grouping)
   async getEvents() {
+    // Mark events as stopped if not updated in the last 10 minutes
+    try {
+      const now = moment();
+      const tenMinutesAgo = now.clone().subtract(10, 'minutes').toDate();
+      // Find events that are not already stopped and haven't been updated in 10+ minutes
+      const staleEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+        Last_Updated: { $lt: tenMinutesAgo }
+      }).select('Event_ID Last_Updated');
+      if (staleEvents.length) {
+        const staleIds = staleEvents.map(e => e.Event_ID);
+        await Event.updateMany(
+          { Event_ID: { $in: staleIds } },
+          { $set: { Skip_Scraping: true } }
+        );
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(`Marked ${staleIds.length} events as stopped (not updated in 10+ min): ${staleIds.join(', ')}`, 'warning');
+        }
+      }
+    } catch (err) {
+      console.error('Error marking stale events as stopped:', err);
+    }
     try {
       const now = moment();
 
-      // Find all active events due for update
+      // Find all active events due for update (excluding those just marked as stopped)
       const events = await Event.find({
         Skip_Scraping: { $ne: true },
         $or: [
