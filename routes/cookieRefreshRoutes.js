@@ -20,4 +20,4 @@ router.post('/trigger', triggerRefresh);
 // Get details of a specific cookie refresh
 router.get('/:refreshId', getRefreshDetails);
 
-export default router; 
+export default router;

@@ -3,6 +3,9 @@ import inventoryController from '../controllers/inventoryController.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import SyncService from '../services/syncService.js';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
 // Set up storage for uploaded files
 const storage = multer.diskStorage({
@@ -24,6 +27,16 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage: storage });
+
+// Get the directory path
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Set up constants for sync service
+const COMPANY_ID = '702';
+const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q9eKV_Jt';
+const DATA_DIR = path.join(process.cwd(), 'data');
+const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank_csv.csv');
 
 // Create router
 const router = express.Router();
@@ -172,6 +185,43 @@ router.post('/import/csv', upload.single('file'), (req, res) => {
   }
   
   res.json(result);
+});
+
+// Clear all inventory by uploading a blank CSV file
+router.post('/clear-sync', async (req, res) => {
+  try {
+    // Ensure data directory exists
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    
+    // Create or ensure blank CSV exists
+    if (!fs.existsSync(BLANK_CSV_PATH)) {
+      // Create empty CSV with headers
+      fs.writeFileSync(BLANK_CSV_PATH, 'inventory_id,event_name,venue_name,event_date,event_id,quantity,section,row,seats,barcodes,internal_notes,public_notes,tags,list_price,face_price,taxed_cost,cost,hide_seats,in_hand,in_hand_date,instant_transfer,files_available,split_type,custom_split,stock_type,zone,shown_quantity,passthrough,mapping_id\n');
+      console.log('Created blank CSV file');
+    }
+    
+    // Initialize the sync service
+    const syncService = new SyncService(COMPANY_ID, API_TOKEN);
+    
+    // Upload the blank CSV to clear all inventory
+    const result = await syncService.uploadCsvToSync(BLANK_CSV_PATH);
+    
+    // Return success response
+    res.json({
+      success: true,
+      message: 'All inventory has been cleared from sync service',
+      details: result
+    });
+  } catch (error) {
+    console.error('Error clearing inventory from sync:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to clear inventory from sync service',
+      error: error.message
+    });
+  }
 });
 
 export default router; 
