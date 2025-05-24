@@ -117,7 +117,7 @@ export function validateAndFixInventoryRecord(record) {
     const validation = validateConsecutiveSeats(fixedRecord.seats);
     if (!validation.valid) {
       fixedRecord.seats = validation.fixedSeats;
-      console.log(`Fixed non-consecutive seats: ${validation.originalSeats} -> ${validation.fixedSeats}`);
+      // Fixed non-consecutive seats
     }
     
     // Update quantity based on the number of seats
@@ -125,7 +125,6 @@ export function validateAndFixInventoryRecord(record) {
     
     // Skip records with only one seat
     if (seatCount < 2) {
-      console.log(`Skipping single-seat inventory record: ${fixedRecord.inventory_id}`);
       return null;
     }
     
@@ -138,7 +137,6 @@ export function validateAndFixInventoryRecord(record) {
     fixedRecord.split_type = 'CUSTOM'; // Ensure split type is set to CUSTOM for multi-seat records
   } else if (!fixedRecord.quantity || parseInt(fixedRecord.quantity) < 2) {
     // Skip records with no seats or quantity less than 2
-    console.log(`Skipping inventory record with insufficient quantity: ${fixedRecord.inventory_id}`);
     return null;
   }
   
@@ -176,7 +174,7 @@ export function processInventoryCSV(inputFilePath, outputFilePath) {
         return fixedRecord;
       } catch (error) {
         stats.errors++;
-        console.error(`Error processing record: ${JSON.stringify(record)}`);
+        // Error processing record
         return record; // Return the original record if processing fails
       }
     });
@@ -258,10 +256,7 @@ export function formatInventoryForExport(data) {
   const event_id = data.mapping_id || "";
   const mapping_id = data.mapping_id || data.event_id || "";
   
-  // If both are missing, log a warning
-  if (!event_id || !mapping_id) {
-    console.warn(`WARNING: Missing event_id or mapping_id for record with section=${data.section}, row=${data.row}`);
-  }
+    // Skip logging if both IDs are missing
   
   // Use original event name if it was preserved, otherwise use the event_name
   const eventName = data.original_event_name || data.event_name || "";

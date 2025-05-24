@@ -100,7 +100,6 @@ class InventoryController {
     // Delete previous combined file if it exists
     if (fs.existsSync(COMBINED_EVENTS_FILE)) {
       fs.unlinkSync(COMBINED_EVENTS_FILE);
-      console.log(`Deleted previous combined events file for new scrape cycle`);
     }
 
     // Create a new cycle object
@@ -157,7 +156,6 @@ class InventoryController {
       
       // Generate the combined CSV file
       const result = this.generateCombinedEventsCSV();
-      console.log(`Scrape cycle #${this.scrapeCycle.currentCycle} completed - ${result.message}`);
     }
 
     saveScrapeCycle(this.scrapeCycle);
@@ -176,9 +174,7 @@ class InventoryController {
     try {
       if (fs.existsSync(filePath)) {
         this.inventoryData = readInventoryFromCSV(filePath);
-        console.log(`Loaded ${this.inventoryData.length} inventory records from ${filePath}`);
       } else {
-        console.log(`No inventory file found at ${filePath}, starting with empty inventory`);
         this.inventoryData = [];
       }
     } catch (error) {
@@ -232,17 +228,12 @@ class InventoryController {
           const existingData = readInventoryFromCSV(eventFilePath);
           if (existingData.length > 0) {
             // Check how many different event names exist in the file
-            const eventNames = new Set(existingData.map(record => record.event_name).filter(Boolean));
-            if (eventNames.size > 1) {
-              console.log(`WARNING: CSV file for event ${eventId} contains ${eventNames.size} different event names: ${[...eventNames].join(', ')}`);
-            }
+                        const eventNames = new Set(existingData.map(record => record.event_name).filter(Boolean));
           }
         } catch (e) {
           // Ignore errors when checking existing file
         }
-        
-        fs.unlinkSync(eventFilePath);
-        console.log(`Deleted old CSV file: ${eventFilePath}`);
+                        fs.unlinkSync(eventFilePath);
       }
     } catch (error) {
       console.error(`Error deleting old CSV file: ${error.message}`);
@@ -275,11 +266,7 @@ class InventoryController {
         
         // Save event-specific data to event-specific file
         saveInventoryToCSV(eventSpecificData, eventFilePath);
-        
-        console.log(`Saved ${eventSpecificData.length} records specific to event ${eventId} to ${eventFilePath}`);
       }
-      
-      console.log(`Saved ${this.inventoryData.length} total inventory records to ${filePath}`);
       
       // Update the event's last processed timestamp
       if (eventId) {
@@ -366,9 +353,7 @@ class InventoryController {
           r.event_name && r.event_name !== eventName
         );
         
-        if (differentEventNames.length > 0) {
-          console.warn(`Warning: ${differentEventNames.length} records have different event names than the primary event "${eventName}"`);
-        }
+                // Skip logging if different event names found
       }
       
       // Validate all records
@@ -724,7 +709,6 @@ class InventoryController {
           const eventNames = new Set(data.map(record => record.event_name).filter(Boolean));
           
           if (eventNames.size > 1) {
-            console.log(`Fixing: CSV file for event ${eventId} contains ${eventNames.size} different event names: ${[...eventNames].join(', ')}`);
             problemsFound++;
             
             // Find legitimate records for this event
@@ -736,10 +720,7 @@ class InventoryController {
             if (eventData.length > 0) {
               // Rewrite file with only the proper records
               saveInventoryToCSV(eventData, filePath);
-              console.log(`Fixed event ${eventId} CSV - removed ${data.length - eventData.length} records from other events`);
               cleanedFiles++;
-            } else {
-              console.log(`No legitimate records found for event ${eventId} - file may need to be regenerated`);
             }
           }
         } catch (error) {
@@ -791,7 +772,7 @@ class InventoryController {
           };
         });
       
-      console.log(`Found ${eventFiles.length} total event CSV files`);
+      // Found event CSV files
       
       if (eventFiles.length === 0) {
         return {
@@ -812,8 +793,7 @@ class InventoryController {
       const eventsWithChanges = recentlyUpdatedFiles.filter(file => file.hadChanges).length;
       const eventsWithoutChanges = recentlyUpdatedFiles.length - eventsWithChanges;
       
-      console.log(`Found ${recentlyUpdatedFiles.length} recently updated event CSV files (within last 6 minutes)`);
-      console.log(`Events with changes: ${eventsWithChanges}, Events without changes (timestamp only): ${eventsWithoutChanges}`);
+            // Found recently updated files
       
       if (recentlyUpdatedFiles.length === 0 && !isNewCycle) {
         return {

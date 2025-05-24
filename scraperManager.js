@@ -604,7 +604,7 @@ export class ScraperManager {
             
             // Cache the headers
             this.headersCache.set(eventToUse, standardizedHeaders);
-            this.headerRefreshTimestamps.set(eventToUse, moment());
+          this.headerRefreshTimestamps.set(eventToUse, moment());
             
             return standardizedHeaders;
           }
@@ -1414,14 +1414,14 @@ export class ScraperManager {
         
         // Use passed headers only if they're fresh enough (less than 15 minutes old)
         if (!needsFreshCookies && passedHeadersAge < SESSION_REFRESH_INTERVAL) {
-          headers = passedHeaders;
+        headers = passedHeaders;
           if (LOG_LEVEL >= 2) {
-            this.logWithTime(
+          this.logWithTime(
               `Using passed headers for event ${eventId} from batch processing (age: ${Math.floor(passedHeadersAge/1000)}s)`,
               "info"
-            );
-          }
-        } else {
+          );
+        }
+      } else {
           if (LOG_LEVEL >= 2) {
             this.logWithTime(
               `Passed headers too old (${Math.floor(passedHeadersAge/1000)}s) or retry attempt (${retryCount}), getting fresh cookies`,
@@ -1486,11 +1486,11 @@ export class ScraperManager {
         if (!headers) {
           // For retries or no recent headers, always force refresh
           if (needsFreshCookies) {
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `Getting fresh headers for event ${eventId}${
-                  retryCount > 0 ? " (retry attempt)" : ""
-                }`,
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Getting fresh headers for event ${eventId}${
+                retryCount > 0 ? " (retry attempt)" : ""
+              }`,
                 "info"
               );
             }
@@ -1506,19 +1506,19 @@ export class ScraperManager {
             
             headers = await this.refreshEventHeaders(randomEventId, true);
             usedFreshCookies = true;
-          } else {
+        } else {
             // Check if we have recent headers
             const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
             const cookieAge = Date.now() - lastRefresh;
             
             // Use cached headers only if they're fresh enough
             if (cookieAge < SESSION_REFRESH_INTERVAL / 2) {
-              headers = this.headersCache.get(eventId);
+          headers = this.headersCache.get(eventId);
               if (LOG_LEVEL >= 2) {
-                this.logWithTime(
-                  `Using cached headers for event ${eventId} (age: ${Math.floor(
-                    cookieAge / 1000
-                  )}s)`,
+            this.logWithTime(
+              `Using cached headers for event ${eventId} (age: ${Math.floor(
+                cookieAge / 1000
+              )}s)`,
                   "info"
                 );
               }
@@ -1546,7 +1546,7 @@ export class ScraperManager {
           }
 
           // If headers still aren't available, force one last refresh
-          if (!headers) {
+        if (!headers) {
             if (LOG_LEVEL >= 1) {
               this.logWithTime(
                 `No headers available for ${eventId}, forcing final refresh`,
@@ -2258,23 +2258,23 @@ export class ScraperManager {
                   continue;
                 }
 
-                // Process this individual event with its retry count
+                        // Process this individual event with its retry count
                 await this.scrapeEvent(job.eventId, job.retryCount);
 
-                // Remove from retry queue if successful
-                this.retryQueue = this.retryQueue.filter(
-                  (item) => item.eventId !== job.eventId
-                );
+                        // Remove from retry queue if successful
+                        this.retryQueue = this.retryQueue.filter(
+                          (item) => item.eventId !== job.eventId
+                        );
 
                 // Small pause between events
                 await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing retry event ${job.eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
+                      } catch (error) {
+                        this.logWithTime(
+                          `Error processing retry event ${job.eventId}: ${error.message}`,
+                          "error"
+                        );
+                      }
+                }
           }
 
           // Get regular events to process
@@ -2290,24 +2290,24 @@ export class ScraperManager {
             for (const eventId of events) {
               if (!this.isRunning) break;
 
-              try {
-                // Skip if already being processed
+                try {
+                  // Skip if already being processed
                 if (this.shouldSkipEvent(eventId)) {
                   continue;
                 }
 
-                // Process this individual event
+                        // Process this individual event
                 await this.scrapeEvent(eventId, 0);
 
                 // Small pause between events
                 await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
+                      } catch (error) {
+                        this.logWithTime(
+                          `Error processing event ${eventId}: ${error.message}`,
+                          "error"
+                        );
+                      }
+                }
           } else {
             this.logWithTime("No events to process at this time", "info");
           }
@@ -2327,21 +2327,21 @@ export class ScraperManager {
               try {
                 // Skip if in cooldown or already being processed
                 if (this.shouldSkipEvent(eventId)) {
-                  continue;
-                }
+                continue;
+              }
 
                 // Process this failed event
-                const failureCount = this.getRecentFailureCount(eventId);
+              const failureCount = this.getRecentFailureCount(eventId);
                 await this.scrapeEvent(eventId, failureCount);
 
                 // Small pause between events
                 await setTimeout(200);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing failed event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
+                        } catch (error) {
+                          this.logWithTime(
+                            `Error processing failed event ${eventId}: ${error.message}`,
+                            "error"
+                          );
+                        }
             }
           }
 
