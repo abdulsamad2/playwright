@@ -902,11 +902,11 @@ class InventoryController {
           
           if (hasChanged) {
             // If record has changed, use a new inventory_id
-            console.log(`Record changed: ${key} - Using new inventory_id`);
+            // console.log(`Record changed: ${key} - Using new inventory_id`);
             // Record is already new, so use its inventory_id
           } else {
             // If record is unchanged, preserve the existing inventory_id
-            console.log(`Record unchanged: ${key} - Preserving inventory_id`);
+            // console.log(`Record unchanged: ${key} - Preserving inventory_id`);
             record.inventory_id = existingRecord.inventory_id;
           }
         }
@@ -939,20 +939,20 @@ class InventoryController {
         // Ensure event_id is always present before formatting
         if (!record.event_id && record.mapping_id) {
           record.event_id = record.mapping_id;
-          console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
+          // console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
         } else if (!record.mapping_id && record.event_id) {
           record.mapping_id = record.event_id;
-          console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
+          // console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
         } else if (!record.event_id && !record.mapping_id && record.source_event_id) {
           // Use source_event_id as a fallback
           record.event_id = record.source_event_id;
           record.mapping_id = record.source_event_id;
-          console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
+          // console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
         }
         
         // Final check to ensure neither is empty
         if (!record.event_id || !record.mapping_id) {
-          console.warn(`WARNING: Record may have missing ID fields: section=${record.section}, row=${record.row}, event_id=${record.event_id || 'MISSING'}, mapping_id=${record.mapping_id || 'MISSING'}`);
+          // console.warn(`WARNING: Record may have missing ID fields: section=${record.section}, row=${record.row}, event_id=${record.event_id || 'MISSING'}, mapping_id=${record.mapping_id || 'MISSING'}`);
         }
         
         return formatInventoryForExport(record);

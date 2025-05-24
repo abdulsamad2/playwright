@@ -14,7 +14,6 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 
-// Add this at the top of the file, after imports
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
@@ -1856,135 +1855,135 @@ export class ScraperManager {
 
   // Removed batch event processing - using simplified sequential processing with getEvents() instead
 
-  async startContinuousScraping() {
-    if (!this.isRunning) {
-      this.isRunning = true;
-      this.logWithTime("Starting standard sequential scraping...", "info");
+  // async startContinuousScraping() {
+  //   if (!this.isRunning) {
+  //     this.isRunning = true;
+  //     this.logWithTime("Starting standard sequential scraping...", "info");
 
-      // Main scraping loop
-      while (this.isRunning) {
-        try {
-          // Process events from retry queue first
-          const retryEvents = this.getRetryEventsToProcess();
+  //     // Main scraping loop
+  //     while (this.isRunning) {
+  //       try {
+  //         // Process events from retry queue first
+  //         const retryEvents = this.getRetryEventsToProcess();
 
-          if (retryEvents.length > 0) {
-            this.logWithTime(
-              `Processing ${retryEvents.length} events from retry queue sequentially`,
-              "info"
-            );
+  //         if (retryEvents.length > 0) {
+  //           this.logWithTime(
+  //             `Processing ${retryEvents.length} events from retry queue sequentially`,
+  //             "info"
+  //           );
 
-            // Process each event sequentially
-            for (const job of retryEvents) {
-              if (!this.isRunning) break;
+  //           // Process each event sequentially
+  //           for (const job of retryEvents) {
+  //             if (!this.isRunning) break;
 
-              try {
-                // Process this individual event with its retry count
-                await this.scrapeEvent(job.eventId, job.retryCount);
+  //             try {
+  //               // Process this individual event with its retry count
+  //               await this.scrapeEvent(job.eventId, job.retryCount);
 
-                // Remove from retry queue if successful
-                this.retryQueue = this.retryQueue.filter(
-                  (item) => item.eventId !== job.eventId
-                );
+  //               // Remove from retry queue if successful
+  //               this.retryQueue = this.retryQueue.filter(
+  //                 (item) => item.eventId !== job.eventId
+  //               );
 
-                // Small pause between events
-                await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing retry event ${job.eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
-          }
+  //               // Small pause between events
+  //               await setTimeout(100);
+  //             } catch (error) {
+  //               this.logWithTime(
+  //                 `Error processing retry event ${job.eventId}: ${error.message}`,
+  //                 "error"
+  //               );
+  //             }
+  //           }
+  //         }
 
-          // Get regular events to process
-          const events = await this.getEvents();
+  //         // Get regular events to process
+  //         const events = await this.getEvents();
 
-          if (events.length > 0) {
-            this.logWithTime(
-              `Processing ${events.length} events sequentially`,
-              "info"
-            );
+  //         if (events.length > 0) {
+  //           this.logWithTime(
+  //             `Processing ${events.length} events sequentially`,
+  //             "info"
+  //           );
 
-            // Process each event sequentially
-            for (const eventId of events) {
-              if (!this.isRunning) break;
+  //           // Process each event sequentially
+  //           for (const eventId of events) {
+  //             if (!this.isRunning) break;
 
-              try {
-                // Skip if already being processed
-                if (this.processingEvents.has(eventId)) {
-                  continue;
-                }
+  //             try {
+  //               // Skip if already being processed
+  //               if (this.processingEvents.has(eventId)) {
+  //                 continue;
+  //               }
 
-                // Process this individual event
-                await this.scrapeEvent(eventId, 0);
+  //               // Process this individual event
+  //               await this.scrapeEvent(eventId, 0);
 
-                // Small pause between events
-                await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
-          } else {
-            this.logWithTime("No events to process at this time", "info");
-          }
+  //               // Small pause between events
+  //               await setTimeout(100);
+  //             } catch (error) {
+  //               this.logWithTime(
+  //                 `Error processing event ${eventId}: ${error.message}`,
+  //                 "error"
+  //               );
+  //             }
+  //           }
+  //         } else {
+  //           this.logWithTime("No events to process at this time", "info");
+  //         }
 
-          // Process failed events
-          const failedEvents = Array.from(this.failedEvents);
+  //         // Process failed events
+  //         const failedEvents = Array.from(this.failedEvents);
 
-          if (failedEvents.length > 0) {
-            this.logWithTime(
-              `Processing ${failedEvents.length} failed events sequentially`,
-              "info"
-            );
+  //         if (failedEvents.length > 0) {
+  //           this.logWithTime(
+  //             `Processing ${failedEvents.length} failed events sequentially`,
+  //             "info"
+  //           );
 
-            for (const eventId of failedEvents) {
-              if (!this.isRunning) break;
+  //           for (const eventId of failedEvents) {
+  //             if (!this.isRunning) break;
 
-              try {
-                // Skip if in cooldown
-                const now = moment();
-                if (
-                  this.cooldownEvents.has(eventId) &&
-                  now.isBefore(this.cooldownEvents.get(eventId))
-                ) {
-                  continue;
-                }
+  //             try {
+  //               // Skip if in cooldown
+  //               const now = moment();
+  //               if (
+  //                 this.cooldownEvents.has(eventId) &&
+  //                 now.isBefore(this.cooldownEvents.get(eventId))
+  //               ) {
+  //                 continue;
+  //               }
 
-                // Skip if already being processed
-                if (this.processingEvents.has(eventId)) {
-                  continue;
-                }
+  //               // Skip if already being processed
+  //               if (this.processingEvents.has(eventId)) {
+  //                 continue;
+  //               }
 
-                // Process this failed event
-                const failureCount = this.getRecentFailureCount(eventId);
-                await this.scrapeEvent(eventId, failureCount);
+  //               // Process this failed event
+  //               const failureCount = this.getRecentFailureCount(eventId);
+  //               await this.scrapeEvent(eventId, failureCount);
 
-                // Small pause between events
-                await setTimeout(200);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing failed event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
-          }
+  //               // Small pause between events
+  //               await setTimeout(200);
+  //             } catch (error) {
+  //               this.logWithTime(
+  //                 `Error processing failed event ${eventId}: ${error.message}`,
+  //                 "error"
+  //               );
+  //             }
+  //           }
+  //         }
 
-          // Add a dynamic pause to avoid overloading
-          const pauseTime = this.getAdaptivePauseTime();
-          await setTimeout(pauseTime);
-        } catch (error) {
-          console.error(`Error in scraping loop: ${error.message}`);
-          // Brief pause on error to avoid spinning
-          await setTimeout(1000);
-        }
-      }
-    }
-  }
+  //         // Add a dynamic pause to avoid overloading
+  //         const pauseTime = this.getAdaptivePauseTime();
+  //         await setTimeout(pauseTime);
+  //       } catch (error) {
+  //         console.error(`Error in scraping loop: ${error.message}`);
+  //         // Brief pause on error to avoid spinning
+  //         await setTimeout(1000);
+  //       }
+  //     }
+  //   }
+  // }
 
   // Helper method to get retry events ready to process
   getRetryEventsToProcess() {
@@ -2012,7 +2011,7 @@ export class ScraperManager {
 
   async captureCookies(page, fingerprint) {
     let retryCount = 0;
-    const MAX_RETRIES = 5;
+    const MAX_RETRIES = 7;
 
     while (retryCount < MAX_RETRIES) {
       try {
