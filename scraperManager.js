@@ -2302,33 +2302,90 @@ export class ScraperManager {
           const events = await this.getEvents();
 
           if (events.length > 0) {
-            this.logWithTime(
-              `Processing ${events.length} events sequentially`,
-              "info"
-            );
-
-            // Process each event sequentially
+            // Check for critical events approaching 3-minute limit
+            const now = moment();
+            const criticalEvents = [];
+            const regularEvents = [];
+            
+            // Identify critical events (approaching 3-minute deadline)
             for (const eventId of events) {
-              if (!this.isRunning) break;
-
+              if (this.shouldSkipEvent(eventId)) {
+                continue;
+              }
+              
+              const lastUpdated = this.eventUpdateTimestamps.get(eventId);
+              if (!lastUpdated) {
+                // Never updated - consider critical
+                criticalEvents.push(eventId);
+                continue;
+              }
+              
+              const timeSinceUpdate = now.diff(lastUpdated);
+              // If less than 30 seconds left before hitting 3-minute mark
+              if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 30000) {
+                criticalEvents.push(eventId);
+              } else {
+                regularEvents.push(eventId);
+              }
+            }
+            
+            // Process critical events in parallel
+            if (criticalEvents.length > 0) {
+              this.logWithTime(
+                `URGENT: Processing ${criticalEvents.length} critical events in parallel (approaching 3-min deadline)`,
+                "warning"
+              );
+              
+              // Use Promise.all with a limit on concurrency
+              const MAX_PARALLEL = Math.min(criticalEvents.length, Math.ceil(CONCURRENT_LIMIT / 2));
+              
+              // Process in batches to avoid overloading
+              for (let i = 0; i < criticalEvents.length; i += MAX_PARALLEL) {
+                const batch = criticalEvents.slice(i, i + MAX_PARALLEL);
+                const promises = batch.map(eventId => {
+                  return this.scrapeEvent(eventId, 0).catch(error => {
+                    this.logWithTime(
+                      `Error processing critical event ${eventId}: ${error.message}`,
+                      "error"
+                    );
+                  });
+                });
+                
+                // Wait for this batch to complete before starting the next
+                await Promise.all(promises);
+              }
+            }
+            
+            // Process remaining events sequentially
+            if (regularEvents.length > 0) {
+              this.logWithTime(
+                `Processing ${regularEvents.length} regular events sequentially`,
+                "info"
+              );
+              
+              // Process each event sequentially
+              for (const eventId of regularEvents) {
+                if (!this.isRunning) break;
+                
                 try {
-                  // Skip if already being processed
-                if (this.shouldSkipEvent(eventId)) {
-                  continue;
+                  // Skip if now being processed (double-check)
+                  if (this.shouldSkipEvent(eventId)) {
+                    continue;
+                  }
+                  
+                  // Process this individual event
+                  await this.scrapeEvent(eventId, 0);
+                  
+                  // Small pause between events
+                  await setTimeout(100);
+                } catch (error) {
+                  this.logWithTime(
+                    `Error processing event ${eventId}: ${error.message}`,
+                    "error"
+                  );
                 }
-
-                        // Process this individual event
-                await this.scrapeEvent(eventId, 0);
-
-                // Small pause between events
-                await setTimeout(100);
-                      } catch (error) {
-                        this.logWithTime(
-                          `Error processing event ${eventId}: ${error.message}`,
-                          "error"
-                        );
-                      }
-                }
+              }
+            }
           } else {
             this.logWithTime("No events to process at this time", "info");
           }
