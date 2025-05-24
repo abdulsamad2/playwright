@@ -319,6 +319,16 @@ class ProxyManager {
   getTotalProxies() {
     return this.proxies.length;
   }
+  
+  /**
+   * Compatibility method for legacy code that calls getProxy()
+   * @returns {Object} The selected proxy object
+   */
+  getProxy() {
+    // For backward compatibility, just return a random proxy for any event
+    this.log("Using compatibility getProxy() method", "info");
+    return this.getProxyForEvent('random');
+  }
 }
 
 export default ProxyManager; 

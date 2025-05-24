@@ -19,7 +19,8 @@ export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_co
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = Math.max(60, Math.floor(cpus().length * 5)); // Dramatically increased for maximum parallel processing
 const MAX_RETRIES = 15; // Updated from 10 per request of user
-const SCRAPE_TIMEOUT = 60000; // Increased from 35000 to 60 seconds
+const SCRAPE_TIMEOUT = 60000; // Standard timeout for sequential scraping (60 seconds)
+const PARALLEL_SCRAPE_TIMEOUT = 180000; // Extended timeout for parallel scraping (3 minutes)
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 4, 120); // Significantly increased batch size for bulk processing
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 120000; // Minimum 1 minute between scrapes (allowing for 2-minute updates)
@@ -2336,14 +2337,15 @@ export class ScraperManager {
                 "warning"
               );
               
-              // Use Promise.all with a limit on concurrency
-              const MAX_PARALLEL = Math.min(criticalEvents.length, Math.ceil(CONCURRENT_LIMIT / 2));
+              // Limit parallel processing to maximum 5 events at a time
+              const MAX_PARALLEL = Math.min(criticalEvents.length, 5); // Hard limit of 5 parallel events
               
               // Process in batches to avoid overloading
               for (let i = 0; i < criticalEvents.length; i += MAX_PARALLEL) {
                 const batch = criticalEvents.slice(i, i + MAX_PARALLEL);
                 const promises = batch.map(eventId => {
-                  return this.scrapeEvent(eventId, 0).catch(error => {
+                  // Use longer timeout for parallel scraping
+                  return this.scrapeEvent(eventId, 0, null, null, null, PARALLEL_SCRAPE_TIMEOUT).catch(error => {
                     this.logWithTime(
                       `Error processing critical event ${eventId}: ${error.message}`,
                       "error"
