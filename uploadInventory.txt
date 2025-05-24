@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import inventoryController from './controllers/inventoryController.js';
+import { ENABLE_CSV_UPLOAD } from './scraperManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -57,6 +58,12 @@ async function uploadFile(syncService, filePath) {
 // Main upload function
 async function uploadInventoryCycle() {
   try {
+    // Check if CSV uploads are enabled
+    if (!ENABLE_CSV_UPLOAD) {
+      console.log('CSV uploads are disabled (ENABLE_CSV_UPLOAD=false). Skipping upload cycle.');
+      return;
+    }
+    
     console.log('Starting inventory upload cycle at', new Date().toISOString());
     
     // Ensure blank CSV exists
@@ -90,6 +97,13 @@ async function uploadInventoryCycle() {
 // Start the continuous upload process
 async function startContinuousUpload() {
   try {
+    // Check if CSV uploads are enabled
+    if (!ENABLE_CSV_UPLOAD) {
+      console.log('CSV uploads are disabled (ENABLE_CSV_UPLOAD=false in scraperManager.js).');
+      console.log('To enable uploads, set ENABLE_CSV_UPLOAD=true in scraperManager.js and restart.');
+      return;
+    }
+    
     // Run immediately on startup
     await uploadInventoryCycle();
     
