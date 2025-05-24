@@ -1834,16 +1834,26 @@ async function refreshCookiesPeriodically() {
       }
       
       // Fallback: Try to find an active event ID from scraper manager
-      if (!eventId && typeof ScraperManager !== 'undefined' && ScraperManager.getActiveEvents) {
+      if (!eventId) {
         try {
-          const activeEvents = ScraperManager.getActiveEvents();
-          if (activeEvents.length > 0) {
-            // Choose a random event from active ones
-            eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
-            console.log(`Using ScraperManager event ${eventId} for cookie refresh (database fallback)`);
+          // Use the imported scraperManager instead of ScraperManager global
+          if (scraperManager && typeof scraperManager.getActiveEvents === 'function') {
+            const activeEvents = scraperManager.getActiveEvents();
+            if (activeEvents && activeEvents.length > 0) {
+              // Choose a random event from active ones
+              eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
+              console.log(`Using scraperManager event ${eventId} for cookie refresh (database fallback)`);
+            }
+          } else if (scraperManager && scraperManager.activeJobs && scraperManager.activeJobs.size > 0) {
+            // Alternative approach: get event IDs from activeJobs Map
+            const activeEventIds = Array.from(scraperManager.activeJobs.keys());
+            if (activeEventIds.length > 0) {
+              eventId = activeEventIds[Math.floor(Math.random() * activeEventIds.length)];
+              console.log(`Using scraperManager activeJobs event ${eventId} for cookie refresh (fallback)`);
+            }
           }
         } catch (error) {
-          console.warn('Failed to get active events from ScraperManager:', error.message);
+          console.warn('Failed to get active events from scraperManager:', error.message);
         }
       }
       
@@ -1853,7 +1863,8 @@ async function refreshCookiesPeriodically() {
       }
       
       // Get the proxy to use for refresh
-      const proxyData = await GetProxy();
+      const proxyManager = new ProxyManager();
+      const proxyData = proxyManager.getProxy();
       
       // Start tracking this refresh operation
       if (!refreshRecord) {

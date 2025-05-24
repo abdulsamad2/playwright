@@ -37,6 +37,10 @@ const eventSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    broadcasting: {
+      type: Boolean,
+      default: false,
+    },
     inHandDate: {
       type: Date,
       default: Date.now,

@@ -7,6 +7,8 @@ import {
   stopEventScraping,
   deleteEvent,
   downloadEventCsv,
+  startEventBroadcast,
+  stopEventBroadcast,
 } from "../controllers/eventController.js";
 
 const router = express.Router();
@@ -17,6 +19,10 @@ router.post("/", createEvent);
 router.post("/:eventId/start", startEventScraping);
 router.post("/:eventId/stop", stopEventScraping);
 router.delete("/:eventId", deleteEvent);
+
+// Broadcast routes
+router.post("/:eventId/broadcast/start", startEventBroadcast);
+router.post("/:eventId/broadcast/stop", stopEventBroadcast);
 
 // Add CSV download route
 router.get("/:eventId/inventory/csv", downloadEventCsv);

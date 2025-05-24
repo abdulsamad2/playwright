@@ -2,6 +2,7 @@ import { Event, ConsecutiveGroup, ErrorLog } from "../models/index.js";
 import scraperManager from "../scraperManager.js";
 import fs from 'fs';
 import path from 'path';
+import broadcastManager from "../helpers/BroadcastManager.js";
 
 // Initialize scraper manager
 
@@ -9,10 +10,11 @@ export const getAllEvents = async (req, res) => {
   try {
     const events = await Event.find().sort({ Last_Updated: -1 });
 
-    // Add active status to each event
+    // Add active and broadcasting status to each event
     const eventsWithStatus = events.map((event) => ({
       ...event.toObject(),
       isActive: scraperManager.activeJobs.has(event.Event_ID),
+      isBroadcasting: event.broadcasting || broadcastManager.isBroadcasting(event.Event_ID),
     }));
 
     res.json({
@@ -270,6 +272,96 @@ export const deleteEvent = async (req, res) => {
     res.status(500).json({
       status: "error",
       message: error.message,
+    });
+  }
+};
+
+/**
+ * Start broadcasting an event (include it in the combined CSV)
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+export const startEventBroadcast = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    // Find the event
+    const event = await Event.findOne({ Event_ID: eventId });
+
+    if (!event) {
+      return res.status(404).json({
+        status: "error",
+        message: "Event not found"
+      });
+    }
+
+    // Update broadcasting status in database
+    await Event.updateOne(
+      { Event_ID: eventId },
+      { broadcasting: true }
+    );
+
+    // Update in broadcast manager
+    broadcastManager.startBroadcast(eventId);
+
+    res.json({
+      status: "success",
+      message: `Broadcasting started for event ${eventId}`,
+      data: {
+        eventId,
+        broadcasting: true
+      }
+    });
+  } catch (error) {
+    console.error(`Error starting broadcast: ${error.message}`);
+    res.status(500).json({
+      status: "error",
+      message: error.message
+    });
+  }
+};
+
+/**
+ * Stop broadcasting an event (exclude it from the combined CSV)
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+export const stopEventBroadcast = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    // Find the event
+    const event = await Event.findOne({ Event_ID: eventId });
+
+    if (!event) {
+      return res.status(404).json({
+        status: "error",
+        message: "Event not found"
+      });
+    }
+
+    // Update broadcasting status in database
+    await Event.updateOne(
+      { Event_ID: eventId },
+      { broadcasting: false }
+    );
+
+    // Update in broadcast manager
+    broadcastManager.stopBroadcast(eventId);
+
+    res.json({
+      status: "success",
+      message: `Broadcasting stopped for event ${eventId}`,
+      data: {
+        eventId,
+        broadcasting: false
+      }
+    });
+  } catch (error) {
+    console.error(`Error stopping broadcast: ${error.message}`);
+    res.status(500).json({
+      status: "error",
+      message: error.message
     });
   }
 };

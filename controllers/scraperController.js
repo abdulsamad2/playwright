@@ -48,7 +48,7 @@ export const stopScraper = (req, res) => {
       });
     }
 
-    scraperManager.stop();
+    scraperManager.stopContinuousScraping();
 
     res.json({
       status: "success",

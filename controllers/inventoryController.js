@@ -749,28 +749,50 @@ class InventoryController {
    */
   generateCombinedEventsCSV(isNewCycle = false) {
     try {
-      // Get all event CSV files from the data directory
-      const eventFiles = fs.readdirSync(DATA_DIR)
-        .filter(file => file.startsWith('event_') && file.endsWith('.csv'))
-        .map(file => {
-          const filePath = path.join(DATA_DIR, file);
-          // Get file stats to check modification time
-          const stats = fs.statSync(filePath);
-          // Extract eventId from filename
-          const eventId = file.replace('event_', '').replace('.csv', '');
+      // Import BroadcastManager and Event model
+      const broadcastManagerPromise = import('../helpers/BroadcastManager.js');
+      const eventModelPromise = import('../models/index.js');
+      
+      // Use Promise.all to load both modules concurrently
+      return Promise.all([broadcastManagerPromise, eventModelPromise])
+        .then(async ([broadcastModule, modelsModule]) => {
+          const broadcastManager = broadcastModule.default;
+          const { Event } = modelsModule;
           
-          // Check if this event had changes in the current cycle
-          const hadChanges = this.scrapeCycle.events[eventId]?.hadChanges === true;
+          // Get all broadcasting events from the database
+          const broadcastingEvents = await Event.find({ broadcasting: true }).select('Event_ID').lean();
+          const broadcastingEventIds = new Set([
+            ...broadcastingEvents.map(event => event.Event_ID),
+            ...broadcastManager.getBroadcastingEvents()
+          ]);
           
-          return {
-            path: filePath,
-            fileName: file,
-            eventId: eventId,
-            lastModified: stats.mtime,
-            size: stats.size,
-            hadChanges: hadChanges
-          };
-        });
+          // Get all event CSV files from the data directory
+          const eventFiles = fs.readdirSync(DATA_DIR)
+            .filter(file => file.startsWith('event_') && file.endsWith('.csv'))
+            .map(file => {
+              const filePath = path.join(DATA_DIR, file);
+              // Get file stats to check modification time
+              const stats = fs.statSync(filePath);
+              // Extract eventId from filename
+              const eventId = file.replace('event_', '').replace('.csv', '');
+              
+              // Check if this event had changes in the current cycle
+              const hadChanges = this.scrapeCycle.events[eventId]?.hadChanges === true;
+              // Check if this event is being broadcasted
+              const isBroadcasting = broadcastingEventIds.has(eventId);
+              
+              return {
+                path: filePath,
+                fileName: file,
+                eventId: eventId,
+                lastModified: stats.mtime,
+                size: stats.size,
+                hadChanges: hadChanges,
+                isBroadcasting: isBroadcasting
+              };
+            })
+            // Filter out events that are not being broadcasted
+            .filter(file => file.isBroadcasting);
       
       // Found event CSV files
       
@@ -977,7 +999,6 @@ class InventoryController {
       
       // Verify the saved file has the correct headers
       try {
-        const fs = require('fs');
         const fileContent = fs.readFileSync(COMBINED_EVENTS_FILE, 'utf8');
         const firstLine = fileContent.split('\n')[0];
         
@@ -999,19 +1020,31 @@ class InventoryController {
         message: `Combined ${recentlyUpdatedFiles.length} recently updated event files into a single CSV with ${finalRecords.length} records`,
         filePath: COMBINED_EVENTS_FILE
       };
-    } catch (error) {
+    })
+    .catch(error => {
       console.error(`Error generating combined CSV: ${error.message}`);
       return {
         success: false,
         message: `Error generating combined CSV: ${error.message}`,
         filePath: null
       };
-    }
+    });
+  } catch (error) {
+    console.error(`Error setting up combined CSV generation: ${error.message}`);
+    return {
+      success: false,
+      message: `Error setting up combined CSV generation: ${error.message}`,
+      filePath: null
+    };
+  }
   }
 }
 
-// Create and export singleton instance
+// Create singleton instance
 const inventoryController = new InventoryController();
+
+// Export the singleton instance as default
+export default inventoryController;
 
 // Add cleanup method to be accessible from outside
 export const cleanupEventCsvFiles = () => {
@@ -1030,6 +1063,4 @@ export const startScrapeCycle = (eventIds) => {
 
 export const markEventScraped = (eventId) => {
   return inventoryController.markEventScraped(eventId);
-};
-
-export default inventoryController; 
+}; 
