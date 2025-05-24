@@ -35,8 +35,9 @@ const LONG_COOLDOWN_MINUTES = 1; // Reduced to 1 minute for more frequent retrie
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 1; // Default to warnings and errors only
 
-// Cookie expiration threshold: refresh cookies every 20 minutes
-const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (matched with COOKIE_EXPIRATION_MS)
+// Cookie expiration threshold: refresh cookies every 15 minutes
+const COOKIE_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
+const SESSION_REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes for session refresh
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const USER_AGENT_POOL = [
@@ -85,13 +86,14 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000,
-  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (matched with COOKIE_EXPIRATION_MS)
+  COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced for more frequent rotation)
   MAX_COOKIE_AGE:   30 * 60 * 60 * 1000,
   COOKIE_ROTATION: {
     ENABLED: true,
     MAX_STORED_COOKIES: 100,
-    ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes (matched with COOKIE_EXPIRATION_MS)
+    ROTATION_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced for more frequent rotation)
     LAST_ROTATION: Date.now(),
+    ENFORCE_UNIQUE: true, // Ensure unique cookies are generated
   },
 };
 
@@ -141,6 +143,10 @@ export class ScraperManager {
 
     // Initialize SessionManager for robust session handling
     this.sessionManager = new SessionManager(this);
+    
+    // Setup cookie rotation tracking
+    this.cookieRotationIntervalId = null;
+    this.lastCookieRotation = Date.now();
 
     // New: Data caching and API error handling
     this.headerRotationPool = []; // Pool of working headers
@@ -346,100 +352,270 @@ export class ScraperManager {
     return false;
   }
 
-  async refreshEventHeaders(eventId) {
-    // Anti-bot: only fetch fresh cookies/headers when expired, add random UA, referer, IP, and request ID
+  async refreshEventHeaders(eventId, forceRefresh = false) {
+    // Anti-bot: Aggressively fetch fresh cookies/headers with 15-minute refresh cycle
     try {
-      // Always get a random event ID from the database for cookie refresh
+      // ALWAYS use random event IDs for cookie refresh, never the original eventId
       let eventToUse;
+      
+      // Try multiple ways to get random event IDs to ensure we always get one
       try {
-        // Get a random active event from the database with specific criteria
-        const randomEvent = await Event.aggregate([
+        // First attempt: Get multiple random active events from the database 
+        const randomEvents = await Event.aggregate([
           {
             $match: {
               Skip_Scraping: { $ne: true },
               url: { $exists: true, $ne: "" },
             },
           },
-          { $sample: { size: 5 } },
+          { $sample: { size: 20 } }, // Increased to 20 for even more diversity
           { $project: { Event_ID: 1, url: 1 } },
         ]);
 
-        if (randomEvent && randomEvent.length > 0) {
-          const selectedEvent =
-            randomEvent[Math.floor(Math.random() * randomEvent.length)];
+        if (randomEvents && randomEvents.length > 0) {
+          // Select a truly random event (not timestamp-based) for better cookie diversity
+          const randomIndex = Math.floor(Math.random() * randomEvents.length);
+          const selectedEvent = randomEvents[randomIndex];
           eventToUse = selectedEvent.Event_ID;
-          if (LOG_LEVEL >= 2) {
+          
+          if (LOG_LEVEL >= 1) { // Increased to level 1 for visibility
             this.logWithTime(
-              `Using random event ${eventToUse} for cookie refresh`,
-              "debug"
+              `Using random event ${eventToUse} for cookie refresh (original event: ${eventId})`,
+              "info" // Changed from "debug" to "info"
             );
           }
         } else {
-          eventToUse = eventId; // Fallback to provided eventId
+          // Second attempt: Try to get any random event ID from other data sources
+          try {
+            // Try to find any event from the failedEvents set
+            if (this.failedEvents.size > 0) {
+              const failedEventsArray = Array.from(this.failedEvents);
+              const randomFailedEvent = failedEventsArray[Math.floor(Math.random() * failedEventsArray.length)];
+              
+              // Make sure it's different from the original event ID
+              if (randomFailedEvent && randomFailedEvent !== eventId) {
+                eventToUse = randomFailedEvent;
+                this.logWithTime(
+                  `Using random failed event ${eventToUse} for cookie refresh`,
+                  "info"
+                );
+              }
+            }
+            
+            // If still no event, try from active jobs
+            if (!eventToUse && this.activeJobs.size > 0) {
+              const activeJobsArray = Array.from(this.activeJobs.keys());
+              const randomActiveEvent = activeJobsArray[Math.floor(Math.random() * activeJobsArray.length)];
+              
+              // Make sure it's different from the original event ID
+              if (randomActiveEvent && randomActiveEvent !== eventId) {
+                eventToUse = randomActiveEvent;
+                this.logWithTime(
+                  `Using random active event ${eventToUse} for cookie refresh`,
+                  "info"
+                );
+              }
+            }
+            
+            // If we still don't have a random event, try to use any cached event ID
+            if (!eventToUse) {
+              if (this.headerRefreshTimestamps.size > 0) {
+                // Use a random event ID from the cache that's different from the original
+                const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
+                const filteredEvents = cachedEvents.filter(id => id !== eventId);
+                if (filteredEvents.length > 0) {
+                  eventToUse = filteredEvents[Math.floor(Math.random() * filteredEvents.length)];
+                  this.logWithTime(
+                    `Using cached event ID ${eventToUse} for cookie refresh`,
+                    "info"
+                  );
+                } else {
+                  // If no suitable cached event, try a random one from the database again
+                  try {
+                    const broadQuery = await Event.findOne().sort({ Last_Updated: 1 }).limit(1).lean();
+                    if (broadQuery) {
+                      eventToUse = broadQuery.Event_ID;
+                      this.logWithTime(
+                        `Using fallback database event ${eventToUse} for cookie refresh`,
+                        "info"
+                      );
+                    } else {
+                      eventToUse = eventId; // Last resort: use original
+                      this.logWithTime(
+                        `No alternative events found, using original event ID ${eventToUse} for cookie refresh`,
+                        "warning"
+                      );
+                    }
+                  } catch (fallbackError) {
+                    eventToUse = eventId; // Last resort: use original
+                    this.logWithTime(
+                      `Fallback database query failed, using original event ID ${eventToUse} for cookie refresh`,
+                      "warning"
+                    );
+                  }
+                }
+              } else {
+                // No cached events available, try one more database query
+                try {
+                  const anyEvent = await Event.findOne().sort({ Last_Updated: 1 }).limit(1).lean();
+                  if (anyEvent) {
+                    eventToUse = anyEvent.Event_ID;
+                    this.logWithTime(
+                      `Using any available event ID ${eventToUse} for cookie refresh`,
+                      "info"
+                    );
+                  } else {
+                    eventToUse = eventId; // Last resort: use original
+                    this.logWithTime(
+                      `No events found in database, using original event ID ${eventToUse} for cookie refresh`,
+                      "warning"
+                    );
+                  }
+                } catch (dbFallbackError) {
+                  eventToUse = eventId; // Last resort: use original
+                  this.logWithTime(
+                    `Final database query failed, using original event ID ${eventToUse} for cookie refresh`,
+                    "warning"
+                  );
+                }
+              }
+            }
+          } catch (fallbackError) {
+            this.logWithTime(
+              `Error finding alternative random event: ${fallbackError.message}`,
+              "warning"
+            );
+            // Try to use the original event ID as last resort
+            eventToUse = eventId;
+            this.logWithTime(
+              `Falling back to original event ID ${eventToUse} for cookie refresh`,
+              "warning"
+            );
+          }
         }
       } catch (dbError) {
         this.logWithTime(
           `Error getting random event: ${dbError.message}`,
           "warning"
         );
-        eventToUse = eventId; // Fallback to provided eventId
+        
+        // Try to find any existing event ID in the cache
+        if (this.headerRefreshTimestamps.size > 0) {
+          const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
+          const filteredEvents = cachedEvents.filter(id => id !== eventId);
+          if (filteredEvents.length > 0) {
+            eventToUse = filteredEvents[Math.floor(Math.random() * filteredEvents.length)];
+            this.logWithTime(
+              `Using cached event ID ${eventToUse} for cookie refresh after database error`,
+              "warning"
+            );
+          } else {
+            // Last resort: use original eventId
+            eventToUse = eventId;
+            this.logWithTime(
+              `No alternative event IDs available, using original event ID ${eventToUse} for cookie refresh`,
+              "warning"
+            );
+          }
+        } else {
+          // Last resort: use original eventId
+          eventToUse = eventId;
+          this.logWithTime(
+            `No cached event IDs available, using original event ID ${eventToUse} for cookie refresh`,
+            "warning"
+          );
+        }
       }
 
       const eventDoc = await Event.findOne({ Event_ID: eventToUse })
         .select("url")
         .lean();
       const refererUrl = eventDoc?.url || "https://www.ticketmaster.com/";
-      const requestId =
-        Math.random().toString(36).substring(2, 10) +
-        "-" +
-        Date.now().toString(36);
+      
+      // More unique request ID format with microsecond precision
+      const requestId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+      
       const lastRefresh = this.headerRefreshTimestamps.get(eventToUse);
 
       // Generate a new X-Forwarded-For and X-Request-Id for each request
       const refreshedIpAndId = {
         "X-Forwarded-For": generateRandomIp(),
-        "X-Request-Id":
-          Math.random().toString(36).substring(2, 10) +
-          "-" +
-          Date.now().toString(36),
+        "X-Request-Id": requestId,
+        "X-Timestamp": Date.now().toString(),
+        "X-Unique-ID": uuidv4()
       };
 
-      // Check for stale cached headers - enforce 20-minute refresh interval
+      // More aggressive refresh interval (15 minutes)
       const effectiveExpirationTime = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL;
 
-      // Only refresh cookies/headers if they have expired
+      // Force refresh if requested or refresh interval exceeded
       if (
+        forceRefresh || 
         !lastRefresh ||
         moment().diff(lastRefresh) > effectiveExpirationTime
       ) {
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(`Refreshing headers for ${eventToUse}`, "debug");
+        if (LOG_LEVEL >= 1) { // Increased logging level for better visibility
+          this.logWithTime(`Refreshing headers for ${eventToUse} ${forceRefresh ? '(forced)' : ''}`, "info");
         }
 
         // Clear any stale headers from the cache
         this.headersCache.delete(eventToUse);
 
-        // Try to get fresh headers from rotation pool first
-        if (this.headerRotationPool.length > 0) {
-          const headerIndex = Math.floor(
-            Math.random() * this.headerRotationPool.length
-          );
-          const cachedHeaders = { ...this.headerRotationPool[headerIndex] };
-
-          // Update dynamic anti-bot fields
-          if (cachedHeaders.headers) {
-            cachedHeaders.headers = {
-              ...cachedHeaders.headers,
-              ...refreshedIpAndId,
+        // Skip rotation pool and always get fresh cookies
+        // This ensures we always have fresh, unique cookies
+        
+        // First attempt: Try with session manager
+        let sessionData = null;
+        try {
+          // Get a fresh session or create a new one
+          sessionData = await this.sessionManager.getSessionForEvent(eventToUse, null, true);
+          
+          if (sessionData && sessionData.cookies) {
+            this.logWithTime(
+              `Got fresh session for ${eventToUse} from session manager`,
+              "info"
+            );
+            
+            // Convert session cookies to headers
+            const cookieString = sessionData.cookies
+              .map((c) => `${c.name}=${c.value}`)
+              .join("; ");
+              
+            // Get random fingerprint for diversity
+            const fingerprint = sessionData.fingerprint || randomFingerprint();
+            
+            // Generate enhanced headers
+            const enhanced = generateEnhancedHeaders(fingerprint, cookieString);
+            
+            // Inject anti-bot fields
+            enhanced["Referer"] = refererUrl;
+            enhanced["X-Forwarded-For"] = refreshedIpAndId["X-Forwarded-For"];
+            enhanced["X-Request-Id"] = refreshedIpAndId["X-Request-Id"];
+            enhanced["X-Unique-ID"] = refreshedIpAndId["X-Unique-ID"];
+            
+            const standardizedHeaders = {
+              headers: enhanced,
+              cookies: sessionData.cookies,
+              fingerprint: fingerprint,
+              timestamp: Date.now(),
+              sessionId: sessionData.sessionId,
+              freshlyGenerated: true
             };
+            
+            // Cache the headers
+            this.headersCache.set(eventToUse, standardizedHeaders);
+            this.headerRefreshTimestamps.set(eventToUse, moment());
+            
+            return standardizedHeaders;
           }
-
-          // Update timestamp but don't overwrite the original headers
-          this.headerRefreshTimestamps.set(eventToUse, moment());
-          return cachedHeaders;
+        } catch (sessionError) {
+          this.logWithTime(
+            `Session manager error: ${sessionError.message}, trying direct refresh`,
+            "warning"
+          );
         }
 
-        // Get a random proxy for refreshing headers
+        // Second attempt: Get a random proxy for refreshing headers
         const { proxy: cookieProxy } =
           this.proxyManager.getProxyForEvent(eventToUse);
 
@@ -491,11 +667,14 @@ export class ScraperManager {
           enhanced["Referer"] = refererUrl;
           enhanced["X-Forwarded-For"] = refreshedIpAndId["X-Forwarded-For"];
           enhanced["X-Request-Id"] = refreshedIpAndId["X-Request-Id"];
+          enhanced["X-Unique-ID"] = refreshedIpAndId["X-Unique-ID"];
+          
           const standardizedHeaders = {
             headers: enhanced,
             cookies: capturedState.cookies,
             fingerprint: mergedFp,
             timestamp: Date.now(),
+            freshlyGenerated: true
           };
 
           // Cache and rotate
@@ -509,7 +688,7 @@ export class ScraperManager {
             )
           ) {
             this.headerRotationPool.push(standardizedHeaders);
-            if (this.headerRotationPool.length > 10)
+            if (this.headerRotationPool.length > 20) // Increased pool size
               this.headerRotationPool.shift();
           }
 
@@ -534,6 +713,9 @@ export class ScraperManager {
               ...refreshedIpAndId,
             };
           }
+          
+          // Mark headers as reused (not freshly generated)
+          refreshedHeaders.freshlyGenerated = false;
 
           return refreshedHeaders;
         }
@@ -548,10 +730,9 @@ export class ScraperManager {
       // Update dynamic anti-bot fields here too
       const refreshedHeaders = JSON.parse(JSON.stringify(cachedHeaders));
       refreshedHeaders.headers["X-Forwarded-For"] = generateRandomIp();
-      refreshedHeaders.headers["X-Request-Id"] =
-        Math.random().toString(36).substring(2, 10) +
-        "-" +
-        Date.now().toString(36);
+      refreshedHeaders.headers["X-Request-Id"] = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+      refreshedHeaders.headers["X-Unique-ID"] = uuidv4();
+      refreshedHeaders.freshlyGenerated = false;
       return refreshedHeaders;
     }
 
@@ -567,12 +748,11 @@ export class ScraperManager {
       // Update dynamic anti-bot fields
       if (poolHeaders.headers) {
         poolHeaders.headers["X-Forwarded-For"] = generateRandomIp();
-        poolHeaders.headers["X-Request-Id"] =
-          Math.random().toString(36).substring(2, 10) +
-          "-" +
-          Date.now().toString(36);
+        poolHeaders.headers["X-Request-Id"] = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+        poolHeaders.headers["X-Unique-ID"] = uuidv4();
       }
-
+      
+      poolHeaders.freshlyGenerated = false;
       return poolHeaders;
     }
 
@@ -587,11 +767,10 @@ export class ScraperManager {
         "Accept-Language": "en-US,en;q=0.5",
         Referer: "https://www.ticketmaster.com/",
         "X-Forwarded-For": generateRandomIp(),
-        "X-Request-Id":
-          Math.random().toString(36).substring(2, 10) +
-          "-" +
-          Date.now().toString(36),
+        "X-Request-Id": `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
+        "X-Unique-ID": uuidv4(),
       },
+      freshlyGenerated: false
     };
   }
 
@@ -1059,6 +1238,80 @@ export class ScraperManager {
     }
   }
 
+  /**
+   * Get a random event ID for session/cookie management
+   * This ensures we never use the actual event ID for cookies
+   */
+  async getRandomEventId(originalEventId) {
+    try {
+      // Try to get random events from database
+      const randomEvents = await Event.aggregate([
+        {
+          $match: {
+            Skip_Scraping: { $ne: true },
+            url: { $exists: true, $ne: "" },
+            Event_ID: { $ne: originalEventId } // Explicitly exclude the original event ID
+          },
+        },
+        { $sample: { size: 3 } },
+        { $project: { Event_ID: 1 } },
+      ]);
+      
+      if (randomEvents && randomEvents.length > 0) {
+        const randomIndex = Math.floor(Math.random() * randomEvents.length);
+        return randomEvents[randomIndex].Event_ID;
+      }
+      
+      // Fallback options if database query fails
+      if (this.failedEvents.size > 0) {
+        const failedEventsArray = Array.from(this.failedEvents);
+        const filtered = failedEventsArray.filter(id => id !== originalEventId);
+        if (filtered.length > 0) {
+          return filtered[Math.floor(Math.random() * filtered.length)];
+        }
+      }
+      
+      if (this.activeJobs.size > 0) {
+        const activeJobsArray = Array.from(this.activeJobs.keys());
+        const filtered = activeJobsArray.filter(id => id !== originalEventId);
+        if (filtered.length > 0) {
+          return filtered[Math.floor(Math.random() * filtered.length)];
+        }
+      }
+      
+      // Last resort: use a previously successful event ID from the cache or retry database query
+      if (this.headerRefreshTimestamps.size > 0) {
+        // Use any existing event ID that has a valid timestamp
+        const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
+        const validCachedEvents = cachedEvents.filter(id => id !== originalEventId);
+        if (validCachedEvents.length > 0) {
+          return validCachedEvents[Math.floor(Math.random() * validCachedEvents.length)];
+        }
+      }
+
+      // If all else fails, retry the database query with broader criteria
+      try {
+        const fallbackEvents = await Event.aggregate([
+          { $match: { url: { $exists: true } } },
+          { $sample: { size: 5 } },
+          { $project: { Event_ID: 1 } }
+        ]);
+        
+        if (fallbackEvents && fallbackEvents.length > 0) {
+          return fallbackEvents[Math.floor(Math.random() * fallbackEvents.length)].Event_ID;
+        }
+      } catch (retryError) {
+        this.logWithTime(`Retry database query failed: ${retryError.message}`, "warning");
+      }
+      
+      // Absolute last resort: return the original event ID
+      return originalEventId;
+    } catch (error) {
+      this.logWithTime(`Error getting random event ID: ${error.message}`, "warning");
+      return originalEventId;
+    }
+  }
+
   async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null, passedHeaders = null) {
     // Skip if the event should be skipped
     if (this.shouldSkipEvent(eventId)) {
@@ -1101,10 +1354,12 @@ export class ScraperManager {
 
     // Declare headers variable outside try block so it's accessible in catch block
     let headers;
+    // Track if we used fresh cookies for this event
+    let usedFreshCookies = false;
 
     try {
-      // Only log at higher verbosity levels
-      if (LOG_LEVEL >= 2) {
+      // More detailed logging for better troubleshooting
+      if (LOG_LEVEL >= 1) {
         this.logWithTime(
           `Scraping ${eventId} (Attempt ${retryCount + 1})`,
           "info"
@@ -1146,20 +1401,54 @@ export class ScraperManager {
         return true;
       }
 
-      // If headers were passed from batch processing, use them directly
+      // Determine if we need fresh cookies/session for this event
+      // We always get fresh cookies on retries or if it's been 15+ minutes
+      const needsFreshCookies = retryCount > 0 || 
+                                !this.headerRefreshTimestamps.get(eventId) || 
+                                moment().diff(this.headerRefreshTimestamps.get(eventId)) > SESSION_REFRESH_INTERVAL;
+
+      // If headers were passed from batch processing, still check if they're fresh enough
       if (passedHeaders) {
-        headers = passedHeaders;
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `Using passed headers for event ${eventId} from batch processing`,
-            "debug"
-          );
+        const hasPassedSessionId = !!passedHeaders.sessionId;
+        const passedHeadersAge = passedHeaders.timestamp ? Date.now() - passedHeaders.timestamp : Infinity;
+        
+        // Use passed headers only if they're fresh enough (less than 15 minutes old)
+        if (!needsFreshCookies && passedHeadersAge < SESSION_REFRESH_INTERVAL) {
+          headers = passedHeaders;
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Using passed headers for event ${eventId} from batch processing (age: ${Math.floor(passedHeadersAge/1000)}s)`,
+              "info"
+            );
+          }
+        } else {
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Passed headers too old (${Math.floor(passedHeadersAge/1000)}s) or retry attempt (${retryCount}), getting fresh cookies`,
+              "info"
+            );
+          }
+          // Force refresh to get fresh cookies
+          headers = await this.refreshEventHeaders(eventId, true);
+          usedFreshCookies = true;
         }
       } else {
-        // Try to get session-based headers first (30-minute rotation)
-        let sessionData = null;
+        // Prioritize session manager for cookie/session management
         try {
-          sessionData = await this.sessionManager.getSessionForEvent(eventId, proxyToUse);
+          // Always force new session on retries or after expiration
+          const forceNewSession = needsFreshCookies;
+          
+          // Get a random event ID instead of using the actual event ID
+          const randomEventId = await this.getRandomEventId(eventId);
+          
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Using random event ID ${randomEventId} for session management (original: ${eventId})`,
+              "info"
+            );
+          }
+          
+          const sessionData = await this.sessionManager.getSessionForEvent(randomEventId, proxyToUse, forceNewSession);
           
           if (sessionData) {
             const sessionHeaders = await this.sessionManager.getSessionHeaders(eventId);
@@ -1169,13 +1458,17 @@ export class ScraperManager {
                 headers: sessionHeaders,
                 cookies: sessionData.cookies,
                 fingerprint: sessionData.fingerprint,
-                sessionId: sessionData.sessionId
+                sessionId: sessionData.sessionId,
+                timestamp: Date.now(),
+                freshlyGenerated: forceNewSession
               };
               
-              if (LOG_LEVEL >= 3) {
+              usedFreshCookies = forceNewSession;
+              
+              if (LOG_LEVEL >= 2) {
                 this.logWithTime(
-                  `Using session headers for event ${eventId} (session: ${sessionData.sessionId})`,
-                  "debug"
+                  `Using ${forceNewSession ? 'fresh' : 'existing'} session headers for event ${eventId} (session: ${sessionData.sessionId})`,
+                  "info"
                 );
               }
             }
@@ -1183,56 +1476,109 @@ export class ScraperManager {
         } catch (sessionError) {
           if (LOG_LEVEL >= 2) {
             this.logWithTime(
-              `Session management failed for event ${eventId}: ${sessionError.message}, falling back to regular headers`,
+              `Session management failed for event ${eventId}: ${sessionError.message}, falling back to header refresh`,
               "warning"
             );
           }
         }
 
-        // Fallback to regular header management if session approach fails
+        // If session approach fails, use direct header management
         if (!headers) {
-        // Check if cookies have been refreshed recently
-        const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
-        const cookieAge = Date.now() - lastRefresh;
-
-        // Force header refresh if cookies are more than half the expiration time
-        // or if this is a retry attempt (to get fresh cookies)
-        const shouldRefreshHeaders =
-          !this.headersCache.has(eventId) ||
-          cookieAge > COOKIE_EXPIRATION_MS / 2 ||
-          retryCount > 0;
-
-        if (shouldRefreshHeaders) {
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(
-              `Getting fresh headers for event ${eventId}${
-                retryCount > 0 ? " (retry attempt)" : ""
-              }`,
-              "debug"
-            );
+          // For retries or no recent headers, always force refresh
+          if (needsFreshCookies) {
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(
+                `Getting fresh headers for event ${eventId}${
+                  retryCount > 0 ? " (retry attempt)" : ""
+                }`,
+                "info"
+              );
+            }
+            
+            // Get a random event ID for cookie refresh
+            const randomEventId = await this.getRandomEventId(eventId);
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(
+                `Using random event ID ${randomEventId} for header refresh (original: ${eventId})`,
+                "info"
+              );
+            }
+            
+            headers = await this.refreshEventHeaders(randomEventId, true);
+            usedFreshCookies = true;
+          } else {
+            // Check if we have recent headers
+            const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
+            const cookieAge = Date.now() - lastRefresh;
+            
+            // Use cached headers only if they're fresh enough
+            if (cookieAge < SESSION_REFRESH_INTERVAL / 2) {
+              headers = this.headersCache.get(eventId);
+              if (LOG_LEVEL >= 2) {
+                this.logWithTime(
+                  `Using cached headers for event ${eventId} (age: ${Math.floor(
+                    cookieAge / 1000
+                  )}s)`,
+                  "info"
+                );
+              }
+            } else {
+              // Otherwise refresh
+              if (LOG_LEVEL >= 2) {
+                              this.logWithTime(
+                `Cached headers too old (${Math.floor(cookieAge/1000)}s), getting fresh headers for ${eventId}`,
+                "info"
+              );
+            }
+            
+            // Get a random event ID for cookie refresh
+            const randomEventId = await this.getRandomEventId(eventId);
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(
+                `Using random event ID ${randomEventId} for header refresh (original: ${eventId})`,
+                "info"
+              );
+            }
+            
+            headers = await this.refreshEventHeaders(randomEventId, true);
+              usedFreshCookies = true;
+            }
           }
-          headers = await this.refreshEventHeaders(eventId);
-        } else {
-          headers = this.headersCache.get(eventId);
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(
-              `Using cached headers for event ${eventId} (age: ${Math.floor(
-                cookieAge / 1000
-              )}s)`,
-              "debug"
-            );
-          }
-        }
 
-        // If headers aren't available through either method, try one last refresh
-        if (!headers) {
-          headers = await this.refreshEventHeaders(eventId);
+          // If headers still aren't available, force one last refresh
+          if (!headers) {
+            if (LOG_LEVEL >= 1) {
+              this.logWithTime(
+                `No headers available for ${eventId}, forcing final refresh`,
+                "warning"
+              );
+            }
+            
+            // Get a random event ID for cookie refresh
+            const randomEventId = await this.getRandomEventId(eventId);
+            if (LOG_LEVEL >= 1) {
+              this.logWithTime(
+                `Using random event ID ${randomEventId} for final header refresh (original: ${eventId})`,
+                "warning"
+              );
+            }
+            
+            headers = await this.refreshEventHeaders(randomEventId, true);
+            usedFreshCookies = true;
           }
         }
       }
 
       if (!headers) {
         throw new Error("Failed to obtain valid headers");
+      }
+      
+      // Log whether we're using fresh cookies
+      if (LOG_LEVEL >= 2) {
+        this.logWithTime(
+          `${usedFreshCookies ? 'Using fresh cookies' : 'Reusing existing cookies'} for event ${eventId}`,
+          usedFreshCookies ? "info" : "debug"
+        );
       }
 
       // Set a longer timeout for the scrape
@@ -1506,391 +1852,9 @@ export class ScraperManager {
     }
   }
 
-  async processBatch(eventIds, eventProxyMap = null) {
-    if (!eventIds || eventIds.length === 0) {
-      return { results: [], failed: [] };
-    }
+  // Removed batch event processing functionality - simplified to sequential processing only
 
-    const results = [];
-    const failed = [];
-
-    try {
-      // Group events by domain for efficient proxy utilization
-      const domainGroups = new Map();
-      
-      // First, get event URLs and group by domain
-      const eventPromises = eventIds.map(async (eventId) => {
-      try {
-        const event = await Event.findOne({ Event_ID: eventId })
-            .select("url Skip_Scraping")
-          .lean();
-
-          if (!event || event.Skip_Scraping) {
-            return null;
-          }
-          
-          let domain = "unknown";
-        if (event.url) {
-          try {
-            const url = new URL(event.url);
-              domain = url.hostname;
-          } catch (e) {
-              domain = `invalid-url-${eventId}`;
-            }
-          }
-          
-          return { eventId, domain, url: event.url };
-      } catch (error) {
-          this.logWithTime(`Error fetching event ${eventId}: ${error.message}`, "error");
-          return null;
-        }
-      });
-
-      const eventDetails = (await Promise.all(eventPromises)).filter(Boolean);
-      
-      // Group events by domain
-      eventDetails.forEach(({ eventId, domain }) => {
-        if (!domainGroups.has(domain)) {
-          domainGroups.set(domain, []);
-        }
-        domainGroups.get(domain).push(eventId);
-      });
-
-      // Validate events before processing
-      const validations = await Promise.all(
-        eventIds.map(async (eventId) => ({
-          eventId,
-          valid: !this.shouldSkipEvent(eventId)
-        }))
-      );
-
-      // Process each domain group
-      await Promise.all(
-        Array.from(domainGroups.entries()).map(async ([domain, domainEvents]) => {
-          // Get a shared proxy for this domain
-          const { proxyAgent, proxy } = this.proxyManager.getProxyForBatch(domainEvents);
-      
-          // Get fresh headers for the first event in this domain
-          const firstEventId = domainEvents[0];
-          let domainHeaders = await this.refreshEventHeaders(firstEventId);
-          
-          // If headers aren't available, try one last refresh
-          if (!domainHeaders) {
-            domainHeaders = await this.refreshEventHeaders(firstEventId);
-          }
-          
-          if (!domainHeaders) {
-            this.logWithTime(
-              `Failed to obtain valid headers for domain ${domain}`,
-              "warning"
-            );
-            return;
-          }
-          
-          // Process up to 20 events at a time per domain for maximum throughput
-          const domainConcurrentLimit = 20; // Doubled from 10 to 20
-
-          // Split domain events into smaller groups
-          for (let i = 0; i < domainEvents.length; i += domainConcurrentLimit) {
-            const concurrentBatch = domainEvents.slice(
-              i,
-              i + domainConcurrentLimit
-            );
-
-            // Process events in this domain batch concurrently
-            await Promise.all(
-              concurrentBatch.map(async (eventId) => {
-                // Skip if invalidated
-                if (!validations.find((v) => v.eventId === eventId && v.valid)) {
-                  return;
-                }
-
-                try {
-                  // Get event-specific proxy from map if available
-                  let eventProxyAgent = proxyAgent;
-                  let eventProxy = proxy;
-                  let usingEventSpecificProxy = false;
-
-                  if (eventProxyMap && eventProxyMap.has(eventId)) {
-                    const eventProxyData = eventProxyMap.get(eventId);
-                    if (eventProxyData && eventProxyData.proxyAgent) {
-                      eventProxyAgent = eventProxyData.proxyAgent;
-                      eventProxy = eventProxyData.proxy;
-                      usingEventSpecificProxy = true;
-
-                      if (LOG_LEVEL >= 3) {
-                        this.logWithTime(
-                          `Using dedicated proxy ${eventProxy.proxy.substring(
-                            0,
-                            15
-                          )}... for event ${eventId}`,
-                          "debug"
-                        );
-                      }
-                    }
-                  }
-
-                  if (!usingEventSpecificProxy && LOG_LEVEL >= 3) {
-                    this.logWithTime(
-                      `No dedicated proxy for event ${eventId}, using shared proxy`,
-                      "debug"
-                    );
-                  }
-
-                  // Process this individual event with the domain-specific headers
-                  const result = await this.scrapeEvent(
-                    eventId,
-                    0, // retryCount = 0 for initial attempt
-                    eventProxyAgent,
-                    eventProxy,
-                    domainHeaders // Use fresh domain-specific headers
-                  );
-
-                  if (result !== false) {
-                    results.push({ eventId, result });
-
-                    // Mark this proxy as successful
-                    if (usingEventSpecificProxy && eventProxy) {
-                      this.proxyManager.updateProxyHealth(eventProxy.proxy, true);
-                    }
-                  } else {
-                    // If using a dedicated proxy for this event and it failed, mark it as having issues
-                    if (usingEventSpecificProxy && eventProxy) {
-                      this.proxyManager.updateProxyHealth(
-                        eventProxy.proxy,
-                        false
-                      );
-                    }
-                  }
-                } catch (error) {
-                  failed.push({ eventId, error });
-
-                  // Mark this proxy as having issues if using a dedicated one
-                  if (eventProxyMap && eventProxyMap.has(eventId)) {
-                    const eventProxyData = eventProxyMap.get(eventId);
-                    if (eventProxyData && eventProxyData.proxy) {
-                      this.proxyManager.updateProxyHealth(
-                        eventProxyData.proxy.proxy,
-                        false
-                      );
-                    }
-                  }
-                } finally {
-                  // Release the proxy for this event
-                  if (eventProxyMap && eventProxyMap.has(eventId)) {
-                    this.proxyManager.releaseProxy(eventId);
-                  }
-                }
-              })
-            );
-
-            // Add a small delay between batches within the same domain
-            if (i + domainConcurrentLimit < domainEvents.length) {
-              await setTimeout(500);
-            }
-          }
-        })
-      );
-    } catch (error) {
-      this.logWithTime(
-        `Error in batch processing: ${error.message}`,
-        "error"
-      );
-    }
-
-    return { results, failed };
-  }
-
-  async getEventsToProcess() {
-    try {
-      const now = moment();
-
-      // Find all active events due for update
-      const urgentEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-        $or: [
-          { Last_Updated: { $exists: false } },
-          {
-            Last_Updated: { $lt: now.clone().subtract(30, "seconds").toDate() },
-          }, // Reduced from 45 seconds to 30 seconds
-        ],
-      })
-        .select("Event_ID url Last_Updated")
-        .sort({ Last_Updated: 1 }) // Oldest first
-        .limit(BATCH_SIZE * 50) // Get a much larger sample for comprehensive batch processing
-        .lean();
-
-      // No events needing update
-      if (!urgentEvents.length) {
-        return [];
-      }
-
-      // Get current time as unix timestamp
-      const currentTime = now.valueOf();
-
-      // Calculate priority score for each event
-      const prioritizedEvents = urgentEvents.map((event) => {
-        const lastUpdated = event.Last_Updated
-          ? moment(event.Last_Updated).valueOf()
-          : 0;
-        const timeSinceLastUpdate = currentTime - lastUpdated;
-
-        // Higher score = higher priority
-        let priorityScore = timeSinceLastUpdate / 1000; // Convert to seconds
-
-        // CRITICAL - Events approaching 2-minute maximum threshold (absolute deadline)
-        if (timeSinceLastUpdate > 110000) {
-          // Within 10 seconds of 2-minute max
-          priorityScore = priorityScore * 100; // 100x priority boost for events approaching max allowed time
-        }
-        // VERY HIGH - Events approaching 1.5 minutes
-        else if (timeSinceLastUpdate > 80000) {
-          // Within 10 seconds of 1.5-minute target
-          priorityScore = priorityScore * 50; // 50x priority boost
-        }
-        // HIGH - Events over 1 minute
-        else if (timeSinceLastUpdate > 60000) {
-          // Over 1 minute
-          priorityScore = priorityScore * 20; // 20x priority boost
-        }
-        // MEDIUM - Events over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
-          // Over 45 seconds
-          priorityScore = priorityScore * 10; // 10x priority boost
-        }
-
-        return {
-          eventId: event.Event_ID,
-          url: event.url,
-          lastUpdated: lastUpdated,
-          priorityScore,
-          timeSinceLastUpdate,
-        };
-      });
-
-      // Sort by priority score (highest first)
-      prioritizedEvents.sort((a, b) => b.priorityScore - a.priorityScore);
-
-      // Smart batching: Group events by domain/URL patterns to maximize proxy efficiency
-      const domains = new Map();
-      prioritizedEvents.forEach((event) => {
-        if (event.url) {
-          try {
-            const url = new URL(event.url);
-            const domain = url.hostname;
-            if (!domains.has(domain)) {
-              domains.set(domain, []);
-            }
-            domains.get(domain).push(event);
-          } catch (e) {
-            // Invalid URL, just use the eventId as key
-            if (!domains.has(event.eventId)) {
-              domains.set(event.eventId, []);
-            }
-            domains.get(event.eventId).push(event);
-          }
-        } else {
-          // No URL, use eventId as domain group
-          if (!domains.has(event.eventId)) {
-            domains.set(event.eventId, []);
-          }
-          domains.get(event.eventId).push(event);
-        }
-      });
-
-      // Reassemble prioritized list, keeping domain groups together but prioritizing critical events
-      const optimizedEventList = [];
-
-      // First add all near-maximum events (approaching 2 min deadline)
-      const nearMaxEvents = prioritizedEvents.filter(
-        (event) => event.timeSinceLastUpdate > 110000
-      );
-      nearMaxEvents.forEach((event) => {
-        optimizedEventList.push(event.eventId);
-      });
-
-      // Then add events approaching 1.5-minute target
-      const approachingTargetEvents = prioritizedEvents.filter(
-        (event) =>
-          event.timeSinceLastUpdate > 80000 &&
-          event.timeSinceLastUpdate <= 110000 &&
-          !nearMaxEvents.some((maxEvent) => maxEvent.eventId === event.eventId)
-      );
-      approachingTargetEvents.forEach((event) => {
-        optimizedEventList.push(event.eventId);
-      });
-
-      // Then add events over 1 minute
-      const over60SecEvents = prioritizedEvents.filter(
-        (event) =>
-          event.timeSinceLastUpdate > 60000 &&
-          event.timeSinceLastUpdate <= 80000 &&
-          !nearMaxEvents.some(
-            (maxEvent) => maxEvent.eventId === event.eventId
-          ) &&
-          !approachingTargetEvents.some(
-            (targetEvent) => targetEvent.eventId === event.eventId
-          )
-      );
-      over60SecEvents.forEach((event) => {
-        optimizedEventList.push(event.eventId);
-      });
-
-      // Then add remaining events grouped by domain
-      for (const domainEvents of domains.values()) {
-        // Skip events already added
-        const remainingEvents = domainEvents.filter(
-          (event) =>
-            !nearMaxEvents.some(
-              (maxEvent) => maxEvent.eventId === event.eventId
-            ) &&
-            !approachingTargetEvents.some(
-              (targetEvent) => targetEvent.eventId === event.eventId
-            ) &&
-            !over60SecEvents.some(
-              (overEvent) => overEvent.eventId === event.eventId
-            )
-        );
-
-        // Add all remaining events from this domain/group
-        remainingEvents.forEach((event) => {
-          optimizedEventList.push(event.eventId);
-        });
-      }
-
-      // For large batches, use a larger batch size to ensure we keep up
-      const dynamicBatchSize = Math.min(
-        optimizedEventList.length,
-        Math.max(BATCH_SIZE, Math.ceil(optimizedEventList.length / 1.5)) // Process at least 66% of events per cycle
-      );
-
-      // Limit to the maximum batch size but make sure we don't exceed our processing capacity
-      const finalEventsList = optimizedEventList.slice(0, dynamicBatchSize);
-
-      // Log stats about the events we're processing - only at appropriate log level
-      if (LOG_LEVEL >= 2) {
-        const nearMaxCount = nearMaxEvents.length;
-        const approachingTargetCount = approachingTargetEvents.length;
-        const over60SecCount = over60SecEvents.length;
-        const oldestEvent = prioritizedEvents[0];
-        if (oldestEvent) {
-          const ageInSeconds = oldestEvent.timeSinceLastUpdate / 1000;
-          this.logWithTime(
-            `Processing ${
-              finalEventsList.length
-            } events. Oldest event is ${ageInSeconds.toFixed(1)}s old. ` +
-              `${nearMaxCount} events near 2min max, ${approachingTargetCount} events near 1.5min, ${over60SecCount} over 1min.`,
-            "info"
-          );
-        }
-      }
-
-      return finalEventsList;
-    } catch (error) {
-      console.error("Error getting events to process:", error);
-      return [];
-    }
-  }
+  // Removed batch event processing - using simplified sequential processing with getEvents() instead
 
   async startContinuousScraping() {
     if (!this.isRunning) {
@@ -2178,7 +2142,9 @@ export class ScraperManager {
     }
   }
 
-  // Get events to process in priority order
+  // This is the main getEvents method for sequential processing
+
+  // Get events to process in priority order (simplified version without domain grouping)
   async getEvents() {
     try {
       const now = moment();
@@ -2250,120 +2216,14 @@ export class ScraperManager {
     }
   }
 
-  // Get events to process with optimized domain grouping
-  async getEvents() {
-    try {
-      const now = moment();
-
-      // Find all active events due for update - increased limit for large-scale processing
-      const events = await Event.find({
-        Skip_Scraping: { $ne: true },
-        $or: [
-          { Last_Updated: { $exists: false } },
-          {
-            Last_Updated: { $lt: now.clone().subtract(30, "seconds").toDate() },
-          },
-        ],
-      })
-        .select("Event_ID url Last_Updated")
-        .sort({ Last_Updated: 1 }) // Oldest first
-        .limit(DB_FETCH_LIMIT) // Fetch more events for efficient DB interaction
-        .lean();
-
-      if (!events.length) {
-        return {
-          prioritizedEvents: [],
-          domainGroups: {},
-        };
-      }
-
-      // Get current time
-      const currentTime = now.valueOf();
-
-      // Calculate priority for each event
-      const prioritizedEvents = events.map((event) => {
-        const lastUpdated = event.Last_Updated
-          ? moment(event.Last_Updated).valueOf()
-          : 0;
-        const timeSinceLastUpdate = currentTime - lastUpdated;
-
-        // Higher score = higher priority
-        let priorityScore = timeSinceLastUpdate / 1000;
-
-        // Critical events approaching 2-minute threshold
-        if (timeSinceLastUpdate > 110000) {
-          priorityScore = priorityScore * 100;
-        }
-        // Very high - approaching 1.5 minutes
-        else if (timeSinceLastUpdate > 80000) {
-          priorityScore = priorityScore * 50;
-        }
-        // High - over 1 minute
-        else if (timeSinceLastUpdate > 60000) {
-          priorityScore = priorityScore * 20;
-        }
-        // Medium - over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
-          priorityScore = priorityScore * 10;
-        }
-
-        return {
-          eventId: event.Event_ID,
-          url: event.url,
-          priorityScore,
-          timeSinceLastUpdate,
-        };
-      });
-
-      // Sort by priority (highest first)
-      prioritizedEvents.sort((a, b) => b.priorityScore - a.priorityScore);
-
-      // Group events by domain for efficient proxy utilization
-      const domainGroups = {};
-
-      prioritizedEvents.forEach((event) => {
-        if (!event.url) {
-          // No URL, use eventId as domain group
-          const key = `no-url-${event.eventId}`;
-          if (!domainGroups[key]) domainGroups[key] = [];
-          domainGroups[key].push(event.eventId);
-          return;
-        }
-
-        try {
-          const url = new URL(event.url);
-          const domain = url.hostname;
-          if (!domainGroups[domain]) domainGroups[domain] = [];
-          domainGroups[domain].push(event.eventId);
-        } catch (e) {
-          // Invalid URL, use eventId as domain group
-          const key = `invalid-url-${event.eventId}`;
-          if (!domainGroups[key]) domainGroups[key] = [];
-          domainGroups[key].push(event.eventId);
-        }
-      });
-
-      return {
-        prioritizedEvents: prioritizedEvents.map((e) => e.eventId),
-        domainGroups,
-      };
-    } catch (error) {
-      console.error("Error getting events to process:", error);
-      return {
-        prioritizedEvents: [],
-        domainGroups: {},
-      };
-    }
-  }
-
-  // Optimized continuous scraping for handling 10,000+ events
   async startContinuousScraping() {
     if (!this.isRunning) {
       this.isRunning = true;
-      this.logWithTime(
-        "Starting optimized hybrid scraping for 10,000+ events...",
-        "info"
-      );
+      this.logWithTime("Starting standard sequential scraping...", "info");
+
+      // Start cookie rotation cycle immediately (non-blocking)
+      this.forcePeriodicCookieRotation();
+      this.logWithTime("Started 15-minute cookie rotation cycle", "info");
 
       // Start CSV upload cycle immediately (non-blocking)
       if (ENABLE_CSV_UPLOAD) {
@@ -2375,303 +2235,118 @@ export class ScraperManager {
           this.runCsvUploadCycle();
         }, CSV_UPLOAD_INTERVAL);
       }
+
       // Main scraping loop
       while (this.isRunning) {
         try {
-          // Process retry events - use concurrent execution for efficiency
+          // Process events from retry queue first
           const retryEvents = this.getRetryEventsToProcess();
 
           if (retryEvents.length > 0) {
             this.logWithTime(
-              `Processing ${retryEvents.length} retry events with optimized concurrent execution`,
+              `Processing ${retryEvents.length} events from retry queue sequentially`,
               "info"
             );
 
-            // Group retry events by domain for better proxy utilization
-            const retryDomainGroups = {};
-
+            // Process each event sequentially
             for (const job of retryEvents) {
-              // Find the event URL
-              const event = await Event.findOne({ Event_ID: job.eventId })
-                .select("url")
-                .lean();
+              if (!this.isRunning) break;
 
-              let domainKey = "unknown";
-
-              if (event?.url) {
-                try {
-                  const url = new URL(event.url);
-                  domainKey = url.hostname;
-                } catch (e) {
-                  domainKey = `unknown-${job.eventId}`;
+              try {
+                // Skip if in cooldown or already being processed
+                if (this.shouldSkipEvent(job.eventId)) {
+                  continue;
                 }
-              } else {
-                domainKey = `unknown-${job.eventId}`;
-              }
 
-              if (!retryDomainGroups[domainKey])
-                retryDomainGroups[domainKey] = [];
-              retryDomainGroups[domainKey].push({
-                eventId: job.eventId,
-                retryCount: job.retryCount,
-              });
-            }
+                // Process this individual event with its retry count
+                await this.scrapeEvent(job.eventId, job.retryCount);
 
-            // Process each domain group concurrently with shared proxies
-            await Promise.all(
-              Object.values(retryDomainGroups).map(async (domainJobs) => {
-                // Get a proxy for this domain group
-                const { proxyAgent, proxy } =
-                  this.proxyManager.getProxyForBatch(
-                    domainJobs.map((j) => j.eventId)
-                  );
-
-                // Process domain jobs in concurrent batches
-                for (
-                  let i = 0;
-                  i < domainJobs.length;
-                  i += CONCURRENT_DOMAIN_LIMIT
-                ) {
-                  const batchJobs = domainJobs.slice(
-                    i,
-                    i + CONCURRENT_DOMAIN_LIMIT
-                  );
-
-                  // Process this batch concurrently
-                  await Promise.all(
-                    batchJobs.map(async (job) => {
-                      try {
-                        // Skip if already being processed
-                        if (this.processingEvents.has(job.eventId)) return;
-
-                        // Process this individual event with its retry count
-                        await this.scrapeEvent(
-                          job.eventId,
-                          job.retryCount,
-                          proxyAgent,
-                          proxy
-                        );
-
-                        // Remove from retry queue if successful
-                        this.retryQueue = this.retryQueue.filter(
-                          (item) => item.eventId !== job.eventId
-                        );
-                      } catch (error) {
-                        this.logWithTime(
-                          `Error processing retry event ${job.eventId}: ${error.message}`,
-                          "error"
-                        );
-                      }
-                    })
-                  );
-
-                  // Small pause between batches within the same domain
-                  await setTimeout(200);
-                }
-              })
-            );
-          }
-
-          // Get regular events to process with domain grouping
-          const { prioritizedEvents, domainGroups } = await this.getEvents();
-
-          if (prioritizedEvents.length > 0) {
-            this.logWithTime(
-              `Processing ${prioritizedEvents.length} events with optimized concurrent execution`,
-              "info"
-            );
-
-            // Extract critical events (approaching 2 min deadline) to process first
-            const criticalEvents = prioritizedEvents.slice(0, 50);
-
-            // Process critical events with max concurrency
-            await Promise.all(
-              criticalEvents.map(async (eventId) => {
-                try {
-                  // Skip if already being processed
-                  if (this.processingEvents.has(eventId)) return;
-
-                  // Process critical event
-                  await this.scrapeEvent(eventId, 0);
-                } catch (error) {
-                  this.logWithTime(
-                    `Error processing critical event ${eventId}: ${error.message}`,
-                    "error"
-                  );
-                }
-              })
-            );
-
-            // Process remaining events by domain groups
-            await Promise.all(
-              Object.entries(domainGroups).map(async ([domain, eventIds]) => {
-                // Skip events that were processed as critical
-                const remainingEvents = eventIds.filter(
-                  (eventId) => !criticalEvents.includes(eventId)
+                // Remove from retry queue if successful
+                this.retryQueue = this.retryQueue.filter(
+                  (item) => item.eventId !== job.eventId
                 );
 
-                if (remainingEvents.length === 0) return;
+                // Small pause between events
+                await setTimeout(100);
+              } catch (error) {
+                this.logWithTime(
+                  `Error processing retry event ${job.eventId}: ${error.message}`,
+                  "error"
+                );
+              }
+            }
+          }
 
-                // Get a proxy for this domain
-                const { proxyAgent, proxy } =
-                  this.proxyManager.getProxyForBatch(remainingEvents);
+          // Get regular events to process
+          const events = await this.getEvents();
 
-                // Process domain events in concurrent batches
-                for (
-                  let i = 0;
-                  i < remainingEvents.length;
-                  i += CONCURRENT_DOMAIN_LIMIT
-                ) {
-                  const batchEvents = remainingEvents.slice(
-                    i,
-                    i + CONCURRENT_DOMAIN_LIMIT
-                  );
-
-                  // Process this batch concurrently
-                  await Promise.all(
-                    batchEvents.map(async (eventId) => {
-                      try {
-                        // Skip if already being processed
-                        if (this.processingEvents.has(eventId)) return;
-
-                        // Process this individual event
-                        await this.scrapeEvent(eventId, 0, proxyAgent, proxy);
-                      } catch (error) {
-                        this.logWithTime(
-                          `Error processing event ${eventId}: ${error.message}`,
-                          "error"
-                        );
-                      }
-                    })
-                  );
-
-                  // Small pause between batches within the same domain
-                  await setTimeout(200);
-                }
-              })
+          if (events.length > 0) {
+            this.logWithTime(
+              `Processing ${events.length} events sequentially`,
+              "info"
             );
+
+            // Process each event sequentially
+            for (const eventId of events) {
+              if (!this.isRunning) break;
+
+              try {
+                // Skip if already being processed
+                if (this.shouldSkipEvent(eventId)) {
+                  continue;
+                }
+
+                // Process this individual event
+                await this.scrapeEvent(eventId, 0);
+
+                // Small pause between events
+                await setTimeout(100);
+              } catch (error) {
+                this.logWithTime(
+                  `Error processing event ${eventId}: ${error.message}`,
+                  "error"
+                );
+              }
+            }
           } else {
             this.logWithTime("No events to process at this time", "info");
           }
 
-          // Process failed events - optimized for high concurrency
+          // Process failed events
           const failedEvents = Array.from(this.failedEvents);
 
           if (failedEvents.length > 0) {
             this.logWithTime(
-              `Processing ${failedEvents.length} failed events with optimized concurrency`,
+              `Processing ${failedEvents.length} failed events sequentially`,
               "info"
             );
 
-            // Group failed events by failure count
-            const failureGroups = {};
-
             for (const eventId of failedEvents) {
-              // Skip if in cooldown
-              const now = moment();
-              if (
-                this.cooldownEvents.has(eventId) &&
-                now.isBefore(this.cooldownEvents.get(eventId))
-              ) {
-                continue;
-              }
+              if (!this.isRunning) break;
 
-              // Skip if already being processed
-              if (this.processingEvents.has(eventId)) {
-                continue;
-              }
-
-              const failureCount = this.getRecentFailureCount(eventId);
-              if (!failureGroups[failureCount])
-                failureGroups[failureCount] = [];
-              failureGroups[failureCount].push(eventId);
-            }
-
-            // Process failure groups in order (lower failure counts first)
-            const sortedFailureCounts = Object.keys(failureGroups).sort(
-              (a, b) => parseInt(a) - parseInt(b)
-            );
-
-            for (const failureCount of sortedFailureCounts) {
-              const eventsInGroup = failureGroups[failureCount];
-
-              // Group by domain for efficient proxy usage
-              const failedDomainGroups = {};
-
-              for (const eventId of eventsInGroup) {
-                const event = await Event.findOne({ Event_ID: eventId })
-                  .select("url")
-                  .lean();
-
-                let domainKey = "unknown";
-
-                if (event?.url) {
-                  try {
-                    const url = new URL(event.url);
-                    domainKey = url.hostname;
-                  } catch (e) {
-                    domainKey = `unknown-${eventId}`;
-                  }
-                } else {
-                  domainKey = `unknown-${eventId}`;
+              try {
+                // Skip if in cooldown or already being processed
+                if (this.shouldSkipEvent(eventId)) {
+                  continue;
                 }
 
-                if (!failedDomainGroups[domainKey])
-                  failedDomainGroups[domainKey] = [];
-                failedDomainGroups[domainKey].push(eventId);
+                // Process this failed event
+                const failureCount = this.getRecentFailureCount(eventId);
+                await this.scrapeEvent(eventId, failureCount);
+
+                // Small pause between events
+                await setTimeout(200);
+              } catch (error) {
+                this.logWithTime(
+                  `Error processing failed event ${eventId}: ${error.message}`,
+                  "error"
+                );
               }
-
-              // Process each domain group concurrently
-              await Promise.all(
-                Object.values(failedDomainGroups).map(async (domainEvents) => {
-                  // Get a proxy for this domain group
-                  const { proxyAgent, proxy } =
-                    this.proxyManager.getProxyForBatch(domainEvents);
-
-                  // Process in batches for controlled concurrency
-                  for (
-                    let i = 0;
-                    i < domainEvents.length;
-                    i += CONCURRENT_DOMAIN_LIMIT
-                  ) {
-                    const batchEvents = domainEvents.slice(
-                      i,
-                      i + CONCURRENT_DOMAIN_LIMIT
-                    );
-
-                    // Process this batch concurrently
-                    await Promise.all(
-                      batchEvents.map(async (eventId) => {
-                        try {
-                          // Process this failed event
-                          await this.scrapeEvent(
-                            eventId,
-                            parseInt(failureCount),
-                            proxyAgent,
-                            proxy
-                          );
-                        } catch (error) {
-                          this.logWithTime(
-                            `Error processing failed event ${eventId}: ${error.message}`,
-                            "error"
-                          );
-                        }
-                      })
-                    );
-
-                    // Small pause between batches
-                    await setTimeout(200);
-                  }
-                })
-              );
-
-              // Small pause between failure count groups
-              await setTimeout(300);
             }
           }
 
-          // Add a dynamic pause to avoid overloading, but keep it minimal for 10,000+ events
-          const pauseTime = Math.min(this.getAdaptivePauseTime(), 200);
+          // Add a dynamic pause to avoid overloading
+          const pauseTime = this.getAdaptivePauseTime();
           await setTimeout(pauseTime);
         } catch (error) {
           console.error(`Error in scraping loop: ${error.message}`);
@@ -2683,29 +2358,29 @@ export class ScraperManager {
   }
 
   /**
-   * Calculate adaptive pause time optimized for handling 10,000+ events
+   * Calculate adaptive pause time for sequential processing
    * @returns {number} Pause time in milliseconds
    */
   getAdaptivePauseTime() {
-    // Base pause time - keep it minimal for high throughput
-    let pauseTime = 100; // Base of 100ms for ultra-aggressive scraping
+    // Base pause time - moderate for sequential processing
+    let pauseTime = 200; // Base of 200ms for sequential processing
 
-    // Add time based on active jobs and failed events - use logarithmic scaling for large numbers
+    // Add time based on active jobs and failed events
     const activeJobCount = this.activeJobs.size;
     const failedEventCount = this.failedEvents.size;
 
-    // Logarithmic scaling to handle large numbers of events without excessive pauses
+    // Linear scaling for sequential processing
     if (activeJobCount > 0) {
-      pauseTime += Math.min(25 * Math.log10(activeJobCount + 1), 75);
+      pauseTime += Math.min(50 * activeJobCount, 500);
     }
 
     if (failedEventCount > 0) {
-      pauseTime += Math.min(25 * Math.log10(failedEventCount + 1), 75);
+      pauseTime += Math.min(10 * failedEventCount, 300);
     }
 
     // Additional time if circuit breaker tripped
     if (this.apiCircuitBreaker.tripped) {
-      pauseTime += 150;
+      pauseTime += 500;
     }
 
     return pauseTime;
@@ -2933,6 +2608,13 @@ export class ScraperManager {
     
     this.logWithTime("Stopping continuous scraping process...", "info");
     
+    // Clear the cookie rotation interval if it exists
+    if (this.cookieRotationIntervalId) {
+      clearInterval(this.cookieRotationIntervalId);
+      this.cookieRotationIntervalId = null;
+      this.logWithTime("Cookie rotation cycle stopped", "info");
+    }
+    
     // Clear the CSV upload interval if it exists
     if (this.csvUploadIntervalId) {
       clearInterval(this.csvUploadIntervalId);
@@ -3032,6 +2714,137 @@ export class ScraperManager {
       return 'EMPTY_RESULT';
     } else {
       return 'OTHER';
+    }
+  }
+
+  /**
+   * Force periodic cookie and session rotation
+   * Schedules automatic cookie and session refresh every 15 minutes
+   */
+  forcePeriodicCookieRotation() {
+    // Clear any existing interval
+    if (this.cookieRotationIntervalId) {
+      clearInterval(this.cookieRotationIntervalId);
+    }
+    
+    this.logWithTime("Starting 15-minute cookie and session rotation schedule", "info");
+    
+    // Immediately rotate on start
+    this.rotateAllCookiesAndSessions();
+    
+    // Set up rotation interval (15 minutes)
+    this.cookieRotationIntervalId = setInterval(() => {
+      this.rotateAllCookiesAndSessions();
+    }, SESSION_REFRESH_INTERVAL);
+    
+    return this.cookieRotationIntervalId;
+  }
+  
+  /**
+   * Rotates all cookies and sessions to ensure freshness
+   */
+  async rotateAllCookiesAndSessions() {
+    try {
+      this.logWithTime("Performing full cookie and session rotation", "info");
+      
+      // Clear header cache to force refresh
+      this.headersCache.clear();
+      this.headerRefreshTimestamps.clear();
+      
+      // Rotate sessions via session manager
+      try {
+        await this.sessionManager.forceSessionRotation();
+        this.logWithTime("Successfully rotated all sessions", "success");
+      } catch (sessionError) {
+        this.logWithTime(`Error rotating sessions: ${sessionError.message}`, "error");
+      }
+      
+      // Force cookie reset
+      try {
+        await this.resetCookiesAndHeaders();
+        this.logWithTime("Successfully reset all cookies and headers", "success");
+      } catch (cookieError) {
+        this.logWithTime(`Error resetting cookies: ${cookieError.message}`, "error");
+      }
+      
+      // Create multiple fresh test sessions to prime the cache
+      try {
+        // Get multiple random event IDs from the database
+        const randomEvents = await Event.aggregate([
+          {
+            $match: {
+              Skip_Scraping: { $ne: true },
+              url: { $exists: true, $ne: "" },
+            },
+          },
+          { $sample: { size: 5 } }, // Get 5 random events to create diversity
+          { $project: { Event_ID: 1 } },
+        ]);
+        
+        if (randomEvents && randomEvents.length > 0) {
+          this.logWithTime(`Creating ${randomEvents.length} fresh test sessions with random events`, "info");
+          
+          // Process each random event to create multiple fresh sessions
+          for (const randomEvent of randomEvents) {
+            const eventId = randomEvent.Event_ID;
+            // Force refresh headers to create new cookies
+            await this.refreshEventHeaders(eventId, true);
+            this.logWithTime(`Created fresh test session using random event ${eventId}`, "info");
+            
+            // Small delay between refreshes
+            await setTimeout(500);
+          }
+        } else {
+          // Fallback to using cached event IDs if available
+          if (this.headerRefreshTimestamps.size > 0) {
+            const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
+            this.logWithTime(`No database events found, using ${Math.min(3, cachedEvents.length)} cached event IDs`, "warning");
+            
+            // Use up to 3 cached event IDs
+            const eventsToUse = cachedEvents.slice(0, 3);
+            for (const cachedId of eventsToUse) {
+              await this.refreshEventHeaders(cachedId, true);
+              this.logWithTime(`Created fresh test session using cached event ID ${cachedId}`, "info");
+              await setTimeout(500);
+            }
+          } else {
+            this.logWithTime(`No database events or cached events found, skipping test session creation`, "warning");
+          }
+        }
+      } catch (testError) {
+        this.logWithTime(`Error creating test sessions: ${testError.message}`, "warning");
+        
+                  // Even on error, try with any available event ID from cache
+          try {
+            if (this.headerRefreshTimestamps.size > 0) {
+              // Get any event ID from the cache
+              const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
+              const fallbackId = cachedEvents[Math.floor(Math.random() * cachedEvents.length)];
+              
+              await this.refreshEventHeaders(fallbackId, true);
+              this.logWithTime(`Created fallback session after error using cached event ID ${fallbackId}`, "info");
+            } else {
+              // Try a direct database query as last resort
+              try {
+                const fallbackEvent = await Event.findOne().sort({ Last_Updated: 1 }).limit(1).lean();
+                if (fallbackEvent) {
+                  await this.refreshEventHeaders(fallbackEvent.Event_ID, true);
+                  this.logWithTime(`Created fallback session using database event ID ${fallbackEvent.Event_ID}`, "info");
+                } else {
+                  this.logWithTime(`No fallback events available, skipping session creation`, "error");
+                }
+              } catch (dbError) {
+                this.logWithTime(`Final database fallback failed: ${dbError.message}`, "error");
+              }
+            }
+          } catch (fallbackError) {
+            this.logWithTime(`Failed to create fallback sessions: ${fallbackError.message}`, "error");
+          }
+      }
+      
+      this.logWithTime("Cookie and session rotation complete", "success");
+    } catch (error) {
+      this.logWithTime(`Error in cookie rotation: ${error.message}`, "error");
     }
   }
 }
