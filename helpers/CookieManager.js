@@ -39,7 +39,7 @@ export class CookieManager {
   static CONFIG = {
     COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced from 24 hours)
     MAX_COOKIE_LENGTH: 8000,
-    MAX_COOKIE_AGE: 1 * 60 * 60 * 1000, // 1 hour maximum (reduced from 7 days)
+    MAX_COOKIE_AGE: 15 * 60 * 1000, // 15 minutes maximum (reduced from 1 hour)
     COOKIE_ROTATION: {
       ENABLED: true,
       MAX_STORED_COOKIES: 100,

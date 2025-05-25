@@ -24,7 +24,7 @@ export class SessionManager {
     // Session configuration - Updated to align with scraperManager refresh timings
     this.SESSION_CONFIG = {
       ROTATION_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced from 30 minutes to match scraperManager)
-      MAX_SESSION_AGE: 1 * 60 * 60 * 1000, // 1 hour maximum (reduced from 2 hours)
+      MAX_SESSION_AGE: 15 * 60 * 1000, // 15 minutes maximum (reduced from 1 hour)
       MAX_SESSIONS: 15, // Maximum number of concurrent sessions (increased from 10)
       SESSION_WARMUP_TIME: 5000, // 5 seconds to warm up new sessions
       SESSION_VALIDATION_INTERVAL: 3 * 60 * 1000, // Validate sessions every 3 minutes (reduced from 5)
