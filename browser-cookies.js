@@ -9,7 +9,7 @@ const iphone13 = devices["iPhone 13"];
 // Constants
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
-  COOKIE_REFRESH_INTERVAL: .30 * 60 * 60 * 1000, // 24 hours
+  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
   PAGE_TIMEOUT: 45000,
   MAX_RETRIES: 5,
   RETRY_DELAY: 10000,
@@ -592,108 +592,32 @@ async function refreshCookies(eventId, proxy = null) {
       throw initError || new Error("Failed to initialize browser");
     }
 
-    // Validate eventId to prevent null URLs
-    if (!eventId) {
-      console.error('Invalid eventId provided to refreshCookies: null or undefined');
-      // Use a fallback event ID
-      eventId = "Z7r9jZ1AdFaZv"; // Example event ID - replace with a known good one
-      console.warn(`Using fallback event ID ${eventId} for cookie refresh`);
-    }
-    
-    // Add initial delay to ensure network is ready (especially for AWS environments)
-    console.log('Adding pre-navigation delay for network stability...');
-    await page.waitForTimeout(3000);
-    
-    // Navigate to event page with progressive timeouts for slower cloud networks
+    // Navigate to event page
     const url = `https://www.ticketmaster.com/event/${eventId}`;
     console.log(`Navigating to ${url}`);
     
-    let navigationSuccess = false;
-    let navigationAttempts = 0;
-    const maxNavigationAttempts = 3;
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: CONFIG.PAGE_TIMEOUT
+    });
     
-    while (!navigationSuccess && navigationAttempts < maxNavigationAttempts) {
-      navigationAttempts++;
-      try {
-        // Increase timeout progressively with each attempt
-        const attemptTimeout = CONFIG.PAGE_TIMEOUT * navigationAttempts;
-        console.log(`Navigation attempt ${navigationAttempts} with timeout ${attemptTimeout}ms`);
-        
-        // Use networkidle2 for the first attempt to ensure page is fully loaded
-        // Use domcontentloaded for subsequent attempts as a fallback
-        const waitUntilOption = navigationAttempts === 1 ? "networkidle" : "domcontentloaded";
-        
-        await page.goto(url, {
-          waitUntil: waitUntilOption,
-          timeout: attemptTimeout
-        });
-        
-        // Add delay after navigation to ensure page resources load
-        await page.waitForTimeout(2000 * navigationAttempts);
-        
-        navigationSuccess = true;
-      } catch (navError) {
-        console.warn(`Navigation attempt ${navigationAttempts} failed: ${navError.message}`);
-        if (navigationAttempts >= maxNavigationAttempts) {
-          throw new Error(`Failed to navigate after ${maxNavigationAttempts} attempts: ${navError.message}`);
-        }
-        // Wait longer between attempts
-        await page.waitForTimeout(3000 * navigationAttempts);
-      }
-    }
-    
-    // More robust check if the page loaded properly
-    console.log('Checking if page loaded properly...');
+    // Check if the page loaded properly
     const currentUrl = page.url();
-    
-    // Try multiple ways to check if the page is valid
-    let pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
-    
-    // Additional validation - check for presence of key page elements
-    if (!pageLoadSuccessful) {
-      try {
-        // Check for various page elements that would indicate success
-        const hasEventTitle = await page.$("h1.event-header__event-name-text").catch(() => null);
-        const hasEventDetails = await page.$("div.event-header__event-date-time-wrapper").catch(() => null);
-        const hasTicketInfo = await page.$("div.event-detail__additional-info-wrapper").catch(() => null);
-        
-        // Count how many elements we found
-        const validElementsCount = [hasEventTitle, hasEventDetails, hasTicketInfo].filter(Boolean).length;
-        pageLoadSuccessful = validElementsCount >= 1; // If we found at least one element, page probably loaded
-        
-        if (validElementsCount > 0) {
-          console.log(`Found ${validElementsCount} valid page elements, considering page loaded successfully`);
-        }
-      } catch (validationError) {
-        console.warn(`Error validating page elements: ${validationError.message}`);
-      }
-    }
+    const pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
     
     if (!pageLoadSuccessful) {
       console.warn(`Failed to load event page, URL: ${currentUrl}`);
       
-      // Try refreshing the page with increased timeout
-      console.log("Attempting to reload the page with increased timeout...");
-      try {
-        await page.waitForTimeout(3000); // Wait before reload
-        await page.reload({ 
-          waitUntil: "networkidle", 
-          timeout: CONFIG.PAGE_TIMEOUT * 2 
-        });
-        
-        // Wait after reload for everything to settle
-        await page.waitForTimeout(5000);
-        
-        const newUrl = page.url();
-        const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
-        
-        if (!reloadSuccessful) {
-          console.warn(`Reload failed, URL: ${newUrl}`);
-          throw new Error("Failed to load Ticketmaster event page after reload");
-        }
-      } catch (reloadError) {
-        console.error(`Page reload failed: ${reloadError.message}`);
-        throw new Error(`Failed to load Ticketmaster event page: ${reloadError.message}`);
+      // Try refreshing the page
+      console.log("Attempting to reload the page...");
+      await page.reload({ waitUntil: "domcontentloaded", timeout: CONFIG.PAGE_TIMEOUT });
+      
+      const newUrl = page.url();
+      const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
+      
+      if (!reloadSuccessful) {
+        console.warn(`Reload failed, URL: ${newUrl}`);
+        throw new Error("Failed to load Ticketmaster event page");
       }
     }
     
@@ -706,13 +630,11 @@ async function refreshCookies(eventId, proxy = null) {
       await handleTicketmasterChallenge(page);
     }
     
-    // Simulate human behavior with longer delays for cloud environments
-    console.log('Simulating human behavior...');
+    // Simulate human behavior
     await simulateMobileInteractions(page);
     
-    // Longer wait for cookies to be set on slower networks
-    console.log('Waiting for cookies to be fully set...');
-    await page.waitForTimeout(5000);
+    // Wait for cookies to be set
+    await page.waitForTimeout(2000);
     
     // Capture cookies
     const fingerprint = BrowserFingerprint.generate();
