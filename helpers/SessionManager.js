@@ -21,14 +21,15 @@ export class SessionManager {
     this.isRotatingSession = false;
     this.sessionRotationQueue = [];
     
-    // Session configuration
+    // Session configuration - Updated to align with scraperManager refresh timings
     this.SESSION_CONFIG = {
-      ROTATION_INTERVAL: 30 * 60 * 1000, // 30 minutes
-      MAX_SESSION_AGE: 2 * 60 * 60 * 1000, // 2 hours maximum
-      MAX_SESSIONS: 10, // Maximum number of concurrent sessions
+      ROTATION_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced from 30 minutes to match scraperManager)
+      MAX_SESSION_AGE: 1 * 60 * 60 * 1000, // 1 hour maximum (reduced from 2 hours)
+      MAX_SESSIONS: 15, // Maximum number of concurrent sessions (increased from 10)
       SESSION_WARMUP_TIME: 5000, // 5 seconds to warm up new sessions
-      SESSION_VALIDATION_INTERVAL: 5 * 60 * 1000, // Validate sessions every 5 minutes
+      SESSION_VALIDATION_INTERVAL: 3 * 60 * 1000, // Validate sessions every 3 minutes (reduced from 5)
       SESSION_HEALTH_CHECK_TIMEOUT: 30000, // 30 seconds timeout for health checks
+      MIN_AUTH_COOKIES: 3, // Minimum number of auth cookies required for a valid session
     };
 
     // Start session validation interval

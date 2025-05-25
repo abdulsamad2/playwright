@@ -1791,21 +1791,19 @@ async function refreshCookiesPeriodically() {
   const MAX_RETRIES = 3;
   const RETRY_DELAY = 30000; // 30 seconds
   
-  let retryCount = 0;
   let lastError = null;
-  let localContext = null;
   let refreshRecord = null;
-  
-  while (retryCount < MAX_RETRIES) {
+
+  while (retryCount <= MAX_RETRIES) {
     try {
-      console.log("Starting periodic cookie refresh...");
+      console.log(`Starting periodic cookie refresh (attempt ${retryCount + 1})...`);
       
       // Get a random active event ID from the database
       let eventId = null;
       
       try {
         // Import Event model to query the database
-        const { Event } = await import('./models/index.js');
+        const { Event } = await import('../models/index.js');
         
         // Get random active events from the database
         const randomEvents = await Event.aggregate([
@@ -1826,34 +1824,40 @@ async function refreshCookiesPeriodically() {
           console.log(`Using random database event ${eventId} for cookie refresh`);
         } else {
           console.warn('No active events found in database for cookie refresh');
-          // If no events found, we'll try ScraperManager as fallback
         }
       } catch (dbError) {
         console.warn(`Failed to get random event from database: ${dbError.message}`);
-        // Continue to fallback approach
       }
       
-      // Fallback: Try to find an active event ID from scraper manager
-      if (!eventId) {
+      // Fallback: Try to get events from scraperManager directly
+      if (!eventId && scraperManager) {
         try {
-          // Use the imported scraperManager instead of ScraperManager global
-          if (scraperManager && typeof scraperManager.getActiveEvents === 'function') {
+          // First try getActiveEvents method if it exists
+          if (typeof scraperManager.getActiveEvents === 'function') {
             const activeEvents = scraperManager.getActiveEvents();
             if (activeEvents && activeEvents.length > 0) {
-              // Choose a random event from active ones
               eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
-              console.log(`Using scraperManager event ${eventId} for cookie refresh (database fallback)`);
+              console.log(`Using scraperManager.getActiveEvents() event ${eventId} for cookie refresh`); 
             }
-          } else if (scraperManager && scraperManager.activeJobs && scraperManager.activeJobs.size > 0) {
-            // Alternative approach: get event IDs from activeJobs Map
+          } 
+          // If that failed, try accessing activeJobs Map directly
+          else if (scraperManager.activeJobs && scraperManager.activeJobs.size > 0) {
             const activeEventIds = Array.from(scraperManager.activeJobs.keys());
             if (activeEventIds.length > 0) {
               eventId = activeEventIds[Math.floor(Math.random() * activeEventIds.length)];
-              console.log(`Using scraperManager activeJobs event ${eventId} for cookie refresh (fallback)`);
+              console.log(`Using scraperManager.activeJobs event ${eventId} for cookie refresh`);
+            }
+          }
+          // If still no event ID, try headerRefreshTimestamps Map
+          else if (scraperManager.headerRefreshTimestamps && scraperManager.headerRefreshTimestamps.size > 0) {
+            const cachedEvents = Array.from(scraperManager.headerRefreshTimestamps.keys());
+            if (cachedEvents.length > 0) {
+              eventId = cachedEvents[Math.floor(Math.random() * cachedEvents.length)];
+              console.log(`Using scraperManager.headerRefreshTimestamps event ${eventId} for cookie refresh`);
             }
           }
         } catch (error) {
-          console.warn('Failed to get active events from scraperManager:', error.message);
+          console.warn('Failed to get events from scraperManager:', error.message);
         }
       }
       

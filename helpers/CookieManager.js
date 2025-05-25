@@ -35,18 +35,19 @@ export class CookieManager {
     this.sessionManager = new SessionManager(logger);
   }
 
-  // Configuration constants
+  // Configuration constants - Updated to align with scraperManager refresh timings
   static CONFIG = {
-    COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
+    COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced from 24 hours)
     MAX_COOKIE_LENGTH: 8000,
-    MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days
+    MAX_COOKIE_AGE: 1 * 60 * 60 * 1000, // 1 hour maximum (reduced from 7 days)
     COOKIE_ROTATION: {
       ENABLED: true,
       MAX_STORED_COOKIES: 100,
-      ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
+      ROTATION_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced from 4 hours)
       LAST_ROTATION: Date.now()
     },
-    PERIODIC_REFRESH_INTERVAL: 30 * 60 * 1000 // 30 minutes
+    PERIODIC_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced from 30 minutes)
+    MIN_AUTH_COOKIES: 3 // Minimum number of auth cookies required for validation
   };
 
   // Essential cookies that must be present
