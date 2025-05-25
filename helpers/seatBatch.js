@@ -380,8 +380,6 @@ export const AttachRowSection = (
             return undefined;
           } else if (offerGet.inventoryType == "resale") {
             return undefined;
-          } else if (offerGet.name !=="Standard Admission") {
-            return undefined;
           } else {
             return CreateInventoryAndLine(x, offerGet, event, descriptions);
           }

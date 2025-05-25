@@ -1833,17 +1833,41 @@ async function refreshCookiesPeriodically() {
         // Continue to fallback approach
       }
       
-      // Fallback: Try to find an active event ID from scraper manager
-      if (!eventId && typeof ScraperManager !== 'undefined' && ScraperManager.getActiveEvents) {
+      // Fallback 1: Try to find an active event ID from scraperManager directly
+      if (!eventId && scraperManager) {
         try {
-          const activeEvents = ScraperManager.getActiveEvents();
-          if (activeEvents.length > 0) {
-            // Choose a random event from active ones
-            eventId = activeEvents[Math.floor(Math.random() * activeEvents.length)].id;
-            console.log(`Using ScraperManager event ${eventId} for cookie refresh (database fallback)`);
+          // First try to get events from the eventUpdateTimestamps Map in scraperManager
+          if (scraperManager.eventUpdateTimestamps && scraperManager.eventUpdateTimestamps.size > 0) {
+            const eventIds = Array.from(scraperManager.eventUpdateTimestamps.keys());
+            eventId = eventIds[Math.floor(Math.random() * eventIds.length)];
+            console.log(`Using scraperManager cached event ${eventId} for cookie refresh (database fallback 1)`);
+          }
+          // If that doesn't work, try calling getEvents() method
+          else if (typeof scraperManager.getEvents === 'function') {
+            const events = await scraperManager.getEvents();
+            if (events && events.length > 0) {
+              eventId = events[Math.floor(Math.random() * events.length)];
+              console.log(`Using scraperManager.getEvents() event ${eventId} for cookie refresh (database fallback 2)`);
+            }
           }
         } catch (error) {
-          console.warn('Failed to get active events from ScraperManager:', error.message);
+          console.warn('Failed to get active events from scraperManager:', error.message);
+        }
+      }
+      
+      // Fallback 2: Try direct database query with minimal conditions as last resort
+      if (!eventId) {
+        try {
+          const anyEvent = await Event.findOne({
+            Skip_Scraping: { $ne: true }
+          }).select('Event_ID').lean();
+          
+          if (anyEvent) {
+            eventId = anyEvent.Event_ID;
+            console.log(`Using last resort database event ${eventId} for cookie refresh (minimal query fallback)`);
+          }
+        } catch (dbFallbackError) {
+          console.warn(`Failed to get any event from database: ${dbFallbackError.message}`);
         }
       }
       
