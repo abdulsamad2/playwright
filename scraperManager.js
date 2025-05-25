@@ -20,7 +20,7 @@ export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_co
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = Math.max(60, Math.floor(cpus().length * 5)); // Dramatically increased for maximum parallel processing
 const MAX_RETRIES = 15; // Updated from 10 per request of user
-const SCRAPE_TIMEOUT = 60000; // Increased from 35000 to 60 seconds
+const SCRAPE_TIMEOUT = 90000; // Increased to 90 seconds for parallel scraping batches
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 4, 120); // Significantly increased batch size for bulk processing
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 120000; // Minimum 1 minute between scrapes (allowing for 2-minute updates)
@@ -1902,31 +1902,38 @@ export class ScraperManager {
 
           if (events.length > 0) {
             this.logWithTime(
-              `Processing ${events.length} events sequentially`,
+              `Processing ${events.length} events in parallel batches`,
               "info"
             );
 
-            // Process each event sequentially
-            for (const eventId of events) {
-              if (!this.isRunning) break;
+            let eventIdx = 0;
+            while (eventIdx < events.length && this.isRunning) {
+              // Pick a random batch size between 3 and 6, but not more than remaining events
+              const batchSize = Math.min(Math.floor(Math.random() * 4) + 3, events.length - eventIdx);
+              const batchEvents = events.slice(eventIdx, eventIdx + batchSize);
 
-              try {
-                // Skip if already being processed
-                if (this.processingEvents.has(eventId)) {
-                  continue;
-                }
+              // Filter out events already being processed
+              const toProcess = batchEvents.filter(eventId => !this.processingEvents.has(eventId));
 
-                // Process this individual event
-                await this.scrapeEvent(eventId, 0);
-
-                // Small pause between events
-                await setTimeout(100);
-              } catch (error) {
+              if (toProcess.length > 0) {
                 this.logWithTime(
-                  `Error processing event ${eventId}: ${error.message}`,
-                  "error"
+                  `Processing batch of ${toProcess.length} events in parallel`,
+                  "info"
+                );
+                await Promise.all(
+                  toProcess.map(eventId =>
+                    this.scrapeEvent(eventId, 0).catch(error => {
+                      this.logWithTime(
+                        `Error processing event ${eventId} (parallel batch): ${error.message}`,
+                        "error"
+                      );
+                    })
+                  )
                 );
               }
+              eventIdx += batchSize;
+              // Small pause between batches
+              await setTimeout(100);
             }
           } else {
             this.logWithTime("No events to process at this time", "info");
