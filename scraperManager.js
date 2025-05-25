@@ -2703,11 +2703,13 @@ export class ScraperManager {
     }
     
     // Run one final CSV upload to ensure latest data is uploaded
-    try {
-      this.logWithTime("Running final CSV upload before shutdown", "info");
-      await this.runCsvUploadCycle();
-    } catch (error) {
-      this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
+    if (ENABLE_CSV_UPLOAD) {
+      try {
+        this.logWithTime("Running final CSV upload before shutdown", "info");
+        await this.uploadBlankCsv(); // New method to upload blank CSV only
+      } catch (error) {
+        this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
+      }
     }
     
     // Release any active proxies
@@ -2925,6 +2927,111 @@ export class ScraperManager {
       this.logWithTime("Cookie and session rotation complete", "success");
     } catch (error) {
       this.logWithTime(`Error in cookie rotation: ${error.message}`, "error");
+    }
+  }
+
+  async uploadBlankCsv() {
+    try {
+      // Create the path to the blank CSV file
+      const blankCsvPath = path.join(DATA_DIR, 'blank_csv.csv');
+      
+      // Check if file exists
+      if (!nodeFs.existsSync(blankCsvPath)) {
+        if (LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `Blank CSV upload skipped: blank_csv.csv not found at ${blankCsvPath}`,
+            "warning"
+          );
+        }
+        // Simple console log
+        console.log(`[${new Date().toISOString()}] BLANK CSV UPLOAD: File not found - ${blankCsvPath}`);
+        return;
+      }
+      
+      // Get file stats to include file size in logs
+      const fileStats = await fs.stat(blankCsvPath);
+      const fileSizeMB = (fileStats.size / (1024 * 1024)).toFixed(2);
+      
+      // Log the start of upload process
+      this.logWithTime(
+        `Starting blank CSV upload (${fileSizeMB} MB)`, 
+        "info"
+      );
+      
+      // Simple console log for upload start
+      console.log(`[${new Date().toISOString()}] BLANK CSV UPLOAD: Starting upload of blank_csv.csv (${fileSizeMB} MB)`);
+      
+      // Initialize the SyncService
+      const syncService = new SyncService(COMPANY_ID, API_TOKEN);
+      
+      // Upload the file asynchronously - use Promise to handle this without waiting
+      try {
+        // Add timestamp to track upload timing
+        const uploadStartTime = moment();
+        
+        // Execute the upload
+        const result = await syncService.uploadCsvToSync(blankCsvPath);
+        
+        // Calculate upload time
+        const uploadDuration = moment().diff(uploadStartTime, 'seconds');
+        
+        if (result.success) {
+          this.logWithTime(
+            `Successfully uploaded blank_csv.csv (${fileSizeMB} MB in ${uploadDuration}s)`,
+            "success"
+          );
+          
+          // Simple console log for success
+          console.log(`[${new Date().toISOString()}] BLANK CSV UPLOAD: SUCCESS - Uploaded ${fileSizeMB} MB in ${uploadDuration}s`);
+          
+          // Track last successful upload time
+          this.lastCsvUploadTime = moment();
+        } else {
+          this.logWithTime(
+            `Blank CSV upload completed but reported failure: ${result.message || 'Unknown error'}`,
+            "warning"
+          );
+          
+          // Simple console log for failure
+          console.log(`[${new Date().toISOString()}] BLANK CSV UPLOAD: FAILED - ${result.message || 'Unknown error'}`);
+        }
+      } catch (uploadError) {
+        // More detailed error logging
+        this.logWithTime(
+          `Error uploading blank CSV file (${fileSizeMB} MB): ${uploadError.message}`,
+          "error"
+        );
+        
+        // Simple console log for error
+        console.log(`[${new Date().toISOString()}] BLANK CSV UPLOAD: ERROR - ${uploadError.message}`);
+        
+        // Check for specific types of errors
+        if (uploadError.message.includes('network') || uploadError.message.includes('timeout')) {
+          this.logWithTime(
+            "Network or timeout error during blank CSV upload - will retry on next cycle",
+            "warning"
+          );
+        } else if (uploadError.message.includes('403') || uploadError.message.includes('401')) {
+          this.logWithTime(
+            "Authentication error during blank CSV upload - check API credentials",
+            "error"
+          );
+        }
+        
+        // Don't rethrow - we want to keep scraping even if upload fails
+        console.error(`Blank CSV upload error details:`, uploadError);
+      }
+    } catch (error) {
+      // Log error but don't throw - we don't want to interrupt scraping
+      this.logWithTime(
+        `Error in blank CSV upload: ${error.message}`,
+        "error"
+      );
+      
+      // Simple console log for upload error
+      console.log(`[${new Date().toISOString()}] BLANK CSV UPLOAD: ERROR - ${error.message}`);
+      
+      console.error(`Blank CSV upload error:`, error);
     }
   }
 }
