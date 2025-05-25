@@ -1791,6 +1791,7 @@ async function refreshCookiesPeriodically() {
   const MAX_RETRIES = 3;
   const RETRY_DELAY = 30000; // 30 seconds
   
+  let retryCount = 0; // Initialize the retryCount variable
   let lastError = null;
   let refreshRecord = null;
 
