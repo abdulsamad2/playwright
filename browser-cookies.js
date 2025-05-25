@@ -600,32 +600,100 @@ async function refreshCookies(eventId, proxy = null) {
       console.warn(`Using fallback event ID ${eventId} for cookie refresh`);
     }
     
-    // Navigate to event page
+    // Add initial delay to ensure network is ready (especially for AWS environments)
+    console.log('Adding pre-navigation delay for network stability...');
+    await page.waitForTimeout(3000);
+    
+    // Navigate to event page with progressive timeouts for slower cloud networks
     const url = `https://www.ticketmaster.com/event/${eventId}`;
     console.log(`Navigating to ${url}`);
     
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: CONFIG.PAGE_TIMEOUT
-    });
+    let navigationSuccess = false;
+    let navigationAttempts = 0;
+    const maxNavigationAttempts = 3;
     
-    // Check if the page loaded properly
+    while (!navigationSuccess && navigationAttempts < maxNavigationAttempts) {
+      navigationAttempts++;
+      try {
+        // Increase timeout progressively with each attempt
+        const attemptTimeout = CONFIG.PAGE_TIMEOUT * navigationAttempts;
+        console.log(`Navigation attempt ${navigationAttempts} with timeout ${attemptTimeout}ms`);
+        
+        // Use networkidle2 for the first attempt to ensure page is fully loaded
+        // Use domcontentloaded for subsequent attempts as a fallback
+        const waitUntilOption = navigationAttempts === 1 ? "networkidle" : "domcontentloaded";
+        
+        await page.goto(url, {
+          waitUntil: waitUntilOption,
+          timeout: attemptTimeout
+        });
+        
+        // Add delay after navigation to ensure page resources load
+        await page.waitForTimeout(2000 * navigationAttempts);
+        
+        navigationSuccess = true;
+      } catch (navError) {
+        console.warn(`Navigation attempt ${navigationAttempts} failed: ${navError.message}`);
+        if (navigationAttempts >= maxNavigationAttempts) {
+          throw new Error(`Failed to navigate after ${maxNavigationAttempts} attempts: ${navError.message}`);
+        }
+        // Wait longer between attempts
+        await page.waitForTimeout(3000 * navigationAttempts);
+      }
+    }
+    
+    // More robust check if the page loaded properly
+    console.log('Checking if page loaded properly...');
     const currentUrl = page.url();
-    const pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+    
+    // Try multiple ways to check if the page is valid
+    let pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+    
+    // Additional validation - check for presence of key page elements
+    if (!pageLoadSuccessful) {
+      try {
+        // Check for various page elements that would indicate success
+        const hasEventTitle = await page.$("h1.event-header__event-name-text").catch(() => null);
+        const hasEventDetails = await page.$("div.event-header__event-date-time-wrapper").catch(() => null);
+        const hasTicketInfo = await page.$("div.event-detail__additional-info-wrapper").catch(() => null);
+        
+        // Count how many elements we found
+        const validElementsCount = [hasEventTitle, hasEventDetails, hasTicketInfo].filter(Boolean).length;
+        pageLoadSuccessful = validElementsCount >= 1; // If we found at least one element, page probably loaded
+        
+        if (validElementsCount > 0) {
+          console.log(`Found ${validElementsCount} valid page elements, considering page loaded successfully`);
+        }
+      } catch (validationError) {
+        console.warn(`Error validating page elements: ${validationError.message}`);
+      }
+    }
     
     if (!pageLoadSuccessful) {
       console.warn(`Failed to load event page, URL: ${currentUrl}`);
       
-      // Try refreshing the page
-      console.log("Attempting to reload the page...");
-      await page.reload({ waitUntil: "domcontentloaded", timeout: CONFIG.PAGE_TIMEOUT });
-      
-      const newUrl = page.url();
-      const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
-      
-      if (!reloadSuccessful) {
-        console.warn(`Reload failed, URL: ${newUrl}`);
-        throw new Error("Failed to load Ticketmaster event page");
+      // Try refreshing the page with increased timeout
+      console.log("Attempting to reload the page with increased timeout...");
+      try {
+        await page.waitForTimeout(3000); // Wait before reload
+        await page.reload({ 
+          waitUntil: "networkidle", 
+          timeout: CONFIG.PAGE_TIMEOUT * 2 
+        });
+        
+        // Wait after reload for everything to settle
+        await page.waitForTimeout(5000);
+        
+        const newUrl = page.url();
+        const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
+        
+        if (!reloadSuccessful) {
+          console.warn(`Reload failed, URL: ${newUrl}`);
+          throw new Error("Failed to load Ticketmaster event page after reload");
+        }
+      } catch (reloadError) {
+        console.error(`Page reload failed: ${reloadError.message}`);
+        throw new Error(`Failed to load Ticketmaster event page: ${reloadError.message}`);
       }
     }
     
@@ -638,11 +706,13 @@ async function refreshCookies(eventId, proxy = null) {
       await handleTicketmasterChallenge(page);
     }
     
-    // Simulate human behavior
+    // Simulate human behavior with longer delays for cloud environments
+    console.log('Simulating human behavior...');
     await simulateMobileInteractions(page);
     
-    // Wait for cookies to be set
-    await page.waitForTimeout(2000);
+    // Longer wait for cookies to be set on slower networks
+    console.log('Waiting for cookies to be fully set...');
+    await page.waitForTimeout(5000);
     
     // Capture cookies
     const fingerprint = BrowserFingerprint.generate();
