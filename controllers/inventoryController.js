@@ -5,7 +5,8 @@ import {
   saveInventoryToCSV, 
   readInventoryFromCSV,
   validateAndFixInventoryRecord,
-  formatInventoryForExport
+  formatInventoryForExport,
+  readInventoryFromCSVStream
 } from '../helpers/csvInventoryHelper.js';
 
 // Store path for inventory data
@@ -653,44 +654,74 @@ class InventoryController {
   /**
    * Import inventory from CSV file
    */
-  importInventory(filePath, replaceExisting = false) {
+  async importInventory(filePath, replaceExisting = false) {
     try {
       if (!fs.existsSync(filePath)) {
         return { success: false, message: `File not found: ${filePath}` };
       }
-      
-      const importedData = readInventoryFromCSV(filePath);
-      
-      if (importedData.length === 0) {
-        return { success: false, message: 'No records found in import file' };
+
+      const stats = fs.statSync(filePath);
+      const isLargeFile = stats.size > 10 * 1024 * 1024; // 10MB threshold
+      let totalImported = 0;
+      let validRecords = [];
+      let batch = [];
+      const BATCH_SIZE = 1000;
+      let importedData = [];
+
+      if (isLargeFile) {
+        console.log(`[importInventory] Large file detected (${(stats.size/1024/1024).toFixed(2)} MB). Using streaming import...`);
+        for await (const record of readInventoryFromCSVStream(filePath)) {
+          const validated = validateAndFixInventoryRecord(record);
+          if (validated) batch.push(validated);
+          if (batch.length >= BATCH_SIZE) {
+            validRecords.push(...batch);
+            totalImported += batch.length;
+            console.log(`[importInventory] Processed batch of ${batch.length} records (Total: ${totalImported})`);
+            batch = [];
+          }
+        }
+        // Push any remaining records
+        if (batch.length > 0) {
+          validRecords.push(...batch);
+          totalImported += batch.length;
+          console.log(`[importInventory] Processed final batch of ${batch.length} records (Total: ${totalImported})`);
+        }
+      } else {
+        importedData = readInventoryFromCSV(filePath);
+        if (importedData.length === 0) {
+          return { success: false, message: 'No records found in import file' };
+        }
+        validRecords = importedData.map(record => validateAndFixInventoryRecord(record)).filter(Boolean);
+        totalImported = validRecords.length;
       }
-      
-      // Validate all records
-      const validatedData = importedData.map(record => validateAndFixInventoryRecord(record));
-      
+
+      if (totalImported === 0) {
+        return { success: false, message: 'No valid records found in import file' };
+      }
+
       if (replaceExisting) {
         // Replace current inventory
-        this.inventoryData = validatedData;
+        this.inventoryData = validRecords;
       } else {
         // Merge with existing inventory, avoid duplicates by ID
         const existingIds = new Set(this.inventoryData.map(record => record.inventory_id));
-        
-        for (const record of validatedData) {
+        for (const record of validRecords) {
           if (!existingIds.has(record.inventory_id)) {
             this.inventoryData.push(record);
             existingIds.add(record.inventory_id);
           }
         }
       }
-      
+
       // Save changes
       this.saveInventory();
-      
-      return { 
-        success: true, 
-        message: `Imported ${validatedData.length} records from ${filePath}`
+
+      return {
+        success: true,
+        message: `Imported ${totalImported} records from ${filePath}`
       };
     } catch (error) {
+      console.error(`[importInventory] Error: ${error.message}`);
       return { success: false, message: error.message };
     }
   }
@@ -926,7 +957,7 @@ class InventoryController {
             // Record is already new, so use its inventory_id
           } else {
             // If record is unchanged, preserve the existing inventory_id
-            console.log(`Record unchanged: ${key} - Preserving inventory_id`);
+            // console.log(`Record unchanged: ${key} - Preserving inventory_id`);
             record.inventory_id = existingRecord.inventory_id;
           }
         }
@@ -959,20 +990,20 @@ class InventoryController {
         // Ensure event_id is always present before formatting
         if (!record.event_id && record.mapping_id) {
           record.event_id = record.mapping_id;
-          console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
+          // console.log(`Fixing record: Added missing event_id=${record.mapping_id} based on mapping_id for ${record.section}-${record.row}`);
         } else if (!record.mapping_id && record.event_id) {
           record.mapping_id = record.event_id;
-          console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
+          // console.log(`Fixing record: Added missing mapping_id=${record.event_id} based on event_id for ${record.section}-${record.row}`);
         } else if (!record.event_id && !record.mapping_id && record.source_event_id) {
           // Use source_event_id as a fallback
           record.event_id = record.source_event_id;
           record.mapping_id = record.source_event_id;
-          console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
+         // console.log(`Fixing record: Used source_event_id=${record.source_event_id} for missing event_id and mapping_id for ${record.section}-${record.row}`);
         }
         
         // Final check to ensure neither is empty
         if (!record.event_id || !record.mapping_id) {
-          console.warn(`WARNING: Record may have missing ID fields: section=${record.section}, row=${record.row}, event_id=${record.event_id || 'MISSING'}, mapping_id=${record.mapping_id || 'MISSING'}`);
+        //  console.warn(`WARNING: Record may have missing ID fields: section=${record.section}, row=${record.row}, event_id=${record.event_id || 'MISSING'}, mapping_id=${record.mapping_id || 'MISSING'}`);
         }
         
         return formatInventoryForExport(record);
@@ -981,14 +1012,14 @@ class InventoryController {
       // Verify fields are correctly included in formatted data
       if (formattedData.length > 0) {
         const firstRecord = formattedData[0];
-        console.log(`CSV Export Verification: First record contains event_id=${firstRecord.event_id || 'MISSING'}, mapping_id=${firstRecord.mapping_id || 'MISSING'}`);
+       // console.log(`CSV Export Verification: First record contains event_id=${firstRecord.event_id || 'MISSING'}, mapping_id=${firstRecord.mapping_id || 'MISSING'}`);
         
         // Count records with missing IDs for reporting
         const missingEventId = formattedData.filter(r => !r.event_id).length;
         const missingMappingId = formattedData.filter(r => !r.mapping_id).length;
         
         if (missingEventId > 0 || missingMappingId > 0) {
-          console.warn(`WARNING: Found ${missingEventId} records without event_id and ${missingMappingId} records without mapping_id`);
+        //  console.warn(`WARNING: Found ${missingEventId} records without event_id and ${missingMappingId} records without mapping_id`);
         }
       }
       

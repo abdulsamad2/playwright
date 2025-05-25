@@ -2,11 +2,11 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
+import { promiseAllSettled, promiseWithConcurrency } from "./helpers/promiseHelpers.js";
 import { cpus } from "os";
 import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
-import { BrowserFingerprint } from "./browserFingerprint.js";
 import { v4 as uuidv4 } from 'uuid';
 import SyncService from './services/syncService.js';
 import nodeFs from 'fs';
@@ -17,15 +17,19 @@ import SessionManager from './helpers/SessionManager.js';
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
-const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
+const MAX_UPDATE_INTERVAL = 180000; // Strict 3-minute update requirement
+const CRITICAL_UPDATE_THRESHOLD = 150000; // Events approaching 2.5 minutes since last update are critical
+const SUPER_CRITICAL_THRESHOLD = 165000; // Events approaching 2.75 minutes get highest priority
 const CONCURRENT_LIMIT = Math.max(60, Math.floor(cpus().length * 5)); // Dramatically increased for maximum parallel processing
 const MAX_RETRIES = 15; // Updated from 10 per request of user
-const SCRAPE_TIMEOUT = 60000; // Increased from 35000 to 60 seconds
+const SCRAPE_TIMEOUT = 45000; // Reduced to 45 seconds to fail faster and retry with fresh proxies
 const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 4, 120); // Significantly increased batch size for bulk processing
 const RETRY_BACKOFF_MS = 1500; // Reduced base backoff time for faster retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 120000; // Minimum 1 minute between scrapes (allowing for 2-minute updates)
+const ALWAYS_USE_PARALLEL = true; // ADDED: Always use parallel scraping
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 60000; // Minimum 1 minute between scrapes (reduced to allow 3-minute updates)
 const URGENT_THRESHOLD = 30000; // Events needing update within 30 seconds of deadline (tighter window)
-const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
+const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates (strict)
+const PARALLEL_SCRAPE_THRESHOLD = 0; // 0 - ALWAYS use parallel scraping for all events
 const EVENT_FAILURE_THRESHOLD = 600000; // 10 minutes without updates before marking an event as stopped/failed
 
 // New cooldown settings - shorter cooldowns to allow for more frequent retries within 10 minute window
@@ -353,7 +357,7 @@ export class ScraperManager {
   }
 
   async refreshEventHeaders(eventId, forceRefresh = false) {
-    // Anti-bot: Aggressively fetch fresh cookies/headers with 15-minute refresh cycle
+    
     try {
       // ALWAYS use random event IDs for cookie refresh, never the original eventId
       let eventToUse;
@@ -954,10 +958,12 @@ export class ScraperManager {
             await ConsecutiveGroup.deleteMany({ eventId }).session(session);
 
             const groupsToInsert = validScrapeResult.map((group) => {
-              // Calculate the increased list price based on the percentage
-              const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
-              const increasedPrice =
-                basePrice * (1 + priceIncreasePercentage / 100);
+              // Calculate the increased list price based on the percentage from database
+              const basePrice = parseFloat(group.inventory.listPrice);
+              // Apply price increase and round to 2 decimal places for consistency
+              const increasedPrice = parseFloat(
+                (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2)
+              );
 
               // Format in-hand date as YYYY-MM-DD
               const formattedInHandDate =
@@ -1163,10 +1169,10 @@ export class ScraperManager {
 
         // Calculate the increased list price based on the percentage from database
         const basePrice = parseFloat(group.inventory.listPrice);
-        const increasedPrice = (
-          basePrice *
-          (1 + priceIncreasePercentage / 100)
-        ).toFixed(2);
+        // Apply price increase and round to 2 decimal places for consistency
+        const increasedPrice = parseFloat(
+          (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2)
+        );
 
         // Format in-hand date as YYYY-MM-DD
         const formattedInHandDate = event?.inHandDate
@@ -1312,17 +1318,219 @@ export class ScraperManager {
     }
   }
 
-  async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null, passedHeaders = null) {
+  /**
+   * Scrape an event in parallel using multiple sessions and proxies
+   * @param {string} eventId - The event ID to scrape
+   * @param {number} retryCount - Current retry count
+   * @param {Object} options - Additional options
+   * @returns {Promise<Array>} - Array of scrape results
+   */
+  async scrapeEventParallel(eventId, retryCount = 0, options = {}) {
+    // Number of parallel scrapes to perform
+    const parallelCount = options.parallelCount || 3;
+    // Timeout for parallel scraping (longer than regular scraping)
+    const parallelTimeout = options.timeout || SCRAPE_TIMEOUT * 1.5; // 50% longer timeout for parallel scrapes
+    
+    this.logWithTime(
+      `Starting parallel scrape for high-priority event ${eventId} with ${parallelCount} parallel sessions (timeout: ${Math.floor(parallelTimeout/1000)}s)`,
+      "warning"
+    );
+    
+    // Create array of parallel scrape promises
+    const scrapePromises = [];
+    const startTime = moment();
+    
+    try {
+      // First scrape with existing session if available
+      if (options.useExistingSession && this.headerRefreshTimestamps.get(eventId)) {
+        this.logWithTime(`Using existing session for parallel scrape #1`, "info");
+        scrapePromises.push(
+          this.scrapeEvent(eventId, retryCount, null, null, null, { 
+            isParallelScrape: true,
+            parallelIndex: 0,
+            parallelTimeout: parallelTimeout
+          })
+        );
+      }
+      
+      // Add additional parallel scrapes with fresh sessions
+      const remainingParallel = options.useExistingSession ? parallelCount - 1 : parallelCount;
+      
+      // Use shorter timeout for parallel scrapes to fail faster and retry
+      const effectiveTimeout = options.timeout || Math.min(parallelTimeout, SCRAPE_TIMEOUT);
+      this.logWithTime(`Using timeout of ${Math.floor(effectiveTimeout/1000)}s for parallel scrapes`, "info");
+      
+      for (let i = 0; i < remainingParallel; i++) {
+  // Diagnostic logging for proxy/session/header setup
+  this.logWithTime(
+    `Preparing parallel scrape #${(options.useExistingSession ? i + 2 : i + 1)}: requesting fresh proxy/session...`,
+    "debug"
+  );
+        const parallelIndex = options.useExistingSession ? i + 1 : i;
+        this.logWithTime(`Setting up parallel scrape #${parallelIndex + 1} with fresh session`, "info");
+        
+        try {
+          // Get a fresh proxy for each parallel scrape
+          const { proxyAgent: freshProxyAgent, proxy: freshProxy } = 
+            this.proxyManager.getProxyForBatch([eventId]);
+          // Diagnostic logging for proxy and headers
+          this.logWithTime(
+            `Parallel scrape #${parallelIndex + 1} proxy: ${freshProxy ? JSON.stringify(freshProxy) : 'none'}`,
+            "debug"
+          );
+          // Force fresh session for each parallel scrape
+          const freshHeaders = await this.refreshEventHeaders(eventId, true);
+          // Diagnostic logging for proxy and headers
+          this.logWithTime(
+            `Parallel scrape #${parallelIndex + 1} headers: ${freshHeaders ? JSON.stringify(freshHeaders) : 'none'}`,
+            "debug"
+          );
+          // Add to scrape promises
+          scrapePromises.push(
+            this.scrapeEvent(
+              eventId, 
+              retryCount, 
+              freshProxyAgent, 
+              freshProxy, 
+              freshHeaders, 
+              { 
+                isParallelScrape: true, 
+                parallelIndex: parallelIndex,
+                parallelTimeout: parallelTimeout
+              }
+            )
+          );
+        } catch (setupError) {
+          this.logWithTime(
+            `Error setting up parallel scrape #${parallelIndex + 1}: ${setupError.message}`,
+            "error"
+          );
+          // Add a rejected promise to maintain the count
+          scrapePromises.push(Promise.reject(setupError));
+        }
+      }
+      
+      // Add timeout to the entire parallel scraping operation
+      const timeoutPromise = new Promise((_, reject) => {
+        // Use global setTimeout, not the one from timers/promises
+        global.setTimeout(() => {
+          reject(new Error(`Parallel scrape timeout after ${Math.floor(parallelTimeout/1000)} seconds`));
+        }, parallelTimeout);
+      });
+      
+      // Use Promise.race with a shorter global timeout
+      const racePromise = Promise.race([
+        promiseAllSettled(scrapePromises),
+        timeoutPromise
+      ]);
+      
+      // Only log per-scrape progress, but don't enforce individual timeouts
+      scrapePromises.forEach((promise, index) => {
+        // Just log when each scrape completes
+        promise.then(
+          () => this.logWithTime(`Individual scrape #${index+1} completed successfully`, "debug"),
+          (err) => this.logWithTime(`Individual scrape #${index+1} failed: ${err.message}`, "debug")
+        );
+      });
+      
+      // Wait for all parallel scrapes to complete or timeout
+      const results = await racePromise;
+      
+      // Count successful scrapes
+      const successfulScrapes = results.filter(r => r.status === 'fulfilled' && r.value).length;
+      const duration = moment().diff(startTime);
+      
+      this.logWithTime(
+        `Completed parallel scrape for event ${eventId}: ${successfulScrapes}/${parallelCount} successful in ${Math.floor(duration/1000)}s`,
+        successfulScrapes > 0 ? "success" : "error"
+      );
+      
+      // Return array of results (may contain errors)
+      return results.map(r => r.status === 'fulfilled' ? r.value : null);
+    } catch (error) {
+      const duration = moment().diff(startTime);
+      this.logWithTime(
+        `Parallel scrape for event ${eventId} failed after ${Math.floor(duration/1000)}s: ${error.message}`,
+        "error"
+      );
+      
+      // Check if any scrapes were successful despite the overall failure
+      const partialResults = await promiseAllSettled(scrapePromises);
+      const successfulScrapes = partialResults.filter(r => r.status === 'fulfilled' && r.value).length;
+      
+      if (successfulScrapes > 0) {
+        this.logWithTime(
+          `Recovered ${successfulScrapes}/${scrapePromises.length} successful scrapes from failed parallel operation`,
+          "warning"
+        );
+        return partialResults.map(r => r.status === 'fulfilled' ? r.value : null);
+      }
+      
+      // If all failed, return array of nulls
+      return Array(parallelCount).fill(null);
+    }
+  }
+  
+  /**
+   * Scrape an event
+   * @param {string} eventId - The event ID to scrape
+   * @param {number} retryCount - Current retry count
+   * @param {Object} proxyAgent - Proxy agent to use
+   * @param {Object} proxy - Proxy configuration
+   * @param {Object} passedHeaders - Headers to use
+   * @param {Object} options - Additional options
+   * @returns {Promise<boolean>} - Success status
+   */
+  async scrapeEvent(eventId, retryCount = 0, proxyAgent = null, proxy = null, passedHeaders = null, options = {}) {
     // Skip if the event should be skipped
     if (this.shouldSkipEvent(eventId)) {
       return false;
     }
 
+    // If this is part of a parallel scrape, skip the circuit breaker check
+    const isParallelScrape = options.isParallelScrape || false;
+    const parallelIndex = options.parallelIndex || 0;
+    const parallelTimeout = options.parallelTimeout || SCRAPE_TIMEOUT;
+    
+    // Get time since last update
+    const lastUpdate = this.eventUpdateTimestamps.get(eventId);
+    const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
+    
+    // Check if this event is high priority (approaching 3-minute interval)
+    const isHighPriority = timeSinceUpdate > PARALLEL_SCRAPE_THRESHOLD;
+    
+    // ALWAYS use parallel scraping for all events unless this is already part of a parallel scrape
+    if (ALWAYS_USE_PARALLEL && !isParallelScrape && !options.preventParallel) {
+      this.logWithTime(
+        `Using parallel scraping for event ${eventId} (${Math.floor(timeSinceUpdate/1000)}s since update)`,
+        "info"
+      );
+      
+      // Determine number of parallel sessions based on time since last update
+      let parallelCount = 3; // Default
+      
+      // For events approaching the deadline, use more parallel sessions
+      if (timeSinceUpdate > SUPER_CRITICAL_THRESHOLD) {
+        parallelCount = 6; // Double the sessions for super critical events
+        this.logWithTime(`SUPER CRITICAL event ${eventId} - using ${parallelCount} parallel sessions`, "warning");
+      } else if (timeSinceUpdate > CRITICAL_UPDATE_THRESHOLD) {
+        parallelCount = 4; // More sessions for critical events
+        this.logWithTime(`CRITICAL event ${eventId} - using ${parallelCount} parallel sessions`, "warning");
+      }
+      
+      // Use parallel scraping and return the result
+      const parallelResults = await this.scrapeEventParallel(eventId, retryCount, {
+        parallelCount,
+        useExistingSession: true,
+        timeout: Math.min(SCRAPE_TIMEOUT, 60000) // Use shorter timeout for faster failure
+      });
+      
+      // Return true if any parallel scrape succeeded
+      return parallelResults.some(result => result === true);
+    }
+    
     // If circuit breaker is tripped, delay non-critical events
-    if (this.apiCircuitBreaker.tripped) {
-      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
-      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
-
+    if (this.apiCircuitBreaker.tripped && !isParallelScrape) {
       // Allow processing of critical events approaching 3-minute maximum, or events approaching 2-minute target
       if (
         timeSinceUpdate < MAX_UPDATE_INTERVAL - 20000 &&
@@ -1347,7 +1555,7 @@ export class ScraperManager {
         }
       }
     }
-
+    
     await this.acquireSemaphore();
     this.processingEvents.add(eventId);
     this.activeJobs.set(eventId, moment());
@@ -1360,8 +1568,9 @@ export class ScraperManager {
     try {
       // More detailed logging for better troubleshooting
       if (LOG_LEVEL >= 1) {
+        const parallelInfo = isParallelScrape ? ` (Parallel ${parallelIndex+1})` : '';
         this.logWithTime(
-          `Scraping ${eventId} (Attempt ${retryCount + 1})`,
+          `Scraping ${eventId} (Attempt ${retryCount + 1})${parallelInfo}`,
           "info"
         );
       }
@@ -1852,141 +2061,9 @@ export class ScraperManager {
     }
   }
 
-  // Removed batch event processing functionality - simplified to sequential processing only
 
-  // Removed batch event processing - using simplified sequential processing with getEvents() instead
 
-  async startContinuousScraping() {
-    if (!this.isRunning) {
-      this.isRunning = true;
-      this.logWithTime("Starting standard sequential scraping...", "info");
-
-      // Main scraping loop
-      while (this.isRunning) {
-        try {
-          // Process events from retry queue first
-          const retryEvents = this.getRetryEventsToProcess();
-
-          if (retryEvents.length > 0) {
-            this.logWithTime(
-              `Processing ${retryEvents.length} events from retry queue sequentially`,
-              "info"
-            );
-
-            // Process each event sequentially
-            for (const job of retryEvents) {
-              if (!this.isRunning) break;
-
-              try {
-                // Process this individual event with its retry count
-                await this.scrapeEvent(job.eventId, job.retryCount);
-
-                // Remove from retry queue if successful
-                this.retryQueue = this.retryQueue.filter(
-                  (item) => item.eventId !== job.eventId
-                );
-
-                // Small pause between events
-                await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing retry event ${job.eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
-          }
-
-          // Get regular events to process
-          const events = await this.getEvents();
-
-          if (events.length > 0) {
-            this.logWithTime(
-              `Processing ${events.length} events sequentially`,
-              "info"
-            );
-
-            // Process each event sequentially
-            for (const eventId of events) {
-              if (!this.isRunning) break;
-
-              try {
-                // Skip if already being processed
-                if (this.processingEvents.has(eventId)) {
-                  continue;
-                }
-
-                // Process this individual event
-                await this.scrapeEvent(eventId, 0);
-
-                // Small pause between events
-                await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
-          } else {
-            this.logWithTime("No events to process at this time", "info");
-          }
-
-          // Process failed events
-          const failedEvents = Array.from(this.failedEvents);
-
-          if (failedEvents.length > 0) {
-            this.logWithTime(
-              `Processing ${failedEvents.length} failed events sequentially`,
-              "info"
-            );
-
-            for (const eventId of failedEvents) {
-              if (!this.isRunning) break;
-
-              try {
-                // Skip if in cooldown
-                const now = moment();
-                if (
-                  this.cooldownEvents.has(eventId) &&
-                  now.isBefore(this.cooldownEvents.get(eventId))
-                ) {
-                  continue;
-                }
-
-                // Skip if already being processed
-                if (this.processingEvents.has(eventId)) {
-                  continue;
-                }
-
-                // Process this failed event
-                const failureCount = this.getRecentFailureCount(eventId);
-                await this.scrapeEvent(eventId, failureCount);
-
-                // Small pause between events
-                await setTimeout(200);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing failed event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
-            }
-          }
-
-          // Add a dynamic pause to avoid overloading
-          const pauseTime = this.getAdaptivePauseTime();
-          await setTimeout(pauseTime);
-        } catch (error) {
-          console.error(`Error in scraping loop: ${error.message}`);
-          // Brief pause on error to avoid spinning
-          await setTimeout(1000);
-        }
-      }
-    }
-  }
-
-  // Helper method to get retry events ready to process
+ 
   getRetryEventsToProcess() {
     const now = moment();
 
@@ -2142,9 +2219,10 @@ export class ScraperManager {
     }
   }
 
-  // This is the main getEvents method for sequential processing
-
-  // Get events to process in priority order (simplified version without domain grouping)
+  /**
+   * Get events to process in priority order with critical events first
+   * @returns {Array<string>} - Array of event IDs
+   */
   async getEvents() {
     try {
       const now = moment();
@@ -2168,63 +2246,129 @@ export class ScraperManager {
         return [];
       }
 
-      // Get current time
-      const currentTime = now.valueOf();
-
       // Calculate priority for each event
       const prioritizedEvents = events.map((event) => {
-        const lastUpdated = event.Last_Updated
-          ? moment(event.Last_Updated).valueOf()
-          : 0;
-        const timeSinceLastUpdate = currentTime - lastUpdated;
+        const timeSinceLastUpdate = event.Last_Updated
+          ? now.diff(moment(event.Last_Updated))
+          : Infinity;
+        
+        // Mark super critical and critical events for special handling
+        const isSuperCritical = timeSinceLastUpdate > SUPER_CRITICAL_THRESHOLD;
+        const isCritical = timeSinceLastUpdate > CRITICAL_UPDATE_THRESHOLD;
+        
+        // Calculate priority score - highest priority first
+        let priorityScore = 1;
 
-        // Higher score = higher priority
-        let priorityScore = timeSinceLastUpdate / 1000;
-
-        // Critical events approaching 2-minute threshold
-        if (timeSinceLastUpdate > 110000) {
-          priorityScore = priorityScore * 100;
+        // Super Critical - approaching 2.75 minutes (165 seconds) - highest possible priority
+        if (isSuperCritical) {
+          priorityScore = 1000000; // Extremely high priority
         }
-        // Very high - approaching 1.5 minutes
-        else if (timeSinceLastUpdate > 80000) {
-          priorityScore = priorityScore * 50;
+        // Critical - over 2.5 minutes (150 seconds) - very high priority
+        else if (isCritical) {
+          priorityScore = 100000;
         }
-        // High - over 1 minute
+        // Urgent - over 2 minutes (120 seconds)
+        else if (timeSinceLastUpdate > 120000) {
+          priorityScore = 10000;
+        }
+        // High - over 90 seconds
+        else if (timeSinceLastUpdate > 90000) {
+          priorityScore = 1000;
+        }
+        // Medium-high - over 60 seconds
         else if (timeSinceLastUpdate > 60000) {
-          priorityScore = priorityScore * 20;
+          priorityScore = 100;
         }
-        // Medium - over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
-          priorityScore = priorityScore * 10;
+        // Medium - over 30 seconds
+        else if (timeSinceLastUpdate > 30000) {
+          priorityScore = 10;
         }
 
         return {
           eventId: event.Event_ID,
           priorityScore,
           timeSinceLastUpdate,
+          isSuperCritical,
+          isCritical
         };
       });
 
       // Sort by priority (highest first)
       prioritizedEvents.sort((a, b) => b.priorityScore - a.priorityScore);
 
-      // Extract just the event IDs
-      return prioritizedEvents.map((event) => event.eventId);
-    } catch (error) {
-      console.error("Error getting events to process:", error);
-      return [];
+      // Create separate list of super-critical events for immediate processing
+      const superCriticalEvents = prioritizedEvents.filter(event => event.isSuperCritical);
+      
+      if (superCriticalEvents.length > 0) {
+        this.logWithTime(`Found ${superCriticalEvents.length} SUPER CRITICAL events approaching 3-minute deadline`, "warning");
+      }
+      
+      // Create list of critical events for high-priority processing
+    const criticalEvents = prioritizedEvents.filter((event) => event.isCritical && !event.isSuperCritical);
+
+    if (criticalEvents.length > 0) {
+      this.logWithTime(`Found ${criticalEvents.length} CRITICAL events approaching deadline`, "warning");
     }
+
+    // For super-critical events, immediately process them with highest priority
+    if (superCriticalEvents.length > 0) {
+      // Process super-critical events immediately with dedicated resources
+      this.processSuperCriticalEvents(superCriticalEvents.map((e) => e.eventId));
+    }
+
+    // Extract just the event IDs (all events, including critical ones that will get special handling)
+    return prioritizedEvents.map((event) => event.eventId);
+  } catch (error) {
+    console.error("Error getting events to process:", error);
+    return [];
   }
+}
 
-  async startContinuousScraping() {
-    if (!this.isRunning) {
-      this.isRunning = true;
-      this.logWithTime("Starting standard sequential scraping...", "info");
+/**
+ * Process super-critical events immediately with highest priority
+ * @param {Array<string>} eventIds - Array of super-critical event IDs
+ */
+async processSuperCriticalEvents(eventIds) {
+  if (eventIds.length === 0) return;
 
-      // Start cookie rotation cycle immediately (non-blocking)
-      this.forcePeriodicCookieRotation();
-      this.logWithTime("Started 15-minute cookie rotation cycle", "info");
+  this.logWithTime(` URGENT: Processing ${eventIds.length} super-critical events`, "error");
 
+  // Process each super-critical event with maximum parallel sessions
+  const promises = eventIds.map((eventId) => async () => {
+    try {
+      this.logWithTime(` Immediate processing of SUPER CRITICAL event ${eventId}`, "warning");
+
+      // Use maximum parallelism (6 sessions) and shorter timeout
+      await this.scrapeEventParallel(eventId, 0, {
+        parallelCount: 6,
+        useExistingSession: true,
+        timeout: SCRAPE_TIMEOUT / 2, // Half timeout for faster feedback
+        preventParallel: false, // Ensure we use parallel scraping
+      });
+
+      return true;
+    } catch (error) {
+      this.logWithTime(`Failed immediate processing of super-critical event ${eventId}: ${error.message}`, "error");
+      return false;
+    }
+  });
+
+  // Process all super-critical events with maximum concurrency
+  // and priority indices to ensure they run first
+  await promiseWithConcurrency(promises, Math.min(eventIds.length, 10), {
+    timeout: SCRAPE_TIMEOUT / 2, // Shorter timeout
+    priorityIndices: eventIds.map((_, i) => i), // All are priority
+  });
+}
+
+async startContinuousScraping() {
+  if (!this.isRunning) {
+    this.isRunning = true;
+    this.logWithTime("Starting continuous parallel scraping with aggressive timeouts...", "info");
+
+    // Start cookie rotation cycle immediately (non-blocking)
+    this.forcePeriodicCookieRotation();
+    this.logWithTime("Started 15-minute cookie rotation cycle", "info");
       // Start CSV upload cycle immediately (non-blocking)
       if (ENABLE_CSV_UPLOAD) {
         this.runCsvUploadCycle();
@@ -2286,27 +2430,46 @@ export class ScraperManager {
               "info"
             );
 
-            // Process each event sequentially
-            for (const eventId of events) {
-              if (!this.isRunning) break;
+            // Create promise-returning functions for each event
+            const eventPromiseFunctions = events
+              .filter(eventId => !this.shouldSkipEvent(eventId))
+              .map(eventId => {
+                return async () => {
+                  try {
+                    // Process this individual event
+                    return await this.scrapeEvent(eventId, 0);
+                  } catch (error) {
+                    this.logWithTime(
+                      `Error processing event ${eventId}: ${error.message}`,
+                      "error"
+                    );
+                    return false;
+                  }
+                };
+              });
 
-              try {
-                // Skip if already being processed
-                if (this.shouldSkipEvent(eventId)) {
-                  continue;
+            // Find super-critical and critical events for prioritization
+            const superCriticalIndices = events
+              .map((eventId, index) => {
+                const lastUpdate = this.eventUpdateTimestamps.get(eventId);
+                const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
+                return timeSinceUpdate > SUPER_CRITICAL_THRESHOLD ? index : -1;
+              })
+              .filter(index => index !== -1);
+
+            // Process events in parallel with aggressive timeouts and priorities
+            if (eventPromiseFunctions.length > 0) {
+              this.logWithTime(`Processing ${eventPromiseFunctions.length} events in parallel with ${Math.min(eventPromiseFunctions.length, CONCURRENT_LIMIT)} concurrent limit`, "info");
+              
+              // Process in batches of CONCURRENT_LIMIT with priority for critical events
+              await promiseWithConcurrency(
+                eventPromiseFunctions,
+                Math.min(eventPromiseFunctions.length, CONCURRENT_LIMIT),
+                {
+                  timeout: SCRAPE_TIMEOUT,
+                  priorityIndices: superCriticalIndices
                 }
-
-                // Process this individual event
-                await this.scrapeEvent(eventId, 0);
-
-                // Small pause between events
-                await setTimeout(100);
-              } catch (error) {
-                this.logWithTime(
-                  `Error processing event ${eventId}: ${error.message}`,
-                  "error"
-                );
-              }
+              );
             }
           } else {
             this.logWithTime("No events to process at this time", "info");
@@ -2622,15 +2785,8 @@ export class ScraperManager {
       this.logWithTime("CSV upload cycle stopped", "info");
     }
     
-    // Run one final CSV upload to ensure latest data is uploaded
-    try {
-      this.logWithTime("Running final CSV upload before shutdown", "info");
-      await this.runCsvUploadCycle();
-    } catch (error) {
-      this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
-    }
     
-    // Release any active proxies
+
     this.proxyManager.releaseAllProxies();
     
     this.logWithTime("Continuous scraping process stopped", "success");

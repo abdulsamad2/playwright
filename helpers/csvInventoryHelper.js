@@ -3,6 +3,19 @@ import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import csvParser from 'csv-parser';
+
+/**
+ * Streaming CSV reader for large files
+ * @param {string} filePath - Path to the CSV file
+ * @returns {AsyncGenerator<Object>} - Async generator yielding inventory records
+ */
+export async function* readInventoryFromCSVStream(filePath) {
+  const stream = fs.createReadStream(filePath).pipe(csvParser());
+  for await (const record of stream) {
+    yield record;
+  }
+}
 
 /**
  * Validates whether seats are consecutive
@@ -260,7 +273,7 @@ export function formatInventoryForExport(data) {
   
   // If both are missing, log a warning
   if (!event_id || !mapping_id) {
-    console.warn(`WARNING: Missing event_id or mapping_id for record with section=${data.section}, row=${data.row}`);
+    // console.warn(`WARNING: Missing event_id or mapping_id for record with section=${data.section}, row=${data.row}`);
   }
   
   // Use original event name if it was preserved, otherwise use the event_name

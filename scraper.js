@@ -3,36 +3,23 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { chromium,devices } from "playwright";
+import { devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
-import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
 import { CookieManager } from './helpers/CookieManager.js';
-import ProxyManager from './helpers/ProxyManager.js'; 
-import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 // Import functions from browser-cookies.js
 import {
-  initBrowser,
-  captureCookies,
   refreshCookies,
   loadCookiesFromFile,
-  saveCookiesToFile,
-  cleanup,
-  handleTicketmasterChallenge,
-  checkForTicketmasterChallenge,
-  enhancedFingerprint,
-  getRandomLocation,
-  getRealisticIphoneUserAgent,
-  simulateMobileInteractions
-} from './browser-cookies.js';
+  getRealisticIphoneUserAgent} from './browser-cookies.js';
 
 // Initialize CookieManager instance
 const cookieManager = new CookieManager();
@@ -44,10 +31,10 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 45000, // Increased from 30000
+  PAGE_TIMEOUT: 90000, // Increased from 45000 to 90 seconds
   MAX_RETRIES: 8, // Increased from 5
-  RETRY_DELAY: 10000,
-  CHALLENGE_TIMEOUT: 10000,
+  RETRY_DELAY: 15000, // Increased from 10000
+  CHALLENGE_TIMEOUT: 20000, // Increased from 10000
 };
 
 let browser = null;
@@ -473,7 +460,7 @@ function generateFallbackHeaders() {
 
 // New throttled request function to limit API calls (max 5 requests per 10 seconds)
 const throttle = pThrottle({
-  limit: 5,
+  limit: 15,
   interval: 10000
 });
 
@@ -961,7 +948,7 @@ const ScrapeEvent = async (
 
         if (global.proxyManager) {
           // Release the old proxy with error
-          if (externalProxy && externalProxy.proxy) {
+          if (agent && agent.proxy) {
             global.proxyManager.releaseProxy(eventId, false, error);
           }
 
@@ -998,8 +985,8 @@ const ScrapeEvent = async (
     }
 
     // Release proxy with error if we have a proxy manager
-    if (global.proxyManager && externalProxy && externalProxy.proxy) {
-      global.proxyManager.releaseProxy(event?.eventId || event, false, error);
+    if (global.proxyManager && proxy && proxy.proxy) {
+      global.proxyManager.releaseProxy(eventId, false, error);
     }
 
     return false;
@@ -1191,7 +1178,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
           
           if (global.proxyManager) {
             // Release the old proxy with error
-            if (externalProxy && externalProxy.proxy) {
+            if (agent && agent.proxy) {
               global.proxyManager.releaseProxy(eventId, false, error);
             }
 

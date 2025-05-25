@@ -592,6 +592,14 @@ async function refreshCookies(eventId, proxy = null) {
       throw initError || new Error("Failed to initialize browser");
     }
 
+    // Validate eventId to prevent null URLs
+    if (!eventId) {
+      console.error('Invalid eventId provided to refreshCookies: null or undefined');
+      // Use a fallback event ID
+      eventId = "Z7r9jZ1AdFaZv"; // Example event ID - replace with a known good one
+      console.warn(`Using fallback event ID ${eventId} for cookie refresh`);
+    }
+    
     // Navigate to event page
     const url = `https://www.ticketmaster.com/event/${eventId}`;
     console.log(`Navigating to ${url}`);
