@@ -1188,6 +1188,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         try {
           // Get a new proxy
           let newAgent;
+          let proxyData;
           
           if (global.proxyManager) {
             // Release the old proxy with error
@@ -1196,30 +1197,26 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
             }
 
             // Get a fresh proxy from ProxyManager
-            const proxyData = global.proxyManager.getProxyForEvent(eventId);
+            proxyData = global.proxyManager.getProxyForEvent(eventId);
             if (proxyData) {
-              const proxyAgentData =
-                global.proxyManager.createProxyAgent(proxyData);
+              const proxyAgentData = global.proxyManager.createProxyAgent(proxyData);
               newAgent = proxyAgentData.proxyAgent;
             } else {
               // Fallback
-              const proxyData = await GetProxy();
+              proxyData = await GetProxy();
               newAgent = proxyData.proxyAgent;
             }
           } else {
             // Fallback to old method
-            const proxyData = await GetProxy();
+            proxyData = await GetProxy();
             newAgent = proxyData.proxyAgent;
           }
           
-          // Wait before retry with increasing backoff
-          await delay(2000 + Math.random() * 2000 + attemptNum * 1000);
-          
-          // Try again with new proxy
-          return makeRequestWithRetry(url, headers, newAgent, attemptNum + 1, true);
+          console.log(`Got new proxy ${proxyData.proxy} for 403 retry`);
+          return await makeRequestWithRetry(url, headers, newAgent, attemptNum + 1, true);
         } catch (proxyError) {
           console.error(`Failed to get new proxy for 403 retry: ${proxyError.message}`);
-          throw error; // Rethrow original error if we can't get a new proxy
+          throw new Error(`Response code 403 (Forbidden)`);
         }
       }
       
@@ -1867,13 +1864,32 @@ async function refreshCookiesPeriodically() {
         throw new Error('No active events available for cookie refresh - cannot proceed without a valid event ID');
       }
       
-      // Get the proxy to use for refresh
-      const proxyManager = new ProxyManager();
-      const proxyData = proxyManager.getProxy();
+      // Get the proxy to use for refresh - with better error handling
+      let proxyData;
+      try {
+        const proxyManager = new ProxyManager();
+        proxyData = proxyManager.getProxy();
+        console.log(`Using proxy ${proxyData?.proxy || 'none'} for cookie refresh`);
+      } catch (proxyError) {
+        console.warn(`Error getting proxy for cookie refresh: ${proxyError.message}`);
+        // Use null proxy as fallback if proxy manager fails
+        proxyData = { proxy: null, username: null, password: null };
+      }
       
-      // Start tracking this refresh operation
+      // Start tracking this refresh operation with better error handling
       if (!refreshRecord) {
-        refreshRecord = await CookieRefreshTracker.startRefresh(eventId, proxyData.proxy);
+        try {
+          if (typeof CookieRefreshTracker !== 'undefined' && CookieRefreshTracker) {
+            console.log(`Starting cookie refresh tracking for event ${eventId}`);
+            refreshRecord = await CookieRefreshTracker.startRefresh(eventId, proxyData.proxy);
+            console.log(`Cookie refresh tracking started with ID: ${refreshRecord?.refreshId || 'unknown'}`);
+          } else {
+            console.log('CookieRefreshTracker not available, skipping refresh tracking');
+          }
+        } catch (trackingError) {
+          console.warn(`Failed to track cookie refresh: ${trackingError.message}`);
+          // Continue even if tracking fails
+        }
       }
       
       // Call refreshHeaders with the random event ID from database
@@ -1891,12 +1907,21 @@ async function refreshCookiesPeriodically() {
         // Save to file
         await cookieManager.saveCookiesToFile(newState.cookies);
         
-        // Track successful refresh in database
-        await CookieRefreshTracker.markSuccess(
-          refreshRecord.refreshId, 
-          newState.cookies.length, 
-          retryCount
-        );
+        // Track successful refresh in database with better error handling
+        try {
+          if (refreshRecord && typeof CookieRefreshTracker !== 'undefined' && CookieRefreshTracker) {
+            console.log(`Recording successful cookie refresh for event ${eventId} (${newState.cookies.length} cookies)`);
+            await CookieRefreshTracker.markSuccess(
+              refreshRecord.refreshId, 
+              newState.cookies.length, 
+              retryCount
+            );
+            console.log(`Successfully recorded cookie refresh success`);
+          }
+        } catch (trackingError) {
+          console.warn(`Failed to record successful cookie refresh: ${trackingError.message}`);
+          // Continue even if tracking fails
+        }
         
         return; // Success, exit the retry loop
       } else {
@@ -1919,13 +1944,20 @@ async function refreshCookiesPeriodically() {
   // If we've exhausted all retries, log the final error
   console.error('Failed to refresh cookies after all retries:', lastError?.message);
   
-  // Track failed refresh in database
-  if (refreshRecord) {
-    await CookieRefreshTracker.markFailed(
-      refreshRecord.refreshId, 
-      lastError?.message || 'Unknown error', 
-      retryCount
-    );
+  // Track failed refresh in database with better error handling
+  try {
+    if (refreshRecord && typeof CookieRefreshTracker !== 'undefined' && CookieRefreshTracker) {
+      console.log(`Recording failed cookie refresh after ${retryCount} attempts`);
+      await CookieRefreshTracker.markFailed(
+        refreshRecord.refreshId, 
+        lastError?.message || 'Unknown error', 
+        retryCount
+      );
+      console.log(`Successfully recorded cookie refresh failure`);
+    }
+  } catch (trackingError) {
+    console.warn(`Failed to record cookie refresh failure: ${trackingError.message}`);
+    // Continue even if tracking fails
   }
   
   throw lastError; // Re-throw to be handled by the interval
