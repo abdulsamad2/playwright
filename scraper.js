@@ -44,10 +44,10 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 15000, // Reduced from 45000 for faster processing
-  MAX_RETRIES: 3, // Reduced from 8 for faster cycling
-  RETRY_DELAY: 5000, // Reduced from 10000
-  CHALLENGE_TIMEOUT: 5000, // Reduced from 10000
+  PAGE_TIMEOUT: 30000, // Increased from 15000 for better success rate
+  MAX_RETRIES: 5, // Increased from 3 for better recovery
+  RETRY_DELAY: 3000, // Reduced from 5000 for faster recovery
+  CHALLENGE_TIMEOUT: 8000, // Increased from 5000 for better challenge handling
 };
 
 let browser = null;
@@ -471,15 +471,15 @@ function generateFallbackHeaders() {
 //   }
 // }
 
-// Throttled request function optimized for 1000+ events
+// Throttled request function optimized for 1000+ events with better resilience
 const throttle = pThrottle({
-  limit: 50, // Increased from 5 for high-volume processing
-  interval: 1000 // Reduced from 10000 for faster processing
+  limit: 100, // Increased from 50 for even higher volume
+  interval: 1000 // Keep at 1 second for good balance
 });
 
 const throttledRequest = throttle(async (options) => {
-  // Add minimal delay for 1000+ events processing
-  const humanDelay = Math.floor(Math.random() * 100) + 50;
+  // Minimal delay for maximum throughput
+  const humanDelay = Math.floor(Math.random() * 50) + 25; // Reduced delay
   await delay(humanDelay);
   return got(options);
 });
@@ -528,7 +528,7 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
           request: CONFIG.PAGE_TIMEOUT
         },
         retry: {
-          limit: 3, // Increased from 2
+          limit: 5, // Increased from 3 for better recovery
           methods: ['GET'],
           statusCodes: [408, 413, 429, 500, 502, 503, 504],
           errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'ENETUNREACH', 'EAI_AGAIN']
@@ -536,7 +536,7 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
         throwHttpErrors: false,
         signal: abortController.signal
       }), {
-        retries: 5, // Increased from 3
+        retries: 7, // Increased from 5 for maximum recovery
         onFailedAttempt: error => {
           console.log(`Request attempt ${error.attemptNumber} failed for ${eventId}. ${error.retriesLeft} retries left.`);
           // Longer delays between retries
@@ -1090,7 +1090,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         },
         headers: safeHeaders,
         timeout: {
-          request: 15000 // Reduced for faster processing of 1000+ events
+          request: 30000 // Increased from 15000 for better success rate
         },
         responseType: 'json',
         retry: {

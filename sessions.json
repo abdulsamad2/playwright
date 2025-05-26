@@ -1,5 +1,5 @@
 {
-  "lastUpdated": 1748290103077,
+  "lastUpdated": 1748290113959,
   "sessions": {
     "session_1748288972581_rzfi4tt3k1p": {
       "sessionId": "session_1748288972581_rzfi4tt3k1p",
@@ -24332,7 +24332,7 @@
       "proxy": null,
       "createdAt": 1748289956813,
       "lastUsed": 1748290097488,
-      "lastValidated": 1748290091978,
+      "lastValidated": 1748290103341,
       "usageCount": 2,
       "isValid": true,
       "metadata": {
@@ -45535,9 +45535,9 @@
       },
       "proxy": null,
       "createdAt": 1748290089582,
-      "lastUsed": 1748290089582,
+      "lastUsed": 1748290104467,
       "lastValidated": 1748290089582,
-      "usageCount": 0,
+      "usageCount": 1,
       "isValid": true,
       "metadata": {
         "userAgent": "",
@@ -46861,8 +46861,669 @@
         "password": "JCwIy9UzNi"
       },
       "createdAt": 1748290092455,
-      "lastUsed": 1748290092455,
-      "lastValidated": 1748290092455,
+      "lastUsed": 1748290113956,
+      "lastValidated": 1748290103345,
+      "usageCount": 1,
+      "isValid": true,
+      "metadata": {
+        "userAgent": "",
+        "referer": "",
+        "origin": ""
+      }
+    },
+    "session_1748290097349_n64oh59neu": {
+      "sessionId": "session_1748290097349_n64oh59neu",
+      "eventId": "0000615FD4C44198",
+      "originalEventId": "0000615FD4C44198",
+      "cookies": [
+        {
+          "name": "X-AB",
+          "value": "b760254f9ccb465d88c394221869c164",
+          "domain": "sc-static.net",
+          "path": "/scevent.min.js",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "eps_sid",
+          "value": "5ee7dc4a4369a8f3913002ed03e66299a1e25601",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "tmpt",
+          "value": "0:bb12379601000000:1748289937:b9f54e6c:f633080093c20b320df16122dbacebb0:813962e30eefbb9a8936577b7a2733e6e97501f8de4fdc32ba2e90ba06d0d99c",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "SID",
+          "value": "ivfiAf6-at50LvYqClUktSL0OsyM7POcYeB48tmtW400tCd6i0l8Ulj1SoxEKC1kSktFkrTGtZZIQT0a",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "lightstep_guid%2Fco2.sdk",
+          "value": "559a1d916023f75e",
+          "domain": "www.ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "lightstep_session_id",
+          "value": "16c297b84e4ef873",
+          "domain": "www.ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "mt.v",
+          "value": "2.266415051.1748289941298",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "TMUO",
+          "value": "east_mfjRIAyr45pNTT6BlYo/hTB/1ntqZ5NRN4IpPRDQ3Og=",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_gcl_au",
+          "value": "1.1.1433992639.1748289943",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "mt.pc",
+          "value": "2.1",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "mt.g.2f013145",
+          "value": "2.266415051.1748289941298",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "SID",
+          "value": "DNbyhMlFEBKUWRjeki6dvfkCsGZ75wbbk237TGNgVrL0xAnjrR53uJTHE0zWfXTwHAUgD2dIf25Mhx7h",
+          "domain": ".mapsapi.tmol.io",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_au_1d",
+          "value": "AU1D02000017482899473TW8VEK6GB44",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_ga_C1T806G4DF",
+          "value": "GS2.1.s1748289947$o1$g0$t1748289947$j60$l0$h0$d9SpAV1gDslHXeZFKYnVPuqkFha5ypXB8ZA",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "TDID",
+          "value": "074b31fc-abbb-42de-999c-6e3d46a5f1ca",
+          "domain": ".adsrvr.org",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_ga_H1KKSGW33X",
+          "value": "GS2.1.s1748289947$o1$g0$t1748289947$j60$l0$h0$d1H-oRDcfAvYFAd2Da2vFwJ8VllnGcjjW8A",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "ad-privacy",
+          "value": "0",
+          "domain": ".amazon-adsystem.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_pn",
+          "value": "eyJzdWIiOnsidWRyIjowLCJzcyI6MH0sImx1YSI6MTc0ODI4OTk0ODQ5Mn0",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Strict",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "ad-id",
+          "value": "A7SGC2KMy0PyjZfx-KI9Fkc",
+          "domain": ".amazon-adsystem.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "test_cookie",
+          "value": "CheckForPermission",
+          "domain": ".doubleclick.net",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "audit_p",
+          "value": "1|75j4Abr9vldOfvWI0LJV0w9AtYHuEP7quAustoxcGHAa5JdUKRYozAslwU8Vqgl2MqNJNu5Sp68wHTRO1/p4iHX0qfg68IpFQAPcN3ARK86Ssjwtmonfe9yMNmaVjWLaqYnS2hQygDqZYKpHXsZEUgTNbpofvX/ZAUZxVO7ztB/REvsM2ra73MRmS8gGs6ylTlon0IrnE1p4+byUJuUHKNl4Am3SUH3rwETMVR8lnVPictVKI3nW/ZSmfFa9k+2RfCCm1vF3Tgn8ih/oL8+08tuVaVkDFDbShAUs62yL6R/QD5U7tEfUTQ==",
+          "domain": ".rubiconproject.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "khaos",
+          "value": "MB5IP3TG-1S-CS4Z",
+          "domain": ".rubiconproject.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "khaos_p",
+          "value": "MB5IP3TG-1S-CS4Z",
+          "domain": ".rubiconproject.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "audit",
+          "value": "1|75j4Abr9vldOfvWI0LJV0w9AtYHuEP7quAustoxcGHAa5JdUKRYozAslwU8Vqgl2MqNJNu5Sp68wHTRO1/p4iHX0qfg68IpFQAPcN3ARK86Ssjwtmonfe9yMNmaVjWLaqYnS2hQygDqZYKpHXsZEUgTNbpofvX/ZAUZxVO7ztB/REvsM2ra73MRmS8gGs6ylTlon0IrnE1p4+byUJuUHKNl4Am3SUH3rwETMVR8lnVPictVKI3nW/ZSmfFa9k+2RfCCm1vF3Tgn8ih/oL8+08tuVaVkDFDbShAUs62yL6R/QD5U7tEfUTQ==",
+          "domain": ".rubiconproject.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_ga",
+          "value": "GA1.2.1103636160.1748289947",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_gid",
+          "value": "GA1.2.1007076957.1748289950",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_dc_gtm_UA-60025178-1",
+          "value": "1",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "uuid2",
+          "value": "6714328206113407326",
+          "domain": ".adnxs.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": true,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "seerses",
+          "value": "e",
+          "domain": ".www.ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "TM_PIXEL",
+          "value": "{\"_dvs\":\"0:mb5ip395:b8dmWgNI1cKaqq~tuSHGUoC94M5YD6B_\",\"_dvp\":\"0:mb5ip395:_gat9pmQzKKhLsQ_U6GPaJZN7VuenmvJ\"}",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_dvs",
+          "value": "0:mb5ip395:b8dmWgNI1cKaqq~tuSHGUoC94M5YD6B_",
+          "domain": "www.ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_dvp",
+          "value": "0:mb5ip395:_gat9pmQzKKhLsQ_U6GPaJZN7VuenmvJ",
+          "domain": "www.ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_scid",
+          "value": "iFlyqClDJKQcG6BPEJvDKLtuPic0tA0X",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "CMID",
+          "value": "aDTJoMAoInIACi62AjE09gAA",
+          "domain": ".casalemedia.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "CMPS",
+          "value": "2625",
+          "domain": ".casalemedia.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "CMPRO",
+          "value": "2625",
+          "domain": ".casalemedia.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "TDCPM",
+          "value": "CAESFgoHcnViaWNvbhILCJLXuObXpo4-EAUSFwoIYXBwbmV4dXMSCwiagrnm16aOPhAFEhUKBmdvb2dsZRILCJikuebXpo4-EAUSFQoGY2FzYWxlEgsIkonh9temjj4QBRIYCgliaWRzd2l0Y2gSCwjWtIWB2KaOPhAFGAUoATILCJqDiK7upo4-EAVCDyINCAESCQoFdGllcjIQAVoHbzNtMmdkcmABcgliaWRzd2l0Y2g.",
+          "domain": ".adsrvr.org",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "REMARKET-ADV-10346",
+          "value": "[{\"adv_aud_id\":\"10346\",\"adv_pid\":\"K8vZ9174TrV\",\"adv_cid\":\"KovZpZAEkvtA\",\"adv_bid\":\"vvG1VZbbyLxOsx\",\"adv_gid\":\"0\"}]",
+          "domain": ".advanseads.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "ADV-BCID",
+          "value": "80bf2013-acea-4c89-951b-111f4a85412c",
+          "domain": ".advanseads.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_uetsid",
+          "value": "d31495603a6c11f0a5c123d9bc59f0e3",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_uetvid",
+          "value": "d314cb003a6c11f0bac74d6dbeef39cf",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_ScCbts",
+          "value": "%5B%5D",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "fbh0",
+          "value": "%7B%7D",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "gcma",
+          "value": "%7B%22t%22%3A0%2C%22o%22%3Afalse%7D",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "rmxc",
+          "value": "%7B%22t%22%3A0%2C%22e%22%3A%22%22%2C%22i%22%3Afalse%7D",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "cktst",
+          "value": "747820878",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "ckid",
+          "value": "2035272509241",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "dph",
+          "value": "%7B%22t%22%3A%5B143756%5D%2C%22dp%22%3A%5B1962%5D%7D",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "ph",
+          "value": "%7B%22p%22%3A%5B1025%2C1490%2C1203%2C1476%2C39%2C1305%2C1084%2C1022%5D%2C%22t%22%3A%5B143756%2C143756%2C143756%2C143756%2C143756%2C143756%2C143756%2C143756%5D%7D",
+          "domain": ".yieldoptimizer.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_ttp",
+          "value": "2xeE5OP9IZ19XIvSZ8r9UFXppdf",
+          "domain": ".tiktok.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_scid_r",
+          "value": "gdlyqClDJKQcG6BPEJvDKLtuPic0tA0X24PQZw",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "sc_at",
+          "value": "v2|H4sIAAAAAAAAAE3GwRHAIAgEwIqYORAjl26C0IXF5+u+NqFW2pS9dos7hySy5StzYz/IqKOOV5eHBTnnuYofiNcHEEAAAAA=",
+          "domain": ".snapchat.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": true,
+          "sameSite": "None",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_cs_c",
+          "value": "0",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_cs_cvars",
+          "value": "%7B%221%22%3A%5B%22Page%20Name%22%2C%22TM_US%3A%20CCP%20EDP%3A%20RS%3A%20Onsale%22%5D%2C%222%22%3A%5B%22Page%20Type%22%2C%22CCP%20EDP%3A%20Onsale%22%5D%2C%223%22%3A%5B%22Modules%20Available%22%2C%22EDP_RseAllinPricing_USNeedtoKnowCal%22%5D%2C%224%22%3A%5B%22Platform%22%2C%22ccp-edp%22%5D%2C%225%22%3A%5B%22Login%20Status%22%2C%22Not%20Logged%20In%22%5D%2C%226%22%3A%5B%22Major%20Category%22%2C%22Sports%22%5D%2C%227%22%3A%5B%22Minor%20Category%22%2C%22Soccer%22%5D%2C%228%22%3A%5B%22Artist%20ID%22%2C%222370909%22%5D%2C%229%22%3A%5B%22Artist%20Name%22%2C%22FIFA%20Club%20World%20Cup%22%5D%2C%2210%22%3A%5B%22Venue%20ID%22%2C%22106734%22%5D%2C%2211%22%3A%5B%22Event%20ID%22%2C%220D00618E5F8A0C62%22%5D%2C%2212%22%3A%5B%22Event%20Date%22%2C%226%2F14%2F2025%22%5D%2C%2213%22%3A%5B%22EDP%20Page%20Type%22%2C%22CCP%20EDP%3A%20SIM%22%5D%2C%2214%22%3A%5B%22Event%20Type%22%2C%22STANDARD%22%5D%7D",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_cs_id",
+          "value": "541ed1b8-c3fe-ac7c-8718-31a548cad013.1748289954.1.1748289954.1748289954.1743116279.1782453954183.1.x",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        },
+        {
+          "name": "_cs_s",
+          "value": "1.T.0.9.1748291754184",
+          "domain": ".ticketmaster.com",
+          "path": "/",
+          "expires": 1748376354.19,
+          "httpOnly": false,
+          "secure": false,
+          "sameSite": "Lax",
+          "expiry": 1748376354.19
+        }
+      ],
+      "headers": {},
+      "fingerprint": {
+        "platform": {
+          "name": "Windows",
+          "version": "10",
+          "arch": "x64",
+          "type": "desktop"
+        },
+        "browser": {
+          "name": "Chrome",
+          "version": "120.0.0.0",
+          "mobile": false
+        },
+        "language": "de-DE",
+        "screen": {
+          "width": 3840,
+          "height": 2160,
+          "type": "desktop"
+        },
+        "colorDepth": 24,
+        "deviceMemory": 19,
+        "hardwareConcurrency": 4,
+        "timezone": "Asia/Tokyo",
+        "touchPoints": 0,
+        "devicePixelRatio": 1.5,
+        "sessionId": "f3f2bedfb34d17570efcf86f2195dbbe3d78ecd5fbb83bbe7555434ce1a12a41"
+      },
+      "proxy": null,
+      "createdAt": 1748290097349,
+      "lastUsed": 1748290097349,
+      "lastValidated": 1748290097349,
       "usageCount": 0,
       "isValid": true,
       "metadata": {
@@ -46887,6 +47548,7 @@
     "02006247B6FF87A1": "session_1748290078896_tg5oazjecv",
     "0800624EF44C4011": "session_1748290083915_a1owk5t2b5l",
     "1700616C87740D8D": "session_1748290089581_b0ewfl3ghk",
-    "01006274B6CE5B08": "session_1748290092454_2xeudyfe3e3"
+    "01006274B6CE5B08": "session_1748290092454_2xeudyfe3e3",
+    "0000615FD4C44198": "session_1748290097349_n64oh59neu"
   }
 }
