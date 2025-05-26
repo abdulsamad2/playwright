@@ -18,19 +18,19 @@ import SessionManager from './helpers/SessionManager.js';
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
-const CONCURRENT_LIMIT = Math.max(200, Math.floor(cpus().length * 25)); // Massively increased for 1000+ events
+const CONCURRENT_LIMIT = Math.max(500, Math.floor(cpus().length * 50)); // Massively increased for 1000+ events
 const MAX_RETRIES = 15; // Updated from 10 per request of user
-const SCRAPE_TIMEOUT = 30000; // Reduced to 30 seconds for faster failures
-const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 400); // Increased for bulk processing
-const RETRY_BACKOFF_MS = 500; // Reduced for faster retries
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 90000; // Reduced to 1.5 minutes for faster cycles
-const URGENT_THRESHOLD = 20000; // Events needing update within 20 seconds
+const SCRAPE_TIMEOUT = 20000; // Reduced to 20 seconds for faster failures
+const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 1000); // Increased for bulk processing
+const RETRY_BACKOFF_MS = 200; // Reduced for faster retries
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 60000; // Reduced to 1 minute for faster cycles
+const URGENT_THRESHOLD = 15000; // Events needing update within 15 seconds
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 const EVENT_FAILURE_THRESHOLD = 600000; // 10 minutes without updates before marking an event as stopped/failed
 
 // New cooldown settings - shorter cooldowns to allow for more frequent retries within 10 minute window
-const SHORT_COOLDOWNS = [500, 1000, 2000]; // Even shorter: 0.5s, 1s, 2s
-const LONG_COOLDOWN_MINUTES = 0.5; // Reduced to 30 seconds for faster recovery
+const SHORT_COOLDOWNS = [200, 500, 1000]; // Even shorter: 0.2s, 0.5s, 1s
+const LONG_COOLDOWN_MINUTES = 0.25; // Reduced to 15 seconds for faster recovery
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 1; // Default to warnings and errors only
@@ -98,10 +98,10 @@ const COOKIE_MANAGEMENT = {
 };
 
 // Update constants for large-scale processing
-const CONCURRENT_DOMAIN_LIMIT = 100; // Process many more events from same domain
-const DB_FETCH_LIMIT = 2000; // Fetch many more events at once
-const PARALLEL_BATCH_SIZE = 50; // Process 50 events in parallel per batch
-const MAX_PARALLEL_BATCHES = 10; // Run up to 10 batches concurrently
+const CONCURRENT_DOMAIN_LIMIT = 200; // Process many more events from same domain
+const DB_FETCH_LIMIT = 5000; // Fetch many more events at once
+const PARALLEL_BATCH_SIZE = 100; // Process 100 events in parallel per batch
+const MAX_PARALLEL_BATCHES = 20; // Run up to 20 batches concurrently
 
 // CSV Upload Constants
 const __filename = fileURLToPath(import.meta.url);
@@ -969,7 +969,7 @@ export class ScraperManager {
   }
 
   /**
-   * Generate CSV inventory for an event for each scrape
+   * Generate CSV inventory for an event for each scrape (OPTIMIZED)
    * @param {string} eventId - The event ID
    * @param {Array} scrapeResult - The scrape result data
    */
@@ -982,7 +982,7 @@ export class ScraperManager {
 
       // Get event data upfront with price increase percentage and mapping_id
       const event = await Event.findOne({ Event_ID: eventId })
-        .select("")
+        .select("Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate mapping_id")
         .lean();
 
       if (!event) {
@@ -1012,7 +1012,6 @@ export class ScraperManager {
 
       const mapping_id = event.mapping_id;
       const priceIncreasePercentage = event.priceIncreasePercentage;
-      const inHandDate = event?.inHandDate;
 
       // Filter out groups with fewer than 2 seats
       const validGroups = scrapeResult.filter(
@@ -1031,23 +1030,8 @@ export class ScraperManager {
         return;
       }
 
-      // Create a Set to track unique combinations of section, row, and seats
-      const uniqueGroups = new Set();
-
-      // Format the scrape results as inventory records, preventing duplicates
-      const inventoryRecords = [];
-      for (const group of validGroups) {
-        // Create a unique key for this group
-        const uniqueKey = `${group.section}-${group.row}-${group.seats.join(
-          ","
-        )}`;
-
-        // Skip if we've already processed this combination
-        if (uniqueGroups.has(uniqueKey)) {
-          continue;
-        }
-        uniqueGroups.add(uniqueKey);
-
+      // Format the scrape results as inventory records (optimized for bulk processing)
+      const inventoryRecords = validGroups.map((group) => {
         // Calculate the increased list price based on the percentage from database
         const basePrice = parseFloat(group.inventory.listPrice);
         const increasedPrice = (
@@ -1061,7 +1045,7 @@ export class ScraperManager {
           .split("T")[0];
 
         // Create a record with the exact required format
-        inventoryRecords.push({
+        return {
           inventory_id: uuidv4(),
           event_name: event?.Event_Name || `Event ${eventId}`,
           venue_name: event?.Venue || "Unknown Venue",
@@ -1094,13 +1078,10 @@ export class ScraperManager {
           passthrough: "",
           mapping_id: mapping_id, // Include mapping_id in the record
           source_event_id: eventId, // Store the original Event_ID to ensure proper association
-        });
-      }
+        };
+      });
 
-      // Delete old CSV files before adding new records
-      inventoryController.deleteOldCsvFiles(eventId);
-
-      // Add the inventory records in bulk
+      // Use optimized bulk inventory processing (no individual CSV files)
       const result = await inventoryController.addBulkInventory(
         inventoryRecords,
         eventId
@@ -1108,18 +1089,18 @@ export class ScraperManager {
 
       if (result.success) {
         this.logWithTime(
-          `Successfully generated CSV for event ${eventId}: ${result.message}`,
+          `Successfully processed inventory for event ${eventId}: ${result.message}`,
           "success"
         );
       } else {
         this.logWithTime(
-          `Failed to generate CSV for event ${eventId}: ${result.message}`,
+          `Failed to process inventory for event ${eventId}: ${result.message}`,
           "error"
         );
       }
     } catch (error) {
       this.logWithTime(
-        `Error generating CSV for event ${eventId}: ${error.message}`,
+        `Error processing inventory for event ${eventId}: ${error.message}`,
         "error"
       );
     }
@@ -1813,7 +1794,7 @@ export class ScraperManager {
           }
 
           // Short pause before next cycle
-          await setTimeout(1000); // Check every second for new events
+          await setTimeout(100); // Check every 100ms for new events
         } catch (error) {
           console.error(`Error in main event loop: ${error.message}`);
           await setTimeout(1000);
@@ -1845,7 +1826,7 @@ export class ScraperManager {
           await this.processBatchParallel(batch, workerId);
         } else {
           // No events to process, wait a bit
-          await setTimeout(100);
+          await setTimeout(50); // Reduced for faster cycling
         }
       } catch (error) {
         console.error(`Worker ${workerId} error: ${error.message}`);
@@ -1918,19 +1899,28 @@ export class ScraperManager {
       return true; // Skip if processed in last 30 seconds
     }
 
+    let proxyAgent = null;
+    let proxy = null;
+
     try {
-      // ALWAYS get unique headers and proxy for each event - never share
-      // This ensures each event has its own session and bypasses rate limiting
-      let headers;
-      let uniqueProxy = null;
-      
       // Get a unique proxy for this specific event
-      const { proxyAgent, proxy } = this.proxyManager.getProxyForEvent(eventId);
-      uniqueProxy = { proxyAgent, proxy };
-      
+      try {
+        const proxyData = this.proxyManager.getProxyForEvent(eventId);
+        if (proxyData) {
+          const proxyAgentData = this.proxyManager.createProxyAgent(proxyData);
+          proxyAgent = proxyAgentData.proxyAgent;
+          proxy = proxyAgentData.proxy;
+          
+          // Track proxy assignment
+          this.proxyManager.assignProxyToEvent(eventId, proxy.proxy);
+        }
+      } catch (proxyError) {
+        this.logWithTime(`Error getting proxy for ${eventId}: ${proxyError.message}`, "warning");
+      }
+
       // Force fresh headers for each event to ensure unique sessions
       const randomEventId = await this.getRandomEventId(eventId);
-      headers = await this.refreshEventHeaders(randomEventId, true); // Always force refresh
+      const headers = await this.refreshEventHeaders(randomEventId, true); // Always force refresh
       
       if (!headers) {
         throw new Error("Failed to obtain unique headers");
@@ -1949,12 +1939,12 @@ export class ScraperManager {
         eventId: eventId,
         headers: headers,
         sessionId: `unique-${eventId}-${Date.now()}`,
-        proxyId: proxy?.host || 'default'
+        proxyId: proxy?.proxy || 'default'
       };
 
       // Quick scrape with shorter timeout and unique session
       const result = await Promise.race([
-        ScrapeEvent(eventWithUniqueSession, uniqueProxy.proxyAgent, uniqueProxy.proxy),
+        ScrapeEvent(eventWithUniqueSession, proxyAgent, proxy),
         setTimeout(SCRAPE_TIMEOUT).then(() => {
           throw new Error("Scrape timeout");
         }),
@@ -1978,12 +1968,14 @@ export class ScraperManager {
       this.clearFailureCount(eventId);
 
       // Release proxy after successful use
-      this.proxyManager.releaseProxy(eventId, true);
+      if (proxy) {
+        this.proxyManager.releaseProxy(eventId, true);
+      }
 
       return true;
     } catch (error) {
       // Release proxy on error
-      if (uniqueProxy) {
+      if (proxy) {
         this.proxyManager.releaseProxy(eventId, false, error);
       }
       
@@ -2022,7 +2014,7 @@ export class ScraperManager {
    * Queue CSV generation for non-blocking processing
    */
   queueCsvGeneration(eventId, scrapeResult) {
-    this.csvProcessingQueue.push({ eventId, scrapeResult });
+    this.csvProcessingQueue.push({ eventId, scrapeResult, timestamp: Date.now() });
     
     // Start CSV processor if not running
     if (!this.csvProcessingActive) {
@@ -2031,7 +2023,7 @@ export class ScraperManager {
   }
 
   /**
-   * Non-blocking CSV processing worker
+   * Non-blocking CSV processing worker (OPTIMIZED for 1000+ events)
    */
   async startCsvProcessingWorker() {
     if (this.csvProcessingActive) return;
@@ -2039,10 +2031,14 @@ export class ScraperManager {
     this.csvProcessingActive = true;
     
     setImmediate(async () => {
+      let lastCombinedGeneration = Date.now();
+      
       while (this.csvProcessingQueue.length > 0 && this.isRunning) {
-        const batch = this.csvProcessingQueue.splice(0, 10); // Process 10 at a time
+        const batchSize = Math.min(50, this.csvProcessingQueue.length); // Larger batches
+        const batch = this.csvProcessingQueue.splice(0, batchSize);
         
         try {
+          // Process all events in parallel
           await Promise.all(
             batch.map(({ eventId, scrapeResult }) =>
               this.generateInventoryCsv(eventId, scrapeResult).catch(err =>
@@ -2050,12 +2046,53 @@ export class ScraperManager {
               )
             )
           );
+          
+          // Force combined CSV generation every 60 seconds or after processing 100+ events
+          const now = Date.now();
+          const timeSinceLastGeneration = now - lastCombinedGeneration;
+          const processedCount = batch.length;
+          
+          if (timeSinceLastGeneration > 60000 || processedCount >= 100) {
+            try {
+              const { forceCombinedCSVGeneration } = await import('./controllers/inventoryController.js');
+              const result = forceCombinedCSVGeneration();
+              
+              if (result.success) {
+                this.logWithTime(
+                  `Generated combined CSV: ${result.recordCount} records from ${result.eventCount} events`,
+                  "success"
+                );
+              }
+              
+              lastCombinedGeneration = now;
+            } catch (csvError) {
+              console.error(`Error generating combined CSV: ${csvError.message}`);
+            }
+          }
+          
         } catch (error) {
           console.error(`CSV batch processing error: ${error.message}`);
         }
         
-        // Small pause between batches
-        await setTimeout(10);
+        // Minimal pause between batches for 1000+ events
+        await setTimeout(5);
+      }
+      
+      // Generate final combined CSV when queue is empty
+      if (this.csvProcessingQueue.length === 0) {
+        try {
+          const { forceCombinedCSVGeneration } = await import('./controllers/inventoryController.js');
+          const result = forceCombinedCSVGeneration();
+          
+          if (result.success) {
+            this.logWithTime(
+              `Final combined CSV generated: ${result.recordCount} records from ${result.eventCount} events`,
+              "info"
+            );
+          }
+        } catch (csvError) {
+          console.error(`Error generating final combined CSV: ${csvError.message}`);
+        }
       }
       
       this.csvProcessingActive = false;
@@ -2365,24 +2402,53 @@ export class ScraperManager {
   }
 
   /**
-   * Asynchronously upload all_events_combined.csv file to Sync service
+   * Asynchronously upload all_events_combined.csv file to Sync service (OPTIMIZED)
    * This runs every 6 minutes while continuous scraping is active
    * and doesn't block the main scraping process
    */
   async runCsvUploadCycle() {
     try {
+      // Force generation of combined CSV before upload
+      try {
+        const { forceCombinedCSVGeneration, getInventoryStats } = await import('./controllers/inventoryController.js');
+        
+        // Get current stats
+        const stats = getInventoryStats();
+        this.logWithTime(
+          `Pre-upload stats: ${stats.totalEvents} events, ${stats.totalRecords} records in memory`,
+          "info"
+        );
+        
+        // Force generation of latest combined CSV
+        const result = forceCombinedCSVGeneration();
+        
+        if (result.success) {
+          this.logWithTime(
+            `Generated fresh combined CSV for upload: ${result.recordCount} records from ${result.eventCount} events`,
+            "info"
+          );
+        } else {
+          this.logWithTime(
+            `Failed to generate combined CSV: ${result.message}`,
+            "warning"
+          );
+        }
+      } catch (generationError) {
+        this.logWithTime(
+          `Error generating combined CSV before upload: ${generationError.message}`,
+          "warning"
+        );
+      }
+
       // Create the path to the all_events_combined.csv file
       const allEventsCsvPath = path.join(DATA_DIR, 'all_events_combined.csv');
       
       // Check if file exists
       if (!nodeFs.existsSync(allEventsCsvPath)) {
-        if (LOG_LEVEL >= 1) {
-          this.logWithTime(
-            `CSV upload skipped: all_events_combined.csv not found at ${allEventsCsvPath}`,
-            "warning"
-          );
-        }
-        // Simple console log
+        this.logWithTime(
+          `CSV upload skipped: all_events_combined.csv not found at ${allEventsCsvPath}`,
+          "warning"
+        );
         console.log(`[${new Date().toISOString()}] CSV UPLOAD: File not found - ${allEventsCsvPath}`);
         return;
       }
@@ -2394,41 +2460,25 @@ export class ScraperManager {
       // Check if the file contains required fields
       let hasMappingId = false;
       let hasEventId = false;
+      let recordCount = 0;
       
       try {
         const csvContent = await fs.readFile(allEventsCsvPath, 'utf8');
-        const firstLine = csvContent.split('\n')[0];
+        const lines = csvContent.split('\n');
+        const firstLine = lines[0];
+        recordCount = Math.max(0, lines.length - 2); // Subtract header and empty last line
         
         // Check if the header line contains mapping_id and event_id
         hasMappingId = firstLine.includes('mapping_id');
         hasEventId = firstLine.includes('event_id');
         
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK: mapping_id=${hasMappingId ? 'YES' : 'NO'}, event_id=${hasEventId ? 'YES' : 'NO'}`);
+        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK: ${recordCount} records, mapping_id=${hasMappingId ? 'YES' : 'NO'}, event_id=${hasEventId ? 'YES' : 'NO'}`);
         
         if (!hasMappingId || !hasEventId) {
           this.logWithTime(
             `CSV WARNING: Combined CSV file is missing required fields: ${!hasMappingId ? 'mapping_id ' : ''}${!hasEventId ? 'event_id' : ''}`,
             "warning"
           );
-          
-          // If the combined CSV is missing required fields, try to regenerate it
-          try {
-            console.log(`[${new Date().toISOString()}] CSV UPLOAD: Attempting to regenerate combined CSV file with missing fields`);
-            
-            // Import the generateCombinedEventsCSV function dynamically
-            const { generateCombinedEventsCSV } = await import('./controllers/inventoryController.js');
-            
-            // Generate a new combined CSV
-            const result = generateCombinedEventsCSV(false);
-            
-            if (result.success) {
-              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Successfully regenerated combined CSV file`);
-            } else {
-              console.log(`[${new Date().toISOString()}] CSV UPLOAD: Failed to regenerate combined CSV file: ${result.message}`);
-            }
-          } catch (regenerateError) {
-            console.error(`[${new Date().toISOString()}] CSV UPLOAD: Error regenerating combined CSV: ${regenerateError.message}`);
-          }
         }
       } catch (checkError) {
         console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK ERROR: ${checkError.message}`);
@@ -2436,17 +2486,17 @@ export class ScraperManager {
       
       // Log the start of upload process
       this.logWithTime(
-        `Starting CSV upload cycle for all_events_combined.csv (${fileSizeMB} MB)`, 
+        `Starting CSV upload cycle for all_events_combined.csv (${fileSizeMB} MB, ${recordCount} records)`, 
         "info"
       );
       
       // Simple console log for upload start
-      console.log(`[${new Date().toISOString()}] CSV UPLOAD: Starting upload of all_events_combined.csv (${fileSizeMB} MB)`);
+      console.log(`[${new Date().toISOString()}] CSV UPLOAD: Starting upload of all_events_combined.csv (${fileSizeMB} MB, ${recordCount} records)`);
       
       // Initialize the SyncService
       const syncService = new SyncService(COMPANY_ID, API_TOKEN);
       
-      // Upload the file asynchronously - use Promise to handle this without waiting
+      // Upload the file asynchronously
       try {
         // Add timestamp to track upload timing
         const uploadStartTime = moment();
@@ -2459,12 +2509,12 @@ export class ScraperManager {
         
         if (result.success) {
           this.logWithTime(
-            `Successfully uploaded all_events_combined.csv (${fileSizeMB} MB in ${uploadDuration}s)`,
+            `Successfully uploaded all_events_combined.csv (${fileSizeMB} MB, ${recordCount} records in ${uploadDuration}s)`,
             "success"
           );
           
           // Simple console log for success
-          console.log(`[${new Date().toISOString()}] CSV UPLOAD: SUCCESS - Uploaded ${fileSizeMB} MB in ${uploadDuration}s`);
+          console.log(`[${new Date().toISOString()}] CSV UPLOAD: SUCCESS - Uploaded ${fileSizeMB} MB (${recordCount} records) in ${uploadDuration}s`);
           
           // Track last successful upload time
           this.lastCsvUploadTime = moment();
@@ -2480,7 +2530,7 @@ export class ScraperManager {
       } catch (uploadError) {
         // More detailed error logging
         this.logWithTime(
-          `Error uploading CSV file (${fileSizeMB} MB): ${uploadError.message}`,
+          `Error uploading CSV file (${fileSizeMB} MB, ${recordCount} records): ${uploadError.message}`,
           "error"
         );
         
@@ -2816,7 +2866,7 @@ export class ScraperManager {
   }
 
   /**
-   * Get performance statistics for monitoring
+   * Get performance statistics for monitoring (ENHANCED with CSV stats)
    */
   getPerformanceStats() {
     const now = Date.now();
@@ -2831,7 +2881,10 @@ export class ScraperManager {
       processingCount: this.processingEvents.size,
       failedCount: this.failedEvents.size,
       successRate: this.successCount / (this.successCount + this.failedEvents.size) * 100,
-      csvQueueLength: this.csvProcessingQueue.length
+      csvQueueLength: this.csvProcessingQueue.length,
+      csvProcessingActive: this.csvProcessingActive,
+      memoryUsage: process.memoryUsage(),
+      lastCsvUpload: this.lastCsvUploadTime ? moment().diff(this.lastCsvUploadTime, 'minutes') : null
     };
 
     // Analyze event update times
@@ -2855,26 +2908,111 @@ export class ScraperManager {
       }
     }
 
+    // Add CSV processing stats
+    try {
+      import('./controllers/inventoryController.js').then(({ getInventoryStats }) => {
+        const csvStats = getInventoryStats();
+        stats.csvStats = {
+          eventsInMemory: csvStats.totalEvents,
+          recordsInMemory: csvStats.totalRecords,
+          avgRecordsPerEvent: csvStats.totalEvents > 0 ? Math.round(csvStats.totalRecords / csvStats.totalEvents) : 0
+        };
+      }).catch(() => {
+        stats.csvStats = { error: 'Unable to get CSV stats' };
+      });
+    } catch (error) {
+      stats.csvStats = { error: error.message };
+    }
+
     return stats;
   }
 
   /**
-   * Start performance monitoring (logs stats every 30 seconds)
+   * Start performance monitoring (logs stats every 30 seconds) - ENHANCED
    */
   startPerformanceMonitoring() {
-    setInterval(() => {
+    setInterval(async () => {
       const stats = this.getPerformanceStats();
+      const eventsPerMinute = Math.round((stats.eventsUpdatedLast1Min / 1) * 60);
+      const projectedCapacity = eventsPerMinute * 3; // Events that can be updated in 3 minutes
+      const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
+      
+      // Get CSV stats synchronously
+      let csvInfo = '';
+      try {
+        const { getInventoryStats } = await import('./controllers/inventoryController.js');
+        const csvStats = getInventoryStats();
+        csvInfo = ` | CSV: ${csvStats.totalEvents} events, ${csvStats.totalRecords} records in memory`;
+      } catch (error) {
+        csvInfo = ' | CSV: Stats unavailable';
+      }
+      
       this.logWithTime(
         `Performance: ${stats.eventsUpdatedLast3Min}/${stats.totalEvents} events updated in 3min | ` +
         `Queue: ${stats.queueLength} | Processing: ${stats.processingCount} | ` +
-        `Workers: ${stats.activeWorkers} | Success: ${stats.successRate.toFixed(1)}%`,
+        `Workers: ${stats.activeWorkers} | Success: ${stats.successRate.toFixed(1)}% | ` +
+        `Rate: ${eventsPerMinute}/min | Capacity: ${projectedCapacity} events/3min | ` +
+        `Memory: ${memoryMB}MB${csvInfo}`,
         "info"
       );
+      
+      // CSV processing status
+      if (stats.csvProcessingActive) {
+        this.logWithTime(
+          `CSV Processing: Active (${stats.csvQueueLength} in queue)`,
+          "info"
+        );
+      } else if (stats.csvQueueLength > 0) {
+        this.logWithTime(
+          `CSV Processing: Idle with ${stats.csvQueueLength} pending`,
+          "warning"
+        );
+      }
+      
+      // Memory warning
+      if (memoryMB > 1024) { // Over 1GB
+        this.logWithTime(
+          `HIGH MEMORY USAGE: ${memoryMB}MB - consider cleanup`,
+          "warning"
+        );
+        
+        // Trigger cleanup of old events
+        try {
+          const { cleanupOldEvents } = await import('./controllers/inventoryController.js');
+          const cleaned = cleanupOldEvents(12); // Clean events older than 12 hours
+          if (cleaned > 0) {
+            this.logWithTime(
+              `Cleaned up ${cleaned} old events from memory`,
+              "info"
+            );
+          }
+        } catch (cleanupError) {
+          console.error(`Error during memory cleanup: ${cleanupError.message}`);
+        }
+      }
       
       if (stats.criticalEvents.length > 0) {
         this.logWithTime(
           `WARNING: ${stats.criticalEvents.length} events not updated for >3 minutes`,
           "warning"
+        );
+      }
+      
+      // Check if we can handle 1000+ events
+      if (projectedCapacity >= 1000) {
+        this.logWithTime(
+          `✅ System capable of handling 1000+ events (current capacity: ${projectedCapacity} events/3min)`,
+          "success"
+        );
+      } else if (projectedCapacity >= 500) {
+        this.logWithTime(
+          `⚠️ System handling ${projectedCapacity} events/3min - scaling needed for 1000+`,
+          "warning"
+        );
+      } else {
+        this.logWithTime(
+          `❌ System only handling ${projectedCapacity} events/3min - major optimization needed`,
+          "error"
         );
       }
     }, 30000);

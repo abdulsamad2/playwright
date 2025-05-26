@@ -44,10 +44,10 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 45000, // Increased from 30000
-  MAX_RETRIES: 8, // Increased from 5
-  RETRY_DELAY: 10000,
-  CHALLENGE_TIMEOUT: 10000,
+  PAGE_TIMEOUT: 15000, // Reduced from 45000 for faster processing
+  MAX_RETRIES: 3, // Reduced from 8 for faster cycling
+  RETRY_DELAY: 5000, // Reduced from 10000
+  CHALLENGE_TIMEOUT: 5000, // Reduced from 10000
 };
 
 let browser = null;
@@ -471,15 +471,15 @@ function generateFallbackHeaders() {
 //   }
 // }
 
-// New throttled request function to limit API calls (max 5 requests per 10 seconds)
+// Throttled request function optimized for 1000+ events
 const throttle = pThrottle({
-  limit: 5,
-  interval: 10000
+  limit: 50, // Increased from 5 for high-volume processing
+  interval: 1000 // Reduced from 10000 for faster processing
 });
 
 const throttledRequest = throttle(async (options) => {
-  // Add random delay to make requests look more human
-  const humanDelay = Math.floor(Math.random() * 1000) + 500;
+  // Add minimal delay for 1000+ events processing
+  const humanDelay = Math.floor(Math.random() * 100) + 50;
   await delay(humanDelay);
   return got(options);
 });
@@ -742,37 +742,9 @@ const ScrapeEvent = async (
       );
     }
 
-    // If headers are provided (for batch processing), use them directly
-    if (event?.headers) {
-      console.log(`Processing headers for event ${eventId} (batch processing)`);
-
-      // Check different header formats for compatibility
-      if (typeof event.headers === "object") {
-        // If it's a complete headers object with all required fields
-        if (event.headers.headers) {
-          // Extract from nested headers property if available
-          cookieString =
-            event.headers.headers.Cookie || event.headers.headers.cookie;
-          userAgent =
-            event.headers.headers["User-Agent"] ||
-            event.headers.headers["user-agent"];
-        } else {
-          // Try direct properties
-          cookieString = event.headers.Cookie || event.headers.cookie;
-          userAgent =
-            event.headers["User-Agent"] || event.headers["user-agent"];
-        }
-
-        // For backwards compatibility, check if headers contains capturedState format
-        if (event.headers.cookies && Array.isArray(event.headers.cookies)) {
-          cookieString = event.headers.cookies
-            .map((cookie) => `${cookie.name}=${cookie.value}`)
-            .join("; ");
-        }
-      }
-
-      useProvidedHeaders = true;
-    }
+    // DISABLED: No more shared headers for batch processing
+    // Each event now gets its own unique session and headers
+    // This ensures proper isolation and bypasses rate limiting
 
     // Update rate limits
     ScrapeEvent.rateLimits.hourlyCount++;
@@ -785,50 +757,10 @@ const ScrapeEvent = async (
       proxy = proxyData.proxy;
     }
 
-    // If headers are provided (for batch processing), use them directly
-    if (event?.headers) {
-      console.log(`Processing headers for event ${eventId} (batch processing)`);
-
-      // Check different header formats for compatibility
-      if (typeof event.headers === "object") {
-        // If it's a complete headers object with all required fields
-        if (event.headers.headers) {
-          // Extract from nested headers property if available
-          cookieString =
-            event.headers.headers.Cookie || event.headers.headers.cookie;
-          userAgent =
-            event.headers.headers["User-Agent"] ||
-            event.headers.headers["user-agent"];
-        } else {
-          // Try direct properties
-          cookieString = event.headers.Cookie || event.headers.cookie;
-          userAgent =
-            event.headers["User-Agent"] || event.headers["user-agent"];
-        }
-
-        // For backwards compatibility, check if headers contains capturedState format
-        if (event.headers.cookies && Array.isArray(event.headers.cookies)) {
-          cookieString = event.headers.cookies
-            .map((cookie) => `${cookie.name}=${cookie.value}`)
-            .join("; ");
-        }
-      }
-
-      // Check if we have valid headers to use
-      if (cookieString && userAgent) {
-        console.log(
-          `Reusing existing headers for batch processing of event ${eventId}`
-        );
-        useProvidedHeaders = true;
-        // Initialize fingerprint with at least basic properties
-        fingerprint =
-          event.headers.fingerprint || generateEnhancedFingerprint();
-      } else {
-        console.log(
-          `Incomplete headers for event ${eventId}, falling back to standard flow`
-        );
-      }
-    }
+    // DISABLED: No more shared headers - each event gets unique session
+    // This ensures proper isolation and bypasses rate limiting
+    console.log(`Processing event ${eventId} with unique session and headers`);
+    useProvidedHeaders = false; // Always use fresh headers
 
     if (!useProvidedHeaders) {
       // Standard flow - get cookies and headers
@@ -893,9 +825,7 @@ const ScrapeEvent = async (
     };
 
     console.log(
-      `Starting event scraping for ${eventId} with${
-        event?.headers ? " shared" : ""
-      } cookies and enhanced headers...`
+      `Starting event scraping for ${eventId} with unique session and enhanced headers...`
     );
 
     // Measure API call time for performance monitoring
@@ -970,7 +900,7 @@ const ScrapeEvent = async (
 
         if (global.proxyManager) {
           // Release the old proxy with error
-          if (externalProxy && externalProxy.proxy) {
+          if (proxy && proxy.proxy) {
             global.proxyManager.releaseProxy(eventId, false, error);
           }
 
@@ -1007,7 +937,7 @@ const ScrapeEvent = async (
     }
 
     // Release proxy with error if we have a proxy manager
-    if (global.proxyManager && externalProxy && externalProxy.proxy) {
+    if (global.proxyManager && proxy && proxy.proxy) {
       global.proxyManager.releaseProxy(event?.eventId || event, false, error);
     }
 
@@ -1093,8 +1023,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     }
     
     try {
-      // Add random delay before request to mimic human behavior
-      await delay(100 + Math.random() * 400);
+      // Add minimal delay for 1000+ events processing
+      await delay(10 + Math.random() * 40);
       
       // Construct a safe copy of headers without any possible circular references
       const safeHeaders = {};
@@ -1160,7 +1090,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         },
         headers: safeHeaders,
         timeout: {
-          request: 45000 // Increased from 30000
+          request: 15000 // Reduced for faster processing of 1000+ events
         },
         responseType: 'json',
         retry: {
@@ -1292,8 +1222,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         DataMap = null;
       }
       
-      // Add variable delay between requests to appear more human-like
-      await delay(500 + Math.random() * 2000);
+      // Add minimal delay between requests for 1000+ events
+      await delay(50 + Math.random() * 200);
       
       try {
         const facetResponse = await makeRequestWithRetry(facetUrlWithParams, safeFacetHeader, proxyAgent);
