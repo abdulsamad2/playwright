@@ -663,7 +663,7 @@ const ScrapeEvent = async (
       ScrapeEvent.rateLimits = {
         hourlyCount: 0,
         lastHour: new Date().getHours(),
-        maxPerHour: 2000, // Increased from 1000 to handle more events
+        maxPerHour: 10000, // Massively increased for 1000+ events with unique sessions
         blockedUntil: 0,
         domainLimits: new Map(), // Track limits per domain
         lastRequestTime: new Map(), // Track last request time per domain
@@ -678,14 +678,20 @@ const ScrapeEvent = async (
       ScrapeEvent.rateLimits.domainLimits.clear();
     }
 
-    // Get domain for rate limiting
-    let domain = 'default';
+    // Create unique domain for each event to bypass rate limiting
+    // This ensures each event is treated separately and can use its own session/proxy
+    const baseEventId = event?.eventId || eventId || 'unknown';
+    const sessionId = event?.sessionId || `session-${Date.now()}`;
+    let domain = `event-${baseEventId}-${sessionId}`;
+    
+    // Fallback to URL-based domain if needed for logging
     if (event?.url) {
       try {
         const url = new URL(event.url);
-        domain = url.hostname;
+        const originalDomain = url.hostname;
+        domain = `${originalDomain}-${baseEventId}-${sessionId}`;
       } catch (e) {
-        // Invalid URL, use default domain
+        // Keep the unique event domain
       }
     }
 
@@ -693,7 +699,7 @@ const ScrapeEvent = async (
     if (!ScrapeEvent.rateLimits.domainLimits.has(domain)) {
       ScrapeEvent.rateLimits.domainLimits.set(domain, {
         count: 0,
-        maxPerMinute: 100, // Limit requests per minute per domain
+        maxPerMinute: 1000, // High limit since each event has unique domain
         lastMinute: new Date().getMinutes(),
       });
     }
@@ -701,17 +707,20 @@ const ScrapeEvent = async (
     const domainLimits = ScrapeEvent.rateLimits.domainLimits.get(domain);
     const currentMinute = new Date().getMinutes();
 
-    // Check domain-specific rate limits
+    // Check domain-specific rate limits - DISABLED for high-performance mode
     if (currentMinute !== domainLimits.lastMinute) {
       domainLimits.count = 0;
       domainLimits.lastMinute = currentMinute;
     }
 
-    if (domainLimits.count >= domainLimits.maxPerMinute) {
+    // BYPASS domain rate limiting when each event has unique session
+    // Each event now uses its own proxy and session, so domain limits don't apply
+    if (domainLimits.count >= domainLimits.maxPerMinute * 10) { // Increased limit 10x
       console.warn(
-        `Domain rate limit reached for ${domain} (${domainLimits.count}/${domainLimits.maxPerMinute})`
+        `Domain rate limit reached for ${domain} (${domainLimits.count}/${domainLimits.maxPerMinute * 10})`
       );
-      throw new Error(`Rate limit exceeded for domain ${domain}`);
+      // Don't throw error, just log warning for monitoring
+      console.log(`Continuing with unique sessions despite domain limit for ${eventId}`);
     }
 
     // Check global rate limits
@@ -1043,7 +1052,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   if (!callTicketmasterAPI.rateLimits) {
     callTicketmasterAPI.rateLimits = {
       window: 60 * 1000, // 1 minute window
-      maxPerWindow: 120, // Maximum 120 requests per minute
+      maxPerWindow: 2000, // Massively increased for 1000+ events with unique sessions
       requests: [], // Array to track request timestamps
       lastWarning: 0
     };

@@ -1748,6 +1748,9 @@ export class ScraperManager {
       this.isRunning = true;
       this.logWithTime("Starting high-performance parallel scraping for 1000+ events...", "info");
 
+      // Ensure proxy manager is available globally for the scraper
+      global.proxyManager = this.proxyManager;
+
       // Start performance monitoring
       this.startPerformanceMonitoring();
 
@@ -1859,10 +1862,7 @@ export class ScraperManager {
     this.processingBatches.set(batchId, batch);
 
     try {
-      // Get shared headers for the batch
-      const sharedHeaders = await this.getBatchHeaders();
-      
-      // Process all events in parallel
+      // Process all events in parallel with unique sessions for each
       const promises = batch.map(async (eventItem) => {
         const eventId = eventItem.eventId || eventItem;
         const retryCount = eventItem.retryCount || 0;
@@ -1871,8 +1871,8 @@ export class ScraperManager {
           // Mark as processing
           this.processingEvents.add(eventId);
           
-          // Process with shared headers for efficiency
-          const result = await this.scrapeEventOptimized(eventId, retryCount, sharedHeaders);
+          // Process with unique session for each event (no shared headers)
+          const result = await this.scrapeEventOptimized(eventId, retryCount, null);
           
           if (result) {
             // Update last processed time
@@ -1896,7 +1896,7 @@ export class ScraperManager {
       const successful = results.filter(r => r.success).length;
       if (LOG_LEVEL >= 2) {
         this.logWithTime(
-          `Worker ${workerId} completed batch: ${successful}/${batch.length} successful`,
+          `Worker ${workerId} completed batch: ${successful}/${batch.length} successful (each with unique session)`,
           "info"
         );
       }
@@ -1906,20 +1906,7 @@ export class ScraperManager {
     }
   }
 
-  /**
-   * Get shared headers for batch processing
-   */
-  async getBatchHeaders() {
-    try {
-      // Get a random event ID for headers
-      const randomEventId = await this.getRandomEventId("batch");
-      const headers = await this.refreshEventHeaders(randomEventId, false);
-      return headers;
-    } catch (error) {
-      console.error(`Error getting batch headers: ${error.message}`);
-      return null;
-    }
-  }
+
 
   /**
    * Optimized scrape event method for parallel processing
@@ -1932,16 +1919,42 @@ export class ScraperManager {
     }
 
     try {
-      // Use shared headers if available, otherwise get new ones
-      const headers = sharedHeaders || await this.refreshEventHeaders(eventId, retryCount > 0);
+      // ALWAYS get unique headers and proxy for each event - never share
+      // This ensures each event has its own session and bypasses rate limiting
+      let headers;
+      let uniqueProxy = null;
+      
+      // Get a unique proxy for this specific event
+      const { proxyAgent, proxy } = this.proxyManager.getProxyForEvent(eventId);
+      uniqueProxy = { proxyAgent, proxy };
+      
+      // Force fresh headers for each event to ensure unique sessions
+      const randomEventId = await this.getRandomEventId(eventId);
+      headers = await this.refreshEventHeaders(randomEventId, true); // Always force refresh
       
       if (!headers) {
-        throw new Error("Failed to obtain headers");
+        throw new Error("Failed to obtain unique headers");
       }
 
-      // Quick scrape with shorter timeout
+      // Add unique identifiers to headers to ensure no sharing
+      if (headers.headers) {
+        headers.headers["X-Event-ID"] = eventId;
+        headers.headers["X-Session-ID"] = `session-${eventId}-${Date.now()}`;
+        headers.headers["X-Unique-Request"] = `${eventId}-${Math.random().toString(36).substring(2)}`;
+        headers.headers["X-Processing-Time"] = Date.now().toString();
+      }
+
+      // Create event object with unique session data
+      const eventWithUniqueSession = {
+        eventId: eventId,
+        headers: headers,
+        sessionId: `unique-${eventId}-${Date.now()}`,
+        proxyId: proxy?.host || 'default'
+      };
+
+      // Quick scrape with shorter timeout and unique session
       const result = await Promise.race([
-        ScrapeEvent({ eventId, headers }),
+        ScrapeEvent(eventWithUniqueSession, uniqueProxy.proxyAgent, uniqueProxy.proxy),
         setTimeout(SCRAPE_TIMEOUT).then(() => {
           throw new Error("Scrape timeout");
         }),
@@ -1964,8 +1977,16 @@ export class ScraperManager {
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
 
+      // Release proxy after successful use
+      this.proxyManager.releaseProxy(eventId, true);
+
       return true;
     } catch (error) {
+      // Release proxy on error
+      if (uniqueProxy) {
+        this.proxyManager.releaseProxy(eventId, false, error);
+      }
+      
       // Quick failure handling
       this.failedEvents.add(eventId);
       this.incrementFailureCount(eventId);
