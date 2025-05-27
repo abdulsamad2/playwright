@@ -1,6 +1,5 @@
 import fs from 'fs';
-import { parse } from 'csv-parse/sync';
-import { stringify } from 'csv-stringify/sync';
+import csv from 'fast-csv';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -9,131 +8,91 @@ import { v4 as uuidv4 } from 'uuid';
  * @param {string} seatString - Potentially concatenated seat string
  * @returns {Array} - Array of individual seat numbers as strings
  */
-function splitConcatenatedSeats(seatString) {
-  // Remove any commas first and treat as a single string
-  const cleanString = seatString.toString().replace(/,/g, '').trim();
+export function splitConcatenatedSeats(seatString) {
+  if (!seatString) return [];
   
-  // If it's already properly formatted with commas, return as is
-  if (seatString.includes(',')) {
-    return seatString.split(',').map(s => s.toString().trim()).filter(Boolean);
+  const seatStr = seatString.toString();
+  
+  // If it's already comma-separated, return as is
+  if (seatStr.includes(',')) {
+    return seatStr.split(',').map(s => s.trim());
   }
   
-  // Check if this looks like concatenated consecutive numbers
-  if (cleanString.length > 4 && /^\d+$/.test(cleanString)) {
-    // Try to detect patterns - assume 2-4 digit seat numbers
-    const seats = [];
+  // Handle scientific notation (e.g., 6.12613614615617E+026)
+  if (seatStr.includes('E+') || seatStr.includes('e+')) {
+    // This is likely a corrupted value, return empty array
+    console.warn(`Detected scientific notation in seats: ${seatStr}`);
+    return [];
+  }
+  
+  // Handle concatenated numbers (e.g., "91011121314151617181920212223242526")
+  // Try to split into consecutive seat numbers
+  const numbers = [];
+  let current = '';
+  
+  for (let i = 0; i < seatStr.length; i++) {
+    current += seatStr[i];
     
-    // Try different seat number lengths (2, 3, or 4 digits)
-    for (const digitLength of [2, 3, 4]) {
-      if (cleanString.length % digitLength === 0) {
-        const chunks = [];
-        for (let i = 0; i < cleanString.length; i += digitLength) {
-          chunks.push(cleanString.substr(i, digitLength));
-        }
-        
-        // Check if these form a consecutive sequence
-        const numbers = chunks.map(Number).filter(n => !isNaN(n));
-        if (numbers.length > 1) {
-          const sorted = [...numbers].sort((a, b) => a - b);
-          let isConsecutive = true;
-          for (let i = 1; i < sorted.length; i++) {
-            if (sorted[i] !== sorted[i-1] + 1) {
-              isConsecutive = false;
-              break;
-            }
-          }
-          
-          if (isConsecutive) {
-            return chunks;
-          }
-        }
-      }
-    }
-    
-    // If no pattern found, try to split based on likely patterns
-    // Look for 3-digit numbers (most common)
-    if (cleanString.length >= 6) {
-      const seats = [];
-      for (let i = 0; i < cleanString.length; i += 3) {
-        const seat = cleanString.substr(i, 3);
-        if (seat.length === 3) {
-          seats.push(seat);
-        }
-      }
-      if (seats.length > 1) {
-        return seats;
+    // Check if we have a valid seat number (typically 1-3 digits)
+    if (current.length >= 1) {
+      const num = parseInt(current);
+      
+      // If we have a valid number and the next character would make it too large
+      // or we're at the end, save this number
+      if (!isNaN(num) && (i === seatStr.length - 1 || 
+          (current.length >= 2 && seatStr[i + 1] !== '0') ||
+          current.length >= 3)) {
+        numbers.push(current);
+        current = '';
       }
     }
   }
   
-  // Fallback: return as single seat
-  return [cleanString];
+  return numbers;
 }
 
 /**
- * Validates whether seats are consecutive
- * @param {string} seatsString - String containing seats separated by commas or concatenated
- * @returns {Object} - Result of validation containing status and fixed seats if needed
+ * Validates that seats are consecutive and fixes if needed
+ * @param {string} seatsString - String containing seats
+ * @returns {Object} - Validation result with fixed seats if needed
  */
 export function validateConsecutiveSeats(seatsString) {
   if (!seatsString) {
-    return {
-      valid: false,
-      message: 'No seats provided',
-      originalSeats: seatsString,
-      fixedSeats: null
-    };
+    return { valid: false, originalSeats: '', fixedSeats: '' };
   }
   
-  // Handle potential concatenated seats
   const seatArray = splitConcatenatedSeats(seatsString);
   
-  // Convert to numbers for validation, but keep as strings to avoid scientific notation
-  const seats = seatArray.map(seat => {
-    const num = parseInt(seat.toString().trim());
-    return isNaN(num) ? null : num;
-  }).filter(seat => seat !== null);
-  
-  // Check if all elements are numeric
-  if (seats.length === 0) {
-    return {
-      valid: false,
-      message: 'No valid numeric seats found',
-      originalSeats: seatsString,
-      fixedSeats: null
-    };
+  if (seatArray.length === 0) {
+    return { valid: false, originalSeats: seatsString, fixedSeats: '' };
   }
   
-  // Sort the seats numerically
-  const sortedSeats = [...seats].sort((a, b) => a - b);
+  // Convert to numbers and sort
+  const seatNumbers = seatArray
+    .map(s => parseInt(s))
+    .filter(n => !isNaN(n))
+    .sort((a, b) => a - b);
+  
+  if (seatNumbers.length === 0) {
+    return { valid: false, originalSeats: seatsString, fixedSeats: '' };
+  }
   
   // Check if seats are consecutive
   let isConsecutive = true;
-  for (let i = 1; i < sortedSeats.length; i++) {
-    if (sortedSeats[i] !== sortedSeats[i-1] + 1) {
+  for (let i = 1; i < seatNumbers.length; i++) {
+    if (seatNumbers[i] !== seatNumbers[i - 1] + 1) {
       isConsecutive = false;
       break;
     }
   }
   
-  // For non-consecutive seats, generate a consecutive sequence
-  let fixedSeats = sortedSeats.map(s => s.toString()).join(',');
-  if (!isConsecutive && sortedSeats.length > 1) {
-    // Create a consecutive sequence from min to max
-    const min = sortedSeats[0];
-    const max = sortedSeats[sortedSeats.length - 1];
-    const consecutiveSeats = Array.from({ length: max - min + 1 }, (_, i) => (min + i).toString());
-    fixedSeats = consecutiveSeats.join(',');
-  }
-  
-  // Always return seats as comma-separated strings to prevent scientific notation
-  const finalSeats = isConsecutive ? sortedSeats.map(s => s.toString()).join(',') : fixedSeats;
+  const fixedSeats = seatNumbers.join(',');
   
   return {
     valid: isConsecutive,
-    message: isConsecutive ? 'Seats are consecutive' : 'Seats are not consecutive',
     originalSeats: seatsString,
-    fixedSeats: finalSeats
+    fixedSeats: fixedSeats,
+    seatCount: seatNumbers.length
   };
 }
 
@@ -161,35 +120,69 @@ export function getSeatRange(seatsString) {
  * @returns {Array} - Array of parsed inventory items
  */
 export function readInventoryFromCSV(filePath) {
-  try {
-    const content = fs.readFileSync(filePath, 'utf8');
-    const records = parse(content, {
-      columns: true,
-      skip_empty_lines: true
-    });
-    return records;
-  } catch (error) {
-    console.error(`Error reading CSV file: ${error.message}`);
-    return [];
-  }
+  return new Promise((resolve, reject) => {
+    const records = [];
+    
+    fs.createReadStream(filePath)
+      .pipe(csv.parse({ headers: true }))
+      .on('data', row => records.push(row))
+      .on('end', () => resolve(records))
+      .on('error', error => {
+        console.error(`Error reading CSV file: ${error.message}`);
+        reject(error);
+      });
+  });
 }
 
 /**
  * Saves inventory data to CSV file
  * @param {Array} data - Array of inventory items
  * @param {string} filePath - Path to save the CSV file
- * @returns {boolean} - Success status
+ * @returns {Promise<boolean>} - Success status
  */
-export function saveInventoryToCSV(data, filePath) {
-  try {
-    const headers = Object.keys(data[0]);
-    const csv = stringify(data, { header: true, columns: headers });
-    fs.writeFileSync(filePath, csv);
-    return true;
-  } catch (error) {
-    console.error(`Error saving CSV file: ${error.message}`);
-    return false;
-  }
+export async function saveInventoryToCSV(data, filePath) {
+  return new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(filePath);
+    
+    // Process data to prevent Excel from converting to scientific notation
+    const processedData = data.map(record => {
+      const processedRecord = { ...record };
+      
+      // Handle seats field to prevent Excel issues - multiple strategies
+      if (processedRecord.seats) {
+        const seatsStr = processedRecord.seats.toString();
+        
+        // Strategy 1: Add Excel formula prefix to force text interpretation
+        // This prevents Excel from converting comma-separated numbers to scientific notation
+        processedRecord.seats = `="${seatsStr}"`;
+      }
+      
+      return processedRecord;
+    });
+    
+    const csvStream = csv.format({ 
+      headers: true,
+      quoteColumns: true, // Quote all columns to be safe
+      quoteHeaders: true
+    });
+    
+    csvStream.pipe(ws)
+      .on('finish', () => {
+        console.log(`CSV file saved: ${filePath}`);
+        resolve(true);
+      })
+      .on('error', error => {
+        console.error(`Error saving CSV file: ${error.message}`);
+        reject(error);
+      });
+    
+    // Write data
+    processedData.forEach(row => {
+      csvStream.write(row);
+    });
+    
+    csvStream.end();
+  });
 }
 
 /**
@@ -241,40 +234,51 @@ export function validateAndFixInventoryRecord(record) {
  * Processes a complete inventory CSV and validates all records
  * @param {string} inputFilePath - Path to the input CSV file
  * @param {string} outputFilePath - Path to save the validated CSV file
- * @returns {Object} - Processing statistics
+ * @returns {Promise<Object>} - Processing statistics
  */
-export function processInventoryCSV(inputFilePath, outputFilePath) {
+export async function processInventoryCSV(inputFilePath, outputFilePath) {
   const stats = {
     total: 0,
     fixed: 0,
-    errors: 0
+    errors: 0,
+    skipped: 0
   };
   
   try {
     // Read the CSV file
-    const records = readInventoryFromCSV(inputFilePath);
+    const records = await readInventoryFromCSV(inputFilePath);
     stats.total = records.length;
     
     // Process each record
-    const fixedRecords = records.map(record => {
+    const fixedRecords = [];
+    
+    for (const record of records) {
       try {
         const fixedRecord = validateAndFixInventoryRecord(record);
+        
+        // Skip null records (single seats)
+        if (!fixedRecord) {
+          stats.skipped++;
+          continue;
+        }
         
         // Check if the record was fixed
         if (JSON.stringify(fixedRecord) !== JSON.stringify(record)) {
           stats.fixed++;
         }
         
-        return fixedRecord;
+        fixedRecords.push(fixedRecord);
       } catch (error) {
         stats.errors++;
         console.error(`Error processing record: ${JSON.stringify(record)}`);
-        return record; // Return the original record if processing fails
+        fixedRecords.push(record); // Add the original record if processing fails
       }
-    });
+    }
     
-    // Save the processed data
-    saveInventoryToCSV(fixedRecords, outputFilePath);
+    // Save the processed data if we have any records
+    if (fixedRecords.length > 0) {
+      await saveInventoryToCSV(fixedRecords, outputFilePath);
+    }
     
     return stats;
   } catch (error) {
@@ -328,14 +332,22 @@ export function updateInventoryRecord(inventory, updates) {
  * @returns {Object} - Formatted inventory record
  */
 export function formatInventoryForExport(data) {
-  // Get seat count and format seats - handle concatenated seats
+  // Get seat count and format seats
   const uuid = uuidv4();
   let seats = data.seats || '';
   
-  // Handle potential concatenated seats and convert to proper comma-separated format
+  // Simply ensure seats are stored as strings - no need to split if already formatted
   if (seats) {
-    const seatArray = splitConcatenatedSeats(seats.toString());
-    seats = seatArray.join(','); // Always store as comma-separated strings
+    seats = seats.toString();
+    
+    // Only validate/fix if we detect an issue (concatenated numbers or scientific notation)
+    if (!seats.includes(',') || seats.includes('E+') || seats.includes('e+')) {
+      const validation = validateConsecutiveSeats(seats);
+      if (validation.fixedSeats && validation.fixedSeats !== seats) {
+        console.log(`🔧 CSV Export Seat Fix: "${seats}" → "${validation.fixedSeats}"`);
+        seats = validation.fixedSeats;
+      }
+    }
   }
   
   const seatArray = seats.split(',').map(s => s.toString().trim()).filter(Boolean);

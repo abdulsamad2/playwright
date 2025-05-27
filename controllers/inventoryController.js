@@ -305,9 +305,9 @@ const generateCombinedCSVBackground = async () => {
 
         // Save to file (this is the only potentially slow operation)
         await new Promise((resolve, reject) => {
-          setImmediate(() => {
+          setImmediate(async () => {
             try {
-              saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
+              await saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
               console.log(`✅ Background: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recent events`);
               console.log(`📊 CSV Changes: ${newRecordsCount.preserved} preserved, ${newRecordsCount.updated} updated, ${newRecordsCount.created} created, ${Math.max(0, removedRecords)} removed`);
               console.log(`🚫 Excluded: ${excludedEvents} stale events (>6 min)`);

@@ -48,7 +48,7 @@ program
   .description('Process a full inventory CSV file')
   .argument('<input>', 'Input CSV file path')
   .option('-o, --output <output>', 'Output file path (default: input-fixed.csv)')
-  .action((input, options) => {
+  .action(async (input, options) => {
     // Validate input file exists
     if (!fs.existsSync(input)) {
       console.error(chalk.red(`Error: Input file not found: ${input}`));
@@ -66,13 +66,14 @@ program
     console.log(chalk.blue('Output will be saved to:'), outputFile);
     
     // Process the file
-    const stats = processInventoryCSV(input, outputFile);
+    const stats = await processInventoryCSV(input, outputFile);
     
     // Report results
     console.log('\nProcessing complete:');
     console.log(chalk.blue(`Total records: ${stats.total}`));
     console.log(chalk.yellow(`Records fixed: ${stats.fixed}`));
     console.log(chalk.red(`Errors: ${stats.errors}`));
+    console.log(chalk.yellow(`Records skipped (single seats): ${stats.skipped}`));
     
     if (stats.fixed > 0) {
       console.log(chalk.green(`\nFixed file saved to: ${outputFile}`));
@@ -88,7 +89,7 @@ program
   .argument('<input>', 'Input CSV file path')
   .option('-i, --id <id>', 'Inventory ID to extract')
   .option('-o, --output <output>', 'Output file path for the extracted record')
-  .action((input, options) => {
+  .action(async (input, options) => {
     if (!fs.existsSync(input)) {
       console.error(chalk.red(`Error: Input file not found: ${input}`));
       process.exit(1);
@@ -100,7 +101,7 @@ program
     }
     
     // Read the inventory data
-    const records = readInventoryFromCSV(input);
+    const records = await readInventoryFromCSV(input);
     
     // Find the record with the matching ID
     const record = records.find(r => r.inventory_id === options.id);
@@ -116,7 +117,7 @@ program
     
     // Save to file if output option provided
     if (options.output) {
-      saveInventoryToCSV([record], options.output);
+      await saveInventoryToCSV([record], options.output);
       console.log(chalk.green(`Record saved to: ${options.output}`));
     }
   });
