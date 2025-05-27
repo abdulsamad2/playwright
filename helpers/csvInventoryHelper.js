@@ -5,19 +5,100 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
+ * Helper function to detect and split concatenated seat numbers
+ * @param {string} seatString - Potentially concatenated seat string
+ * @returns {Array} - Array of individual seat numbers as strings
+ */
+function splitConcatenatedSeats(seatString) {
+  // Remove any commas first and treat as a single string
+  const cleanString = seatString.toString().replace(/,/g, '').trim();
+  
+  // If it's already properly formatted with commas, return as is
+  if (seatString.includes(',')) {
+    return seatString.split(',').map(s => s.toString().trim()).filter(Boolean);
+  }
+  
+  // Check if this looks like concatenated consecutive numbers
+  if (cleanString.length > 4 && /^\d+$/.test(cleanString)) {
+    // Try to detect patterns - assume 2-4 digit seat numbers
+    const seats = [];
+    
+    // Try different seat number lengths (2, 3, or 4 digits)
+    for (const digitLength of [2, 3, 4]) {
+      if (cleanString.length % digitLength === 0) {
+        const chunks = [];
+        for (let i = 0; i < cleanString.length; i += digitLength) {
+          chunks.push(cleanString.substr(i, digitLength));
+        }
+        
+        // Check if these form a consecutive sequence
+        const numbers = chunks.map(Number).filter(n => !isNaN(n));
+        if (numbers.length > 1) {
+          const sorted = [...numbers].sort((a, b) => a - b);
+          let isConsecutive = true;
+          for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i] !== sorted[i-1] + 1) {
+              isConsecutive = false;
+              break;
+            }
+          }
+          
+          if (isConsecutive) {
+            return chunks;
+          }
+        }
+      }
+    }
+    
+    // If no pattern found, try to split based on likely patterns
+    // Look for 3-digit numbers (most common)
+    if (cleanString.length >= 6) {
+      const seats = [];
+      for (let i = 0; i < cleanString.length; i += 3) {
+        const seat = cleanString.substr(i, 3);
+        if (seat.length === 3) {
+          seats.push(seat);
+        }
+      }
+      if (seats.length > 1) {
+        return seats;
+      }
+    }
+  }
+  
+  // Fallback: return as single seat
+  return [cleanString];
+}
+
+/**
  * Validates whether seats are consecutive
- * @param {string} seatsString - String containing seats separated by commas
+ * @param {string} seatsString - String containing seats separated by commas or concatenated
  * @returns {Object} - Result of validation containing status and fixed seats if needed
  */
 export function validateConsecutiveSeats(seatsString) {
-  // Parse the seat numbers
-  const seats = seatsString.split(',').map(seat => seat.trim()).map(Number);
-  
-  // Check if all elements are numeric
-  if (seats.some(isNaN)) {
+  if (!seatsString) {
     return {
       valid: false,
-      message: 'All seats must be numeric values',
+      message: 'No seats provided',
+      originalSeats: seatsString,
+      fixedSeats: null
+    };
+  }
+  
+  // Handle potential concatenated seats
+  const seatArray = splitConcatenatedSeats(seatsString);
+  
+  // Convert to numbers for validation, but keep as strings to avoid scientific notation
+  const seats = seatArray.map(seat => {
+    const num = parseInt(seat.toString().trim());
+    return isNaN(num) ? null : num;
+  }).filter(seat => seat !== null);
+  
+  // Check if all elements are numeric
+  if (seats.length === 0) {
+    return {
+      valid: false,
+      message: 'No valid numeric seats found',
       originalSeats: seatsString,
       fixedSeats: null
     };
@@ -36,30 +117,38 @@ export function validateConsecutiveSeats(seatsString) {
   }
   
   // For non-consecutive seats, generate a consecutive sequence
-  let fixedSeats = seatsString;
-  if (!isConsecutive) {
+  let fixedSeats = sortedSeats.map(s => s.toString()).join(',');
+  if (!isConsecutive && sortedSeats.length > 1) {
     // Create a consecutive sequence from min to max
     const min = sortedSeats[0];
     const max = sortedSeats[sortedSeats.length - 1];
-    const consecutiveSeats = Array.from({ length: max - min + 1 }, (_, i) => min + i);
+    const consecutiveSeats = Array.from({ length: max - min + 1 }, (_, i) => (min + i).toString());
     fixedSeats = consecutiveSeats.join(',');
   }
+  
+  // Always return seats as comma-separated strings to prevent scientific notation
+  const finalSeats = isConsecutive ? sortedSeats.map(s => s.toString()).join(',') : fixedSeats;
   
   return {
     valid: isConsecutive,
     message: isConsecutive ? 'Seats are consecutive' : 'Seats are not consecutive',
     originalSeats: seatsString,
-    fixedSeats: fixedSeats
+    fixedSeats: finalSeats
   };
 }
 
 /**
  * Converts seat numbers string to a range format for display
- * @param {string} seatsString - String containing seats separated by commas
+ * @param {string} seatsString - String containing seats separated by commas or concatenated
  * @returns {string} - Range representation (e.g., "1-8")
  */
 export function getSeatRange(seatsString) {
-  const seats = seatsString.split(',').map(seat => seat.trim()).map(Number);
+  if (!seatsString) return '';
+  
+  // Handle potential concatenated seats
+  const seatArray = splitConcatenatedSeats(seatsString);
+  const seats = seatArray.map(seat => parseInt(seat.toString().trim())).filter(s => !isNaN(s));
+  
   if (seats.length === 0) return '';
   
   const sortedSeats = [...seats].sort((a, b) => a - b);
@@ -115,13 +204,16 @@ export function validateAndFixInventoryRecord(record) {
   // Validate seats are consecutive and fix if needed
   if (fixedRecord.seats) {
     const validation = validateConsecutiveSeats(fixedRecord.seats);
-    if (!validation.valid) {
+    if (!validation.valid && validation.fixedSeats) {
       fixedRecord.seats = validation.fixedSeats;
       console.log(`Fixed non-consecutive seats: ${validation.originalSeats} -> ${validation.fixedSeats}`);
+    } else if (validation.valid) {
+      // Even if valid, ensure proper comma-separated format
+      fixedRecord.seats = validation.fixedSeats;
     }
     
     // Update quantity based on the number of seats
-    const seatCount = fixedRecord.seats.split(',').length;
+    const seatCount = fixedRecord.seats.split(',').filter(Boolean).length;
     
     // Skip records with only one seat
     if (seatCount < 2) {
@@ -209,12 +301,15 @@ export function updateInventoryRecord(inventory, updates) {
   if (updates.seats) {
     // Validate seats are consecutive
     const validation = validateConsecutiveSeats(updatedInventory.seats);
-    if (!validation.valid) {
+    if (!validation.valid && validation.fixedSeats) {
+      updatedInventory.seats = validation.fixedSeats;
+    } else if (validation.valid) {
+      // Even if valid, ensure proper comma-separated format
       updatedInventory.seats = validation.fixedSeats;
     }
     
     // Update quantity based on number of seats
-    const seatCount = updatedInventory.seats.split(',').length;
+    const seatCount = updatedInventory.seats.split(',').filter(Boolean).length;
     updatedInventory.quantity = seatCount.toString();
     
     // Update custom_split if split_type is CUSTOM
@@ -233,10 +328,17 @@ export function updateInventoryRecord(inventory, updates) {
  * @returns {Object} - Formatted inventory record
  */
 export function formatInventoryForExport(data) {
-  // Get seat count and format seats
+  // Get seat count and format seats - handle concatenated seats
   const uuid = uuidv4();
-  const seats = data.seats || '';
-  const seatArray = seats.split(',').map(s => s.trim()).filter(Boolean);
+  let seats = data.seats || '';
+  
+  // Handle potential concatenated seats and convert to proper comma-separated format
+  if (seats) {
+    const seatArray = splitConcatenatedSeats(seats.toString());
+    seats = seatArray.join(','); // Always store as comma-separated strings
+  }
+  
+  const seatArray = seats.split(',').map(s => s.toString().trim()).filter(Boolean);
   const quantity = seatArray.length || (data.quantity ? parseInt(data.quantity) : 0);
   
   // Calculate split information

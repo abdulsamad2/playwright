@@ -208,21 +208,13 @@ export const stopEventScraping = async (req, res) => {
       { new: true }
     );
 
-    // Remove from active jobs if it's currently being scraped
-    if (scraperManager.activeJobs.has(event.Event_ID)) {
-      scraperManager.activeJobs.delete(event.Event_ID);
-      scraperManager.logWithTime(`Stopped scraping for event ${event.Event_ID}`, "info");
-    }
+    // Clean up all tracking data for this event
+    scraperManager.cleanupEventTracking(event.Event_ID);
 
     // Remove from retry queue if present
     scraperManager.retryQueue = scraperManager.retryQueue.filter(
       (item) => item.eventId !== event.Event_ID
     );
-
-    // Clear any failure counts or cooldowns
-    scraperManager.eventFailureCounts.delete(event.Event_ID);
-    scraperManager.eventFailureTimes.delete(event.Event_ID);
-    scraperManager.cooldownEvents.delete(event.Event_ID);
 
     res.json({
       status: "success",
@@ -252,10 +244,8 @@ export const deleteEvent = async (req, res) => {
       });
     }
 
-    // Remove from active jobs if it's currently being scraped
-    if (scraperManager.activeJobs.has(eventId)) {
-      scraperManager.activeJobs.delete(eventId);
-    }
+    // Clean up all tracking data for this event
+    scraperManager.cleanupEventTracking(eventId);
 
     // Remove from retry queue if present
     scraperManager.retryQueue = scraperManager.retryQueue.filter(
@@ -267,6 +257,137 @@ export const deleteEvent = async (req, res) => {
       message: `Event ${eventId} deleted successfully`,
     });
   } catch (error) {
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+};
+
+export const handleStaleEvents = async (req, res) => {
+  try {
+    // Trigger stale event recovery and auto-stop process manually
+    await scraperManager.handleStaleEvents();
+    
+    res.json({
+      status: "success",
+      message: "Stale event recovery and auto-stop process completed",
+    });
+  } catch (error) {
+    console.error("Error in manual stale event handling:", error);
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+};
+
+export const getStaleEventStats = async (req, res) => {
+  try {
+    // Get statistics about stale events
+    const stats = await scraperManager.getStaleEventStats();
+    
+    if (!stats) {
+      return res.status(500).json({
+        status: "error",
+        message: "Failed to get stale event statistics",
+      });
+    }
+    
+    res.json({
+      status: "success",
+      data: stats,
+      summary: {
+        totalActive: stats.totalActiveEvents,
+        criticalStale: stats.staleOver10Min.length,
+        csvExcluded: stats.staleOver6Min.length + stats.staleOver10Min.length,
+        warningStale: stats.staleOver3Min.length,
+        healthy: stats.recentlyUpdated.length
+      }
+    });
+  } catch (error) {
+    console.error("Error getting stale event stats:", error);
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+};
+
+export const forceCsvGeneration = async (req, res) => {
+  try {
+    // Import inventory controller to force CSV generation
+    const inventoryController = (await import('./inventoryController.js')).default;
+    
+    // Force CSV generation with behavior rules
+    const result = inventoryController.forceCombinedCSVGeneration();
+    
+    res.json({
+      status: "success",
+      message: "CSV generation forced with behavior rules",
+      data: result
+    });
+  } catch (error) {
+    console.error("Error forcing CSV generation:", error);
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+};
+
+export const getCsvStats = async (req, res) => {
+  try {
+    // Import inventory controller to get CSV stats
+    const { getInventoryStats } = await import('./inventoryController.js');
+    
+    // Get detailed CSV and inventory statistics
+    const stats = getInventoryStats();
+    
+    res.json({
+      status: "success",
+      data: stats
+    });
+  } catch (error) {
+    console.error("Error getting CSV stats:", error);
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+};
+
+export const testSeatFormatting = async (req, res) => {
+  try {
+    const { seats } = req.body;
+    
+    if (!seats) {
+      return res.status(400).json({
+        status: "error",
+        message: "Please provide 'seats' in request body",
+      });
+    }
+    
+    // Import the validation function
+    const { validateConsecutiveSeats } = await import('../helpers/csvInventoryHelper.js');
+    
+    // Test the seat formatting
+    const result = validateConsecutiveSeats(seats);
+    
+    res.json({
+      status: "success",
+      data: {
+        input: seats,
+        result: result,
+        examples: {
+          "concatenated_example": "103104105106107",
+          "expected_output": "103,104,105,106,107",
+          "scientific_notation_issue": "Prevents seats from becoming 1.03104105106107E+14"
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error testing seat formatting:", error);
     res.status(500).json({
       status: "error",
       message: error.message,
@@ -332,7 +453,7 @@ export const downloadEventCsv = async (req, res) => {
       quantity: group.inventory.quantity,
       section: group.section,
       row: group.row,
-      seats: group.seats.map(s => s.number).join(","),
+      seats: group.seats.map(s => s.number.toString()).join(","),
       barcodes: "",
       internal_notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
       public_notes: group.inventory.publicNotes || `These are ${group.row} Row`,

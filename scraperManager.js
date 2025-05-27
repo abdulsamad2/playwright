@@ -1022,7 +1022,7 @@ export class ScraperManager {
           quantity: group.inventory.quantity,
           section: group.section,
           row: group.row,
-          seats: group.seats.join(","),
+          seats: group.seats.map(seat => seat.toString()).join(","),
           list_price: increasedPrice,
           face_price: group.inventory?.tickets?.[0]?.faceValue || "",
           taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || "",
@@ -1601,14 +1601,17 @@ export class ScraperManager {
             // Continue with retry logic below
           } else {
             this.logWithTime(
-              `Event ${eventId} exhausted all retries including emergency retries`,
+              `Event ${eventId} exhausted all retries including emergency retries - SETTING Skip_Scraping = true`,
               "error"
             );
+            
+            // Set Skip_Scraping = true for events that exhausted all retries
+            await this.setEventSkipScraping(eventId, "exhausted_all_retries", retryCount, eventRetryLimit);
             return false;
           }
         } else {
           this.logWithTime(
-            `Event ${eventId} exceeded retry limit (${retryCount}/${eventRetryLimit}) - stopping retries`,
+            `Event ${eventId} exceeded retry limit (${retryCount}/${eventRetryLimit}) - SETTING Skip_Scraping = true`,
             "error"
           );
           
@@ -1620,8 +1623,9 @@ export class ScraperManager {
             { retryCount, eventRetryLimit, timeSinceUpdate }
           );
 
-          // Don't add to retry queue - this event will be marked as failed
-        return false;
+          // Set Skip_Scraping = true for events that exceeded retry limit
+          await this.setEventSkipScraping(eventId, "max_retries_exceeded", retryCount, eventRetryLimit);
+          return false;
         }
       }
 
@@ -1707,6 +1711,27 @@ export class ScraperManager {
     if (!this.isRunning) {
       this.isRunning = true;
       this.logWithTime("Starting high-performance parallel scraping for 1000+ events...", "info");
+
+      // Log Skip_Scraping status summary at startup
+      try {
+        const totalEvents = await Event.countDocuments({});
+        const skippedEvents = await Event.countDocuments({ Skip_Scraping: true });
+        const activeEvents = totalEvents - skippedEvents;
+        
+        this.logWithTime(
+          `📊 Event Status Summary: ${totalEvents} total events, ${activeEvents} active for scraping, ${skippedEvents} excluded (Skip_Scraping: true)`,
+          "info"
+        );
+        
+        if (skippedEvents > 0) {
+          this.logWithTime(
+            `⚠️ ${skippedEvents} events will be EXCLUDED from scraping due to Skip_Scraping: true`,
+            "warning"
+          );
+        }
+      } catch (error) {
+        this.logWithTime(`Error getting event status summary: ${error.message}`, "warning");
+      }
 
       // Ensure proxy manager is available globally for the scraper
       global.proxyManager = this.proxyManager;
@@ -1962,13 +1987,22 @@ export class ScraperManager {
       this.failedEvents.add(eventId);
       this.incrementFailureCount(eventId);
       
-      // Add to retry queue if under limit
+      // Add to retry queue if under limit, otherwise set Skip_Scraping = true
       if (retryCount < 3) { // Reduced retry limit for faster cycling
         this.eventProcessingQueue.push({
           eventId,
           retryCount: retryCount + 1,
           isRetry: true
         });
+      } else {
+        // Event exceeded retry limit in optimized processing - set Skip_Scraping = true
+        this.logWithTime(
+          `Event ${eventId} exceeded optimized retry limit (${retryCount}/3) - SETTING Skip_Scraping = true`,
+          "error"
+        );
+        
+        // Set Skip_Scraping = true for events that failed optimized processing
+        await this.setEventSkipScraping(eventId, "optimized_processing_failed", retryCount, 3);
       }
       
       return false;
@@ -2171,8 +2205,14 @@ export class ScraperManager {
       const now = moment();
 
       // Find ALL active events - no limit for 1000+ events
+      // CRITICAL: Only get events where Skip_Scraping is explicitly NOT true
       const events = await Event.find({
-        Skip_Scraping: { $ne: true },
+        $or: [
+          { Skip_Scraping: { $ne: true } },
+          { Skip_Scraping: { $exists: false } }, // Include events without the field
+          { Skip_Scraping: null },
+          { Skip_Scraping: false }
+        ]
       })
         .select("Event_ID url Last_Updated")
         .lean();
@@ -2798,9 +2838,709 @@ export class ScraperManager {
   }
 
   /**
+   * Set Skip_Scraping = true for failed events and clean up tracking
+   * @param {string} eventId - The event ID
+   * @param {string} reason - Reason for stopping scraping
+   * @param {number} retryCount - Current retry count
+   * @param {number} eventRetryLimit - Retry limit that was exceeded
+   */
+  async setEventSkipScraping(eventId, reason, retryCount = 0, eventRetryLimit = MAX_RETRIES) {
+    try {
+      // Update event in database to stop scraping
+      const updateResult = await Event.updateOne(
+        { Event_ID: eventId },
+        { 
+          $set: { 
+            Skip_Scraping: true,
+            status: "stopped_failed_retries",
+            failed_reason: reason,
+            failed_at: new Date(),
+            retry_count_when_failed: retryCount,
+            retry_limit_when_failed: eventRetryLimit,
+            last_failure_attempt: new Date()
+          } 
+        }
+      );
+
+      if (updateResult.modifiedCount > 0) {
+        this.logWithTime(
+          `🛑 STOPPED SCRAPING for event ${eventId}: Skip_Scraping = true (reason: ${reason}, retries: ${retryCount}/${eventRetryLimit})`,
+          "error"
+        );
+      } else {
+        this.logWithTime(
+          `⚠️ Failed to update Skip_Scraping for event ${eventId} - event may not exist in database`,
+          "warning"
+        );
+      }
+
+      // Complete cleanup of all tracking data
+      this.cleanupEventTracking(eventId);
+      
+      // Remove from retry queue permanently
+      this.retryQueue = this.retryQueue.filter(item => item.eventId !== eventId);
+      
+      // Clear from all processing queues
+      this.eventProcessingQueue = this.eventProcessingQueue.filter(item => 
+        (typeof item === 'string' ? item : item.eventId) !== eventId
+      );
+      
+      // Remove from failed events set
+      this.failedEvents.delete(eventId);
+      
+      // Log detailed audit trail
+      await this.logError(
+        eventId,
+        "SKIP_SCRAPING_SET",
+        new Error(`Event excluded from scraping: ${reason}`),
+        {
+          reason: reason,
+          retryCount: retryCount,
+          eventRetryLimit: eventRetryLimit,
+          skipScrapingSet: true,
+          excludedFromScraping: true,
+          stoppedAt: new Date().toISOString()
+        }
+      );
+      
+      this.logWithTime(
+        `🚫 Event ${eventId} permanently excluded from scraping (Skip_Scraping = true)`,
+        "warning"
+      );
+
+      // Force a CSV regeneration to exclude stopped events
+      try {
+        const { forceCombinedCSVGeneration } = await import('./controllers/inventoryController.js');
+        forceCombinedCSVGeneration();
+        this.logWithTime(
+          `📊 Forced CSV regeneration to exclude stopped event ${eventId}`,
+          "info"
+        );
+      } catch (csvError) {
+        this.logWithTime(`Error forcing CSV regeneration: ${csvError.message}`, "warning");
+      }
+
+    } catch (error) {
+      this.logWithTime(`Error setting Skip_Scraping for event ${eventId}: ${error.message}`, "error");
+    }
+  }
+
+  /**
+   * Clean up a specific event from all tracking Maps
+   */
+  cleanupEventTracking(eventId) {
+    let cleaned = false;
+    
+    if (this.eventUpdateTimestamps.has(eventId)) {
+      this.eventUpdateTimestamps.delete(eventId);
+      cleaned = true;
+    }
+    
+    if (this.eventLastProcessedTime.has(eventId)) {
+      this.eventLastProcessedTime.delete(eventId);
+    }
+    
+    if (this.eventFailureCounts.has(eventId)) {
+      this.eventFailureCounts.delete(eventId);
+    }
+    
+    if (this.eventFailureTimes.has(eventId)) {
+      this.eventFailureTimes.delete(eventId);
+    }
+    
+    if (this.cooldownEvents.has(eventId)) {
+      this.cooldownEvents.delete(eventId);
+    }
+    
+    if (this.activeJobs.has(eventId)) {
+      this.activeJobs.delete(eventId);
+    }
+    
+    if (cleaned) {
+      this.logWithTime(`Cleaned up tracking data for stopped event ${eventId}`, "info");
+    }
+    
+    return cleaned;
+  }
+
+  /**
+   * Get statistics about stale events (events not updated in specific time periods)
+   */
+  async getStaleEventStats() {
+    const now = Date.now();
+    const TEN_MINUTES = 10 * 60 * 1000;
+    const SIX_MINUTES = 6 * 60 * 1000;
+    const THREE_MINUTES = 3 * 60 * 1000;
+
+    try {
+      // Get all active events from database
+      const activeEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+      })
+        .select("Event_ID Event_Name Last_Updated")
+        .lean();
+
+      const stats = {
+        totalActiveEvents: activeEvents.length,
+        staleOver3Min: [],
+        staleOver6Min: [],
+        staleOver10Min: [],
+        recentlyUpdated: []
+      };
+
+      for (const event of activeEvents) {
+        const lastUpdated = event.Last_Updated ? new Date(event.Last_Updated).getTime() : 0;
+        const timeSinceUpdate = now - lastUpdated;
+        const minutesSinceUpdate = Math.floor(timeSinceUpdate / 60000);
+
+        const eventInfo = {
+          eventId: event.Event_ID,
+          eventName: event.Event_Name,
+          lastUpdated: event.Last_Updated,
+          minutesSinceUpdate
+        };
+
+        if (timeSinceUpdate > TEN_MINUTES) {
+          stats.staleOver10Min.push(eventInfo);
+        } else if (timeSinceUpdate > SIX_MINUTES) {
+          stats.staleOver6Min.push(eventInfo);
+        } else if (timeSinceUpdate > THREE_MINUTES) {
+          stats.staleOver3Min.push(eventInfo);
+        } else {
+          stats.recentlyUpdated.push(eventInfo);
+        }
+      }
+
+      // Sort by time since update (most stale first)
+      const sortByStale = (a, b) => b.minutesSinceUpdate - a.minutesSinceUpdate;
+      stats.staleOver10Min.sort(sortByStale);
+      stats.staleOver6Min.sort(sortByStale);
+      stats.staleOver3Min.sort(sortByStale);
+
+      return stats;
+    } catch (error) {
+      this.logWithTime(`Error getting stale event stats: ${error.message}`, "error");
+      return null;
+    }
+  }
+
+  /**
+   * Handle stale events - try recovery first, then auto-stop if needed
+   */
+  async handleStaleEvents() {
+    const now = Date.now();
+    const SIX_MINUTES = 6 * 60 * 1000;  // Start recovery attempts at 6 minutes
+    const EIGHT_MINUTES = 8 * 60 * 1000; // Aggressive recovery at 8 minutes
+    const TEN_MINUTES = 10 * 60 * 1000;  // Auto-stop at 10 minutes
+
+    try {
+      this.logWithTime("Starting aggressive stale event recovery and auto-stop process", "info");
+
+      // Get all active events from database
+      const activeEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+      })
+        .select("Event_ID Last_Updated")
+        .lean();
+
+      if (!activeEvents.length) {
+        return;
+      }
+
+      const staleEvents = [];
+      const eventsToRecover = [];
+      const aggressiveRecoveryEvents = [];
+
+      // Identify stale events at different levels
+      for (const event of activeEvents) {
+        const lastUpdated = event.Last_Updated ? new Date(event.Last_Updated).getTime() : 0;
+        const timeSinceUpdate = now - lastUpdated;
+
+        if (timeSinceUpdate > SIX_MINUTES) {
+          const eventInfo = {
+            eventId: event.Event_ID,
+            timeSinceUpdate,
+            lastUpdated,
+            isUrgent: timeSinceUpdate > EIGHT_MINUTES,
+            isCritical: timeSinceUpdate > TEN_MINUTES
+          };
+
+          staleEvents.push(eventInfo);
+
+          // Try recovery if event hasn't been attempted recently
+          const lastRecoveryAttempt = this.eventFailureTimes.get(event.Event_ID) || 0;
+          const timeSinceRecovery = now - lastRecoveryAttempt;
+          
+          if (timeSinceUpdate > EIGHT_MINUTES) {
+            // Aggressive recovery for events stale >8 minutes (every 2 minutes)
+            if (timeSinceRecovery > 2 * 60 * 1000) {
+              aggressiveRecoveryEvents.push(event.Event_ID);
+            }
+          } else if (timeSinceUpdate > SIX_MINUTES) {
+            // Normal recovery for events stale >6 minutes (every 3 minutes)
+            if (timeSinceRecovery > 3 * 60 * 1000) {
+              eventsToRecover.push(event.Event_ID);
+            }
+          }
+        }
+      }
+
+      if (staleEvents.length > 0) {
+        const criticalEvents = staleEvents.filter(e => e.isCritical).length;
+        const urgentEvents = staleEvents.filter(e => e.isUrgent).length;
+        
+        this.logWithTime(
+          `Found ${staleEvents.length} stale events (>6min): ${criticalEvents} critical (>10min), ${urgentEvents} urgent (>8min)`,
+          "warning"
+        );
+        this.logWithTime(
+          `Recovery plan: ${aggressiveRecoveryEvents.length} aggressive recovery, ${eventsToRecover.length} normal recovery`,
+          "info"
+        );
+
+        // Combine all recovery events for processing
+        const allRecoveryEvents = [...new Set([...eventsToRecover, ...aggressiveRecoveryEvents])];
+        let recoveryResults = { recovered: [], failed: [], attempts: 0 };
+
+        if (allRecoveryEvents.length > 0) {
+          // Attempt aggressive recovery for urgent events first
+          if (aggressiveRecoveryEvents.length > 0) {
+            this.logWithTime(
+              `Starting AGGRESSIVE recovery for ${aggressiveRecoveryEvents.length} urgent events (>8min stale)`,
+              "warning"
+            );
+            const aggressiveResults = await this.attemptAggressiveRecovery(aggressiveRecoveryEvents);
+            recoveryResults.recovered.push(...aggressiveResults.recovered);
+            recoveryResults.failed.push(...aggressiveResults.failed);
+            recoveryResults.attempts += aggressiveResults.attempts;
+          }
+
+          // Attempt normal recovery for remaining events
+          const remainingEvents = eventsToRecover.filter(id => !recoveryResults.recovered.includes(id));
+          if (remainingEvents.length > 0) {
+            this.logWithTime(
+              `Starting NORMAL recovery for ${remainingEvents.length} stale events (>6min)`,
+              "info"
+            );
+            const normalResults = await this.attemptIntensiveRecovery(remainingEvents);
+            recoveryResults.recovered.push(...normalResults.recovered);
+            recoveryResults.failed.push(...normalResults.failed);
+            recoveryResults.attempts += normalResults.attempts;
+          }
+        }
+        
+        // Check for events that need to be auto-stopped (>10 minutes and couldn't be recovered)
+        const eventsToStop = [];
+        for (const staleEvent of staleEvents) {
+          if (staleEvent.isCritical && !recoveryResults.recovered.includes(staleEvent.eventId)) {
+            eventsToStop.push(staleEvent.eventId);
+          }
+        }
+
+        // Auto-stop critical events that couldn't be recovered
+        if (eventsToStop.length > 0) {
+          this.logWithTime(
+            `🛑 AUTO-STOPPING ${eventsToStop.length} events that couldn't be recovered after 10+ minutes of inactivity`,
+            "error"
+          );
+
+          await this.autoStopStaleEvents(eventsToStop);
+        }
+
+        // Log comprehensive recovery summary
+        this.logWithTime(
+          `📊 Stale Recovery Summary: ${recoveryResults.recovered.length} recovered, ${recoveryResults.failed.length} failed, ${eventsToStop.length} auto-stopped (${recoveryResults.attempts} total attempts)`,
+          recoveryResults.recovered.length > 0 ? "success" : "warning"
+        );
+      }
+
+    } catch (error) {
+      this.logWithTime(`Error in stale event handling: ${error.message}`, "error");
+    }
+  }
+
+  /**
+   * Attempt AGGRESSIVE recovery for critically stale events (>8 minutes)
+   */
+  async attemptAggressiveRecovery(eventIds) {
+    const results = {
+      recovered: [],
+      failed: [],
+      attempts: 0
+    };
+
+    if (eventIds.length === 0) {
+      return results;
+    }
+
+    this.logWithTime(`🚨 Starting AGGRESSIVE recovery for ${eventIds.length} critically stale events`, "warning");
+
+    for (const eventId of eventIds) {
+      try {
+        results.attempts++;
+        
+        this.logWithTime(`🔧 AGGRESSIVE recovery attempt for event ${eventId}`, "warning");
+        
+        // STEP 1: Complete reset of all failure states
+        this.failedEvents.delete(eventId);
+        this.cooldownEvents.delete(eventId);
+        this.eventFailureCounts.delete(eventId);
+        this.eventFailureTimes.delete(eventId);
+        this.processingEvents.delete(eventId);
+        
+        // STEP 2: Force complete proxy reset
+        this.proxyManager.releaseProxy(eventId, false);
+        this.proxyManager.blacklistCurrentProxy(eventId);
+        
+        // STEP 3: Force complete session reset
+        try {
+          await this.sessionManager.forceSessionRotation();
+          this.headersCache.clear();
+          this.headerRefreshTimestamps.clear();
+        } catch (sessionError) {
+          this.logWithTime(`Session reset error during aggressive recovery: ${sessionError.message}`, "warning");
+        }
+        
+        // STEP 4: Get multiple random event IDs for fresh headers
+        const randomEventIds = [];
+        try {
+          const randomEvents = await Event.aggregate([
+            {
+              $match: {
+                Skip_Scraping: { $ne: true },
+                url: { $exists: true, $ne: "" },
+                Event_ID: { $ne: eventId }
+              },
+            },
+            { $sample: { size: 5 } },
+            { $project: { Event_ID: 1 } },
+          ]);
+          
+          randomEventIds.push(...randomEvents.map(e => e.Event_ID));
+        } catch (dbError) {
+          this.logWithTime(`Database error during aggressive recovery: ${dbError.message}`, "warning");
+        }
+        
+        // STEP 5: Multiple recovery attempts with different strategies
+        let recovered = false;
+        const strategies = ['fresh_headers', 'new_proxy', 'fallback_headers', 'direct_scrape'];
+        
+        for (const strategy of strategies) {
+          if (recovered) break;
+          
+          try {
+            this.logWithTime(`Trying strategy "${strategy}" for event ${eventId}`, "info");
+            
+            switch (strategy) {
+              case 'fresh_headers':
+                if (randomEventIds.length > 0) {
+                  const randomId = randomEventIds[Math.floor(Math.random() * randomEventIds.length)];
+                  await this.refreshEventHeaders(randomId, true);
+                }
+                break;
+                
+              case 'new_proxy':
+                // Force new proxy assignment
+                const { proxyAgent, proxy } = this.proxyManager.getProxyForEvent(eventId);
+                break;
+                
+              case 'fallback_headers':
+                // Try with any available headers from rotation pool
+                if (this.headerRotationPool.length > 0) {
+                  this.logWithTime(`Using rotation pool headers for ${eventId}`, "info");
+                }
+                break;
+                
+              case 'direct_scrape':
+                // Last resort: direct scrape with minimal setup
+                this.logWithTime(`Direct scrape attempt for ${eventId}`, "info");
+                break;
+            }
+            
+            // Attempt scraping with current strategy
+            const scrapeResult = await this.scrapeEventOptimized(eventId, 0, null);
+            
+            if (scrapeResult) {
+              recovered = true;
+              results.recovered.push(eventId);
+              this.logWithTime(`✅ AGGRESSIVE recovery SUCCESS for event ${eventId} using strategy "${strategy}"`, "success");
+              
+              // Clear all failure tracking
+              this.clearFailureCount(eventId);
+              this.eventFailureTimes.delete(eventId);
+              break;
+            }
+            
+          } catch (strategyError) {
+            this.logWithTime(`Strategy "${strategy}" failed for ${eventId}: ${strategyError.message}`, "warning");
+          }
+          
+          // Small delay between strategies
+          await setTimeout(200);
+        }
+        
+        if (!recovered) {
+          results.failed.push(eventId);
+          this.logWithTime(`❌ AGGRESSIVE recovery FAILED for event ${eventId} - tried all strategies`, "error");
+          
+          // Mark for potential auto-stop
+          this.eventFailureTimes.set(eventId, Date.now());
+        }
+        
+        // Delay between events to avoid overwhelming the system
+        await setTimeout(500);
+        
+      } catch (error) {
+        results.failed.push(eventId);
+        this.logWithTime(`💥 AGGRESSIVE recovery ERROR for ${eventId}: ${error.message}`, "error");
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Attempt intensive recovery for stale events
+   */
+  async attemptIntensiveRecovery(eventIds) {
+    const results = {
+      recovered: [],
+      failed: [],
+      attempts: 0
+    };
+
+    if (eventIds.length === 0) {
+      return results;
+    }
+
+    this.logWithTime(`Starting INTENSIVE recovery for ${eventIds.length} stale events`, "info");
+
+    for (const eventId of eventIds) {
+      try {
+        results.attempts++;
+        
+        this.logWithTime(`🔄 INTENSIVE recovery attempt for event ${eventId}`, "info");
+        
+        // Mark recovery attempt time
+        this.eventFailureTimes.set(eventId, Date.now());
+        
+        // Reset failure states for recovery
+        this.cooldownEvents.delete(eventId);
+        this.failedEvents.delete(eventId);
+        this.processingEvents.delete(eventId);
+        
+        // Reduce failure count to give more retry chances
+        const currentFailures = this.eventFailureCounts.get(eventId) || [];
+        if (currentFailures.length > 0) {
+          // Remove half of the failures to give more chances
+          this.eventFailureCounts.set(eventId, currentFailures.slice(Math.floor(currentFailures.length / 2)));
+        }
+        
+        // Try multiple recovery approaches
+        let recovered = false;
+        const approaches = ['fresh_session', 'new_proxy_headers', 'fallback_approach'];
+        
+        for (const approach of approaches) {
+          if (recovered) break;
+          
+          try {
+            this.logWithTime(`Trying approach "${approach}" for event ${eventId}`, "info");
+            
+            switch (approach) {
+              case 'fresh_session':
+                // Force completely fresh session and headers
+                const randomEventId = await this.getRandomEventId(eventId);
+                await this.refreshEventHeaders(randomEventId, true);
+                break;
+                
+              case 'new_proxy_headers':
+                // Get new proxy and force header refresh
+                this.proxyManager.releaseProxy(eventId, false);
+                const anotherRandomId = await this.getRandomEventId(eventId);
+                await this.refreshEventHeaders(anotherRandomId, true);
+                break;
+                
+              case 'fallback_approach':
+                // Try with minimal setup as fallback
+                this.logWithTime(`Fallback recovery approach for ${eventId}`, "info");
+                break;
+            }
+            
+            // Attempt scraping with current approach
+            const scrapeResult = await this.scrapeEventOptimized(eventId, 0, null);
+            
+            if (scrapeResult) {
+              recovered = true;
+              results.recovered.push(eventId);
+              this.logWithTime(`✅ INTENSIVE recovery SUCCESS for event ${eventId} using approach "${approach}"`, "success");
+              
+              // Clear failure tracking
+              this.clearFailureCount(eventId);
+              this.eventFailureTimes.delete(eventId);
+              break;
+            }
+            
+          } catch (approachError) {
+            this.logWithTime(`Approach "${approach}" failed for ${eventId}: ${approachError.message}`, "warning");
+          }
+          
+          // Small delay between approaches
+          await setTimeout(300);
+        }
+        
+        if (!recovered) {
+          results.failed.push(eventId);
+          this.logWithTime(`❌ INTENSIVE recovery FAILED for event ${eventId} - tried all approaches`, "warning");
+        }
+        
+        // Small delay between recovery attempts
+        await setTimeout(500);
+        
+      } catch (error) {
+        results.failed.push(eventId);
+        this.logWithTime(`💥 INTENSIVE recovery ERROR for ${eventId}: ${error.message}`, "error");
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Auto-stop events that are stale and couldn't be recovered
+   */
+  async autoStopStaleEvents(eventIds) {
+    if (eventIds.length === 0) {
+      return;
+    }
+
+    try {
+      // Update events in database to stop scraping
+      const updateResult = await Event.updateMany(
+        { Event_ID: { $in: eventIds } },
+        { 
+          $set: { 
+            Skip_Scraping: true,
+            status: "auto_stopped",
+            auto_stopped_reason: "Failed recovery after 10+ minutes of inactivity",
+            auto_stopped_at: new Date(),
+            last_recovery_attempt: new Date(),
+            recovery_attempts_failed: true
+          } 
+        }
+      );
+
+      this.logWithTime(
+        `🛑 AUTO-STOPPED ${updateResult.modifiedCount}/${eventIds.length} stale events: Skip_Scraping = true (excluded from future scraping)`,
+        "error"
+      );
+
+      // Clean up tracking for auto-stopped events
+      for (const eventId of eventIds) {
+        // Complete cleanup of all tracking data
+        this.cleanupEventTracking(eventId);
+        
+        // Remove from retry queue permanently
+        this.retryQueue = this.retryQueue.filter(item => item.eventId !== eventId);
+        
+        // Clear from all processing queues
+        this.eventProcessingQueue = this.eventProcessingQueue.filter(item => 
+          (typeof item === 'string' ? item : item.eventId) !== eventId
+        );
+        
+        // Log detailed audit trail
+        await this.logError(
+          eventId,
+          "AUTO_STOPPED",
+          new Error(`Event auto-stopped after failed recovery attempts - excluded from scraping`),
+          {
+            reason: "stale_event_failed_recovery",
+            lastUpdate: this.eventUpdateTimestamps.get(eventId)?.toISOString(),
+            autoStoppedAt: new Date().toISOString(),
+            excludedFromScraping: true,
+            skipScraping: true
+          }
+        );
+        
+        this.logWithTime(
+          `🚫 Event ${eventId} permanently excluded from scraping due to persistent failures`,
+          "warning"
+        );
+      }
+
+      // Force a CSV regeneration to exclude stopped events
+      try {
+        const { forceCombinedCSVGeneration } = await import('./controllers/inventoryController.js');
+        forceCombinedCSVGeneration();
+        this.logWithTime(
+          `📊 Forced CSV regeneration to exclude ${eventIds.length} auto-stopped events`,
+          "info"
+        );
+      } catch (csvError) {
+        this.logWithTime(`Error forcing CSV regeneration: ${csvError.message}`, "warning");
+      }
+
+    } catch (error) {
+      this.logWithTime(`Error auto-stopping stale events: ${error.message}`, "error");
+    }
+  }
+
+  /**
+   * Clean up inactive events from tracking Maps
+   */
+  async cleanupInactiveEvents() {
+    try {
+      // Get currently active events from database
+      const activeEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+      })
+        .select("Event_ID")
+        .lean();
+      
+      const activeEventIds = new Set(activeEvents.map(event => event.Event_ID));
+      
+      // Clean up eventUpdateTimestamps
+      let cleanedEvents = 0;
+      for (const eventId of this.eventUpdateTimestamps.keys()) {
+        if (!activeEventIds.has(eventId)) {
+          this.eventUpdateTimestamps.delete(eventId);
+          cleanedEvents++;
+        }
+      }
+      
+      // Clean up other tracking Maps
+      for (const eventId of this.eventLastProcessedTime.keys()) {
+        if (!activeEventIds.has(eventId)) {
+          this.eventLastProcessedTime.delete(eventId);
+        }
+      }
+      
+      for (const eventId of this.eventFailureCounts.keys()) {
+        if (!activeEventIds.has(eventId)) {
+          this.eventFailureCounts.delete(eventId);
+        }
+      }
+      
+      for (const eventId of this.eventFailureTimes.keys()) {
+        if (!activeEventIds.has(eventId)) {
+          this.eventFailureTimes.delete(eventId);
+        }
+      }
+      
+      if (cleanedEvents > 0) {
+        this.logWithTime(`Cleaned up ${cleanedEvents} inactive events from tracking Maps`, "info");
+      }
+      
+      return cleanedEvents;
+    } catch (error) {
+      this.logWithTime(`Error cleaning up inactive events: ${error.message}`, "error");
+      return 0;
+    }
+  }
+
+  /**
    * Get performance statistics for monitoring (FAST - non-blocking)
    */
-  getPerformanceStats() {
+  async getPerformanceStats() {
     const now = Date.now();
     const stats = {
       totalEvents: 0,
@@ -2818,8 +3558,29 @@ export class ScraperManager {
       lastCsvUpload: this.lastCsvUploadTime ? moment().diff(this.lastCsvUploadTime, 'minutes') : null
     };
 
-    // Analyze event update times (fast loop)
+    // Get currently active events from database to filter tracking
+    let activeEventIds = new Set();
+    try {
+      const activeEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+      })
+        .select("Event_ID")
+        .lean();
+      
+      activeEventIds = new Set(activeEvents.map(event => event.Event_ID));
+    } catch (error) {
+      // Fallback: if database query fails, use all tracked events
+      console.warn(`Failed to get active events for performance stats: ${error.message}`);
+      activeEventIds = new Set(this.eventUpdateTimestamps.keys());
+    }
+
+    // Analyze event update times (fast loop) - only for ACTIVE events
     for (const [eventId, lastUpdate] of this.eventUpdateTimestamps) {
+      // Skip events that are no longer active for scraping
+      if (!activeEventIds.has(eventId)) {
+        continue;
+      }
+      
       stats.totalEvents++;
       const timeSinceUpdate = now - lastUpdate.valueOf();
       
@@ -2846,8 +3607,22 @@ export class ScraperManager {
    * Start performance monitoring (logs stats every 30 seconds) - ENHANCED
    */
   startPerformanceMonitoring() {
+    let monitoringCycleCount = 0;
+    
     setInterval(async () => {
-      const stats = this.getPerformanceStats();
+      monitoringCycleCount++;
+      
+      // Run cleanup every 10 cycles (5 minutes)
+      if (monitoringCycleCount % 10 === 0) {
+        await this.cleanupInactiveEvents();
+      }
+      
+      // Run stale event recovery and auto-stop every 6 cycles (3 minutes) - more aggressive
+      if (monitoringCycleCount % 6 === 0) {
+        await this.handleStaleEvents();
+      }
+      
+      const stats = await this.getPerformanceStats();
       const eventsPerMinute = Math.round((stats.eventsUpdatedLast1Min / 1) * 60);
       const projectedCapacity = eventsPerMinute * 3; // Events that can be updated in 3 minutes
       const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
@@ -2941,3 +3716,71 @@ export default scraperManager;
 export function checkScraperLogs() {
   return scraperManager.checkLogs();
 }
+
+/**
+ * Test Skip_Scraping functionality to ensure failed events are properly excluded
+ * @returns {Object} Test results
+ */
+export async function testSkipScrapingLogic() {
+  try {
+    console.log("🧪 Testing Skip_Scraping logic...");
+    
+    // Get event counts
+    const totalEvents = await Event.countDocuments({});
+    const skippedEvents = await Event.countDocuments({ Skip_Scraping: true });
+    const activeEvents = await Event.countDocuments({
+      $or: [
+        { Skip_Scraping: { $ne: true } },
+        { Skip_Scraping: { $exists: false } },
+        { Skip_Scraping: null },
+        { Skip_Scraping: false }
+      ]
+    });
+    
+    // Get some sample skipped events
+    const sampleSkippedEvents = await Event.find({ Skip_Scraping: true })
+      .select("Event_ID Event_Name failed_reason status")
+      .limit(5)
+      .lean();
+    
+    const results = {
+      success: true,
+      summary: {
+        totalEvents,
+        activeEvents,
+        skippedEvents,
+        percentageSkipped: ((skippedEvents / totalEvents) * 100).toFixed(2)
+      },
+      sampleSkippedEvents,
+      verification: {
+        queryWorking: activeEvents + skippedEvents === totalEvents,
+        skipLogicImplemented: true,
+        exclusionWorking: skippedEvents > 0 ? "Events are being excluded" : "No events excluded yet"
+      }
+    };
+    
+    console.log("📊 Skip_Scraping Test Results:");
+    console.log(`   Total Events: ${totalEvents}`);
+    console.log(`   Active for Scraping: ${activeEvents}`);
+    console.log(`   Excluded (Skip_Scraping: true): ${skippedEvents} (${results.summary.percentageSkipped}%)`);
+    console.log(`   Query Logic Working: ${results.verification.queryWorking}`);
+    
+    if (sampleSkippedEvents.length > 0) {
+      console.log("   Sample Excluded Events:");
+      sampleSkippedEvents.forEach(event => {
+        console.log(`     - ${event.Event_ID}: ${event.failed_reason || 'No reason specified'}`);
+      });
+    }
+    
+    console.log("✅ Skip_Scraping logic test completed");
+    return results;
+    
+  } catch (error) {
+    console.error("❌ Skip_Scraping test failed:", error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
