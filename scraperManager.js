@@ -3485,6 +3485,113 @@ export class ScraperManager {
   }
 
   /**
+   * Force immediate cleanup of all tracking Maps (manual cleanup)
+   */
+  async forceCleanupAllTracking() {
+    try {
+      const beforeCount = this.eventUpdateTimestamps.size;
+      
+      // Get currently active events from database
+      const activeEvents = await Event.find({
+        Skip_Scraping: { $ne: true },
+      })
+        .select("Event_ID")
+        .lean();
+      
+      const activeEventIds = new Set(activeEvents.map(event => event.Event_ID));
+      
+      // Clear all tracking Maps and rebuild only with active events
+      const activeCounts = {
+        eventUpdateTimestamps: 0,
+        eventLastProcessedTime: 0,
+        eventFailureCounts: 0,
+        eventFailureTimes: 0,
+        processingEvents: 0,
+        failedEvents: 0,
+        cooldownEvents: 0
+      };
+      
+      // Clean eventUpdateTimestamps
+      for (const eventId of [...this.eventUpdateTimestamps.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.eventUpdateTimestamps++;
+        } else {
+          this.eventUpdateTimestamps.delete(eventId);
+        }
+      }
+      
+      // Clean other tracking Maps
+      for (const eventId of [...this.eventLastProcessedTime.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.eventLastProcessedTime++;
+        } else {
+          this.eventLastProcessedTime.delete(eventId);
+        }
+      }
+      
+      for (const eventId of [...this.eventFailureCounts.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.eventFailureCounts++;
+        } else {
+          this.eventFailureCounts.delete(eventId);
+        }
+      }
+      
+      for (const eventId of [...this.eventFailureTimes.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.eventFailureTimes++;
+        } else {
+          this.eventFailureTimes.delete(eventId);
+        }
+      }
+      
+      for (const eventId of [...this.processingEvents.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.processingEvents++;
+        } else {
+          this.processingEvents.delete(eventId);
+        }
+      }
+      
+      for (const eventId of [...this.failedEvents.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.failedEvents++;
+        } else {
+          this.failedEvents.delete(eventId);
+        }
+      }
+      
+      for (const eventId of [...this.cooldownEvents.keys()]) {
+        if (activeEventIds.has(eventId)) {
+          activeCounts.cooldownEvents++;
+        } else {
+          this.cooldownEvents.delete(eventId);
+        }
+      }
+      
+      const cleanedCount = beforeCount - this.eventUpdateTimestamps.size;
+      
+      this.logWithTime(
+        `🧽 FORCE CLEANUP: Removed ${cleanedCount} stale events | ` +
+        `Active events in DB: ${activeEventIds.size} | Now tracking: ${this.eventUpdateTimestamps.size} | ` +
+        `Active tracking: ${JSON.stringify(activeCounts)}`,
+        "info"
+      );
+      
+      return {
+        cleaned: cleanedCount,
+        activeInDB: activeEventIds.size,
+        nowTracking: this.eventUpdateTimestamps.size,
+        activeCounts
+      };
+      
+    } catch (error) {
+      this.logWithTime(`Error in force cleanup: ${error.message}`, "error");
+      return { error: error.message };
+    }
+  }
+
+  /**
    * Clean up inactive events from tracking Maps
    */
   async cleanupInactiveEvents() {
@@ -3527,7 +3634,16 @@ export class ScraperManager {
       }
       
       if (cleanedEvents > 0) {
-        this.logWithTime(`Cleaned up ${cleanedEvents} inactive events from tracking Maps`, "info");
+        this.logWithTime(
+          `🧹 Cleaned up ${cleanedEvents} inactive events from tracking Maps | ` +
+          `Active in DB: ${activeEventIds.size} | Still tracking: ${this.eventUpdateTimestamps.size}`,
+          "info"
+        );
+      } else if (this.eventUpdateTimestamps.size > activeEventIds.size * 2) {
+        this.logWithTime(
+          `⚠️ Tracking accumulation detected: tracking ${this.eventUpdateTimestamps.size} events but only ${activeEventIds.size} active in DB`,
+          "warning"
+        );
       }
       
       return cleanedEvents;
@@ -3612,8 +3728,8 @@ export class ScraperManager {
     setInterval(async () => {
       monitoringCycleCount++;
       
-      // Run cleanup every 10 cycles (5 minutes)
-      if (monitoringCycleCount % 10 === 0) {
+      // Run cleanup every 4 cycles (2 minutes) - more frequent cleanup
+      if (monitoringCycleCount % 4 === 0) {
         await this.cleanupInactiveEvents();
       }
       
@@ -3623,7 +3739,7 @@ export class ScraperManager {
       }
       
       const stats = await this.getPerformanceStats();
-      const eventsPerMinute = Math.round((stats.eventsUpdatedLast1Min / 1) * 60);
+      const eventsPerMinute = stats.eventsUpdatedLast1Min; // Events actually updated in last minute
       const projectedCapacity = eventsPerMinute * 3; // Events that can be updated in 3 minutes
       const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
       
@@ -3642,6 +3758,7 @@ export class ScraperManager {
         `Queue: ${stats.queueLength} | Processing: ${stats.processingCount} | ` +
         `Workers: ${stats.activeWorkers} | Success: ${stats.successRate.toFixed(1)}% | ` +
         `Rate: ${eventsPerMinute}/min | Capacity: ${projectedCapacity} events/3min | ` +
+        `Tracked: ${this.eventUpdateTimestamps.size} events | ` +
         `Memory: ${memoryMB}MB${csvInfo}`,
         "info"
       );
@@ -3715,6 +3832,11 @@ export default scraperManager;
 // Add a function to export that allows checking logs
 export function checkScraperLogs() {
   return scraperManager.checkLogs();
+}
+
+// Export cleanup function for manual cleanup
+export function forceCleanupTracking() {
+  return scraperManager.forceCleanupAllTracking();
 }
 
 /**

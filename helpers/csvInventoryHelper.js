@@ -144,25 +144,12 @@ export async function saveInventoryToCSV(data, filePath) {
   return new Promise((resolve, reject) => {
     const ws = fs.createWriteStream(filePath);
     
-    // Process data to prevent Excel from converting to scientific notation
-    const processedData = data.map(record => {
-      const processedRecord = { ...record };
-      
-      // Handle seats field to prevent Excel issues - multiple strategies
-      if (processedRecord.seats) {
-        const seatsStr = processedRecord.seats.toString();
-        
-        // Strategy 1: Add Excel formula prefix to force text interpretation
-        // This prevents Excel from converting comma-separated numbers to scientific notation
-        processedRecord.seats = `="${seatsStr}"`;
-      }
-      
-      return processedRecord;
-    });
+    // Keep data clean for programmatic reading
+    // The CSV library will handle proper quoting automatically
     
     const csvStream = csv.format({ 
       headers: true,
-      quoteColumns: true, // Quote all columns to be safe
+      quoteColumns: true, // Quote columns that contain commas or special characters
       quoteHeaders: true
     });
     
@@ -177,7 +164,7 @@ export async function saveInventoryToCSV(data, filePath) {
       });
     
     // Write data
-    processedData.forEach(row => {
+    data.forEach(row => {
       csvStream.write(row);
     });
     
