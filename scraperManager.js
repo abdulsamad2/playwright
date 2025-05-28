@@ -13,6 +13,7 @@ import nodeFs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
+import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
@@ -21,10 +22,7 @@ const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduc
 const CONCURRENT_LIMIT = Math.max(500, Math.floor(cpus().length * 50)); // Massively increased for 1000+ events
 const MAX_RETRIES = 20; // Increased from 15 for better recovery
 const SCRAPE_TIMEOUT = 45000; // Increased from 20 seconds to 45 seconds for better success rate
-const BATCH_SIZE = Math.max(CONCURRENT_LIMIT * 2, 1000); // Increased for bulk processing
-const RETRY_BACKOFF_MS = 100; // Reduced for faster retries
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 45000; // Reduced to 45 seconds for faster cycles
-const URGENT_THRESHOLD = 15000; // Events needing update within 15 seconds
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 const EVENT_FAILURE_THRESHOLD = 300000; // Reduced to 5 minutes for faster recovery
 
@@ -33,24 +31,15 @@ const SHORT_COOLDOWNS = [50, 100, 200, 500]; // Very short: 50ms, 100ms, 200ms, 
 const LONG_COOLDOWN_MINUTES = 0.1; // Reduced to 6 seconds for ultra-fast recovery
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
-const LOG_LEVEL = 1; // Default to warnings and errors only
+const LOG_LEVEL = 3; // Default to warnings and errors only
 
 // Cookie expiration threshold: refresh cookies every 15 minutes
 const COOKIE_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
 const SESSION_REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes for session refresh
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
-const USER_AGENT_POOL = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  // Additional Firefox UA for variety
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:115.0) Gecko/20100101 Firefox/115.0"
-];
 const generateRandomIp = () => Array.from({ length: 4 }, () => Math.floor(Math.random() * 256)).join('.');
 // Number of proxy rotation attempts when fetching fresh cookies/headers
-const PROXY_ROTATION_ATTEMPTS = 3;
 
 // Only accept cookie sets with at least this many cookies to avoid challenge pages
 const MIN_VALID_COOKIES = 3;
@@ -98,8 +87,6 @@ const COOKIE_MANAGEMENT = {
 };
 
 // Update constants for large-scale processing
-const CONCURRENT_DOMAIN_LIMIT = 200; // Process many more events from same domain
-const DB_FETCH_LIMIT = 5000; // Fetch many more events at once
 const PARALLEL_BATCH_SIZE = 100; // Process 100 events in parallel per batch
 const MAX_PARALLEL_BATCHES = 20; // Run up to 20 batches concurrently
 
@@ -107,15 +94,11 @@ const MAX_PARALLEL_BATCHES = 20; // Run up to 20 batches concurrently
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DATA_DIR = path.join(__dirname, 'data');
-const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank_csv.csv');
 const COMPANY_ID = '702';
 const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q9eKV_Jt';
 const CSV_UPLOAD_INTERVAL = 6 * 60 * 1000; // 6 minutes in milliseconds
 
-/**
- * ScraperManager class that maintains the original API while using the modular architecture internally
- * Now includes robust session management for difficult-to-scrape sites
- */
+
 export class ScraperManager {
   constructor() {
     this.startTime = moment();
@@ -138,7 +121,7 @@ export class ScraperManager {
     this.globalConsecutiveErrors = 0; // Track consecutive errors across all events
     this.lastCookieReset = null; // Track when cookies were last reset
     this.cookiesPath = path.join(process.cwd(), "cookies.json"); // Path to cookies file
-
+   this.runCsvUploadCycle = runCsvUploadCycle;
     // Initialize the proxy manager
     this.proxyManager = new ProxyManager(this);
     this.batchProxies = new Map(); // Map batch ID to proxy
@@ -850,7 +833,6 @@ export class ScraperManager {
           group.inventory.quantity >= 2
       );
 
-      const previousTicketCount = event.Available_Seats || 0;
       const currentTicketCount = validScrapeResult.length;
 
       // Quick update of basic info
@@ -1239,7 +1221,6 @@ export class ScraperManager {
 
       // If headers were passed from batch processing, still check if they're fresh enough
       if (passedHeaders) {
-        const hasPassedSessionId = !!passedHeaders.sessionId;
         const passedHeadersAge = passedHeaders.timestamp ? Date.now() - passedHeaders.timestamp : Infinity;
         
         // Use passed headers only if they're fresh enough (less than 15 minutes old)
@@ -2378,166 +2359,7 @@ export class ScraperManager {
    * This runs every 6 minutes while continuous scraping is active
    * and doesn't block the main scraping process
    */
-  async runCsvUploadCycle() {
-    try {
-      // Force generation of combined CSV before upload
-      try {
-        const { forceCombinedCSVGeneration, getInventoryStats } = await import('./controllers/inventoryController.js');
-        
-        // Get current stats
-        const stats = getInventoryStats();
-        this.logWithTime(
-          `Pre-upload stats: ${stats.totalEvents} events, ${stats.totalRecords} records in memory`,
-          "info"
-        );
-        
-        // Force generation of latest combined CSV
-        const result = forceCombinedCSVGeneration();
-        
-        if (result.success) {
-          this.logWithTime(
-            `Generated fresh combined CSV for upload: ${result.recordCount} records from ${result.eventCount} events`,
-            "info"
-          );
-        } else {
-          this.logWithTime(
-            `Failed to generate combined CSV: ${result.message}`,
-            "warning"
-          );
-        }
-      } catch (generationError) {
-        this.logWithTime(
-          `Error generating combined CSV before upload: ${generationError.message}`,
-          "warning"
-        );
-      }
 
-      // Create the path to the all_events_combined.csv file
-      const allEventsCsvPath = path.join(DATA_DIR, 'all_events_combined.csv');
-      
-      // Check if file exists
-      if (!nodeFs.existsSync(allEventsCsvPath)) {
-        this.logWithTime(
-          `CSV upload skipped: all_events_combined.csv not found at ${allEventsCsvPath}`,
-          "warning"
-        );
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD: File not found - ${allEventsCsvPath}`);
-        return;
-      }
-      
-      // Get file stats to include file size in logs
-      const fileStats = await fs.stat(allEventsCsvPath);
-      const fileSizeMB = (fileStats.size / (1024 * 1024)).toFixed(2);
-      
-      // Check if the file contains required fields
-      let hasMappingId = false;
-      let hasEventId = false;
-      let recordCount = 0;
-      
-      try {
-        const csvContent = await fs.readFile(allEventsCsvPath, 'utf8');
-        const lines = csvContent.split('\n');
-        const firstLine = lines[0];
-        recordCount = Math.max(0, lines.length - 2); // Subtract header and empty last line
-        
-        // Check if the header line contains mapping_id and event_id
-        hasMappingId = firstLine.includes('mapping_id');
-        hasEventId = firstLine.includes('event_id');
-        
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK: ${recordCount} records, mapping_id=${hasMappingId ? 'YES' : 'NO'}, event_id=${hasEventId ? 'YES' : 'NO'}`);
-        
-        if (!hasMappingId || !hasEventId) {
-          this.logWithTime(
-            `CSV WARNING: Combined CSV file is missing required fields: ${!hasMappingId ? 'mapping_id ' : ''}${!hasEventId ? 'event_id' : ''}`,
-            "warning"
-          );
-        }
-      } catch (checkError) {
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD CHECK ERROR: ${checkError.message}`);
-      }
-      
-      // Log the start of upload process
-      this.logWithTime(
-        `Starting CSV upload cycle for all_events_combined.csv (${fileSizeMB} MB, ${recordCount} records)`, 
-        "info"
-      );
-      
-      // Simple console log for upload start
-      console.log(`[${new Date().toISOString()}] CSV UPLOAD: Starting upload of all_events_combined.csv (${fileSizeMB} MB, ${recordCount} records)`);
-      
-      // Initialize the SyncService
-      const syncService = new SyncService(COMPANY_ID, API_TOKEN);
-      
-      // Upload the file asynchronously
-      try {
-        // Add timestamp to track upload timing
-        const uploadStartTime = moment();
-        
-        // Execute the upload
-        const result = await syncService.uploadCsvToSync(allEventsCsvPath);
-        
-        // Calculate upload time
-        const uploadDuration = moment().diff(uploadStartTime, 'seconds');
-        
-        if (result.success) {
-          this.logWithTime(
-            `Successfully uploaded all_events_combined.csv (${fileSizeMB} MB, ${recordCount} records in ${uploadDuration}s)`,
-            "success"
-          );
-          
-          // Simple console log for success
-          console.log(`[${new Date().toISOString()}] CSV UPLOAD: SUCCESS - Uploaded ${fileSizeMB} MB (${recordCount} records) in ${uploadDuration}s`);
-          
-          // Track last successful upload time
-          this.lastCsvUploadTime = moment();
-        } else {
-          this.logWithTime(
-            `CSV upload completed but reported failure: ${result.message || 'Unknown error'}`,
-            "warning"
-          );
-          
-          // Simple console log for failure
-          console.log(`[${new Date().toISOString()}] CSV UPLOAD: FAILED - ${result.message || 'Unknown error'}`);
-        }
-      } catch (uploadError) {
-        // More detailed error logging
-        this.logWithTime(
-          `Error uploading CSV file (${fileSizeMB} MB, ${recordCount} records): ${uploadError.message}`,
-          "error"
-        );
-        
-        // Simple console log for error
-        console.log(`[${new Date().toISOString()}] CSV UPLOAD: ERROR - ${uploadError.message}`);
-        
-        // Check for specific types of errors
-        if (uploadError.message.includes('network') || uploadError.message.includes('timeout')) {
-          this.logWithTime(
-            "Network or timeout error during CSV upload - will retry on next cycle",
-            "warning"
-          );
-        } else if (uploadError.message.includes('403') || uploadError.message.includes('401')) {
-          this.logWithTime(
-            "Authentication error during CSV upload - check API credentials",
-            "error"
-          );
-        }
-        
-        // Don't rethrow - we want to keep scraping even if upload fails
-        console.error(`CSV upload error details:`, uploadError);
-      }
-    } catch (error) {
-      // Log error but don't throw - we don't want to interrupt scraping
-      this.logWithTime(
-        `Error in CSV upload cycle: ${error.message}`,
-        "error"
-      );
-      
-      // Simple console log for cycle error
-      console.log(`[${new Date().toISOString()}] CSV UPLOAD: CYCLE ERROR - ${error.message}`);
-      
-      console.error(`CSV upload cycle error:`, error);
-    }
-  }
 
   /**
    * Stop the continuous scraping process and clean up resources
@@ -3027,137 +2849,7 @@ export class ScraperManager {
   /**
    * Handle stale events - try recovery first, then auto-stop if needed
    */
-  async handleStaleEvents() {
-    const now = Date.now();
-    const SIX_MINUTES = 6 * 60 * 1000;  // Start recovery attempts at 6 minutes
-    const EIGHT_MINUTES = 8 * 60 * 1000; // Aggressive recovery at 8 minutes
-    const TEN_MINUTES = 10 * 60 * 1000;  // Auto-stop at 10 minutes
-
-    try {
-      this.logWithTime("Starting aggressive stale event recovery and auto-stop process", "info");
-
-      // Get all active events from database
-      const activeEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-      })
-        .select("Event_ID Last_Updated")
-        .lean();
-
-      if (!activeEvents.length) {
-        return;
-      }
-
-      const staleEvents = [];
-      const eventsToRecover = [];
-      const aggressiveRecoveryEvents = [];
-
-      // Identify stale events at different levels
-      for (const event of activeEvents) {
-        const lastUpdated = event.Last_Updated ? new Date(event.Last_Updated).getTime() : 0;
-        const timeSinceUpdate = now - lastUpdated;
-
-        if (timeSinceUpdate > SIX_MINUTES) {
-          const eventInfo = {
-            eventId: event.Event_ID,
-            timeSinceUpdate,
-            lastUpdated,
-            isUrgent: timeSinceUpdate > EIGHT_MINUTES,
-            isCritical: timeSinceUpdate > TEN_MINUTES
-          };
-
-          staleEvents.push(eventInfo);
-
-          // Try recovery if event hasn't been attempted recently
-          const lastRecoveryAttempt = this.eventFailureTimes.get(event.Event_ID) || 0;
-          const timeSinceRecovery = now - lastRecoveryAttempt;
-          
-          if (timeSinceUpdate > EIGHT_MINUTES) {
-            // Aggressive recovery for events stale >8 minutes (every 2 minutes)
-            if (timeSinceRecovery > 2 * 60 * 1000) {
-              aggressiveRecoveryEvents.push(event.Event_ID);
-            }
-          } else if (timeSinceUpdate > SIX_MINUTES) {
-            // Normal recovery for events stale >6 minutes (every 3 minutes)
-            if (timeSinceRecovery > 3 * 60 * 1000) {
-              eventsToRecover.push(event.Event_ID);
-            }
-          }
-        }
-      }
-
-      if (staleEvents.length > 0) {
-        const criticalEvents = staleEvents.filter(e => e.isCritical).length;
-        const urgentEvents = staleEvents.filter(e => e.isUrgent).length;
-        
-        this.logWithTime(
-          `Found ${staleEvents.length} stale events (>6min): ${criticalEvents} critical (>10min), ${urgentEvents} urgent (>8min)`,
-          "warning"
-        );
-        this.logWithTime(
-          `Recovery plan: ${aggressiveRecoveryEvents.length} aggressive recovery, ${eventsToRecover.length} normal recovery`,
-          "info"
-        );
-
-        // Combine all recovery events for processing
-        const allRecoveryEvents = [...new Set([...eventsToRecover, ...aggressiveRecoveryEvents])];
-        let recoveryResults = { recovered: [], failed: [], attempts: 0 };
-
-        if (allRecoveryEvents.length > 0) {
-          // Attempt aggressive recovery for urgent events first
-          if (aggressiveRecoveryEvents.length > 0) {
-            this.logWithTime(
-              `Starting AGGRESSIVE recovery for ${aggressiveRecoveryEvents.length} urgent events (>8min stale)`,
-              "warning"
-            );
-            const aggressiveResults = await this.attemptAggressiveRecovery(aggressiveRecoveryEvents);
-            recoveryResults.recovered.push(...aggressiveResults.recovered);
-            recoveryResults.failed.push(...aggressiveResults.failed);
-            recoveryResults.attempts += aggressiveResults.attempts;
-          }
-
-          // Attempt normal recovery for remaining events
-          const remainingEvents = eventsToRecover.filter(id => !recoveryResults.recovered.includes(id));
-          if (remainingEvents.length > 0) {
-            this.logWithTime(
-              `Starting NORMAL recovery for ${remainingEvents.length} stale events (>6min)`,
-              "info"
-            );
-            const normalResults = await this.attemptIntensiveRecovery(remainingEvents);
-            recoveryResults.recovered.push(...normalResults.recovered);
-            recoveryResults.failed.push(...normalResults.failed);
-            recoveryResults.attempts += normalResults.attempts;
-          }
-        }
-        
-        // Check for events that need to be auto-stopped (>10 minutes and couldn't be recovered)
-        const eventsToStop = [];
-        for (const staleEvent of staleEvents) {
-          if (staleEvent.isCritical && !recoveryResults.recovered.includes(staleEvent.eventId)) {
-            eventsToStop.push(staleEvent.eventId);
-          }
-        }
-
-        // Auto-stop critical events that couldn't be recovered
-        if (eventsToStop.length > 0) {
-          this.logWithTime(
-            `🛑 AUTO-STOPPING ${eventsToStop.length} events that couldn't be recovered after 10+ minutes of inactivity`,
-            "error"
-          );
-
-          await this.autoStopStaleEvents(eventsToStop);
-        }
-
-        // Log comprehensive recovery summary
-        this.logWithTime(
-          `📊 Stale Recovery Summary: ${recoveryResults.recovered.length} recovered, ${recoveryResults.failed.length} failed, ${eventsToStop.length} auto-stopped (${recoveryResults.attempts} total attempts)`,
-          recoveryResults.recovered.length > 0 ? "success" : "warning"
-        );
-      }
-
-    } catch (error) {
-      this.logWithTime(`Error in stale event handling: ${error.message}`, "error");
-    }
-  }
+ 
 
   /**
    * Attempt AGGRESSIVE recovery for critically stale events (>8 minutes)
@@ -3734,13 +3426,13 @@ export class ScraperManager {
       }
       
       // Run stale event recovery and auto-stop every 6 cycles (3 minutes) - more aggressive
-      if (monitoringCycleCount % 6 === 0) {
+      if (monitoringCycleCount % 2 === 0) {
         await this.handleStaleEvents();
       }
       
       const stats = await this.getPerformanceStats();
       const eventsPerMinute = stats.eventsUpdatedLast1Min; // Events actually updated in last minute
-      const projectedCapacity = eventsPerMinute * 3; // Events that can be updated in 3 minutes
+      const projectedCapacity = eventsPerMinute * 100; // Events that can be updated in 3 minutes
       const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
       
       // Get CSV stats synchronously
@@ -3786,7 +3478,7 @@ export class ScraperManager {
         // Trigger cleanup of old events
         try {
           const { cleanupOldEvents } = await import('./controllers/inventoryController.js');
-          const cleaned = cleanupOldEvents(12); // Clean events older than 12 hours
+          const cleaned = cleanupOldEvents(.50); // Clean events older than 12 hours
           if (cleaned > 0) {
             this.logWithTime(
               `Cleaned up ${cleaned} old events from memory`,
@@ -3839,70 +3531,4 @@ export function forceCleanupTracking() {
   return scraperManager.forceCleanupAllTracking();
 }
 
-/**
- * Test Skip_Scraping functionality to ensure failed events are properly excluded
- * @returns {Object} Test results
- */
-export async function testSkipScrapingLogic() {
-  try {
-    console.log("🧪 Testing Skip_Scraping logic...");
-    
-    // Get event counts
-    const totalEvents = await Event.countDocuments({});
-    const skippedEvents = await Event.countDocuments({ Skip_Scraping: true });
-    const activeEvents = await Event.countDocuments({
-      $or: [
-        { Skip_Scraping: { $ne: true } },
-        { Skip_Scraping: { $exists: false } },
-        { Skip_Scraping: null },
-        { Skip_Scraping: false }
-      ]
-    });
-    
-    // Get some sample skipped events
-    const sampleSkippedEvents = await Event.find({ Skip_Scraping: true })
-      .select("Event_ID Event_Name failed_reason status")
-      .limit(5)
-      .lean();
-    
-    const results = {
-      success: true,
-      summary: {
-        totalEvents,
-        activeEvents,
-        skippedEvents,
-        percentageSkipped: ((skippedEvents / totalEvents) * 100).toFixed(2)
-      },
-      sampleSkippedEvents,
-      verification: {
-        queryWorking: activeEvents + skippedEvents === totalEvents,
-        skipLogicImplemented: true,
-        exclusionWorking: skippedEvents > 0 ? "Events are being excluded" : "No events excluded yet"
-      }
-    };
-    
-    console.log("📊 Skip_Scraping Test Results:");
-    console.log(`   Total Events: ${totalEvents}`);
-    console.log(`   Active for Scraping: ${activeEvents}`);
-    console.log(`   Excluded (Skip_Scraping: true): ${skippedEvents} (${results.summary.percentageSkipped}%)`);
-    console.log(`   Query Logic Working: ${results.verification.queryWorking}`);
-    
-    if (sampleSkippedEvents.length > 0) {
-      console.log("   Sample Excluded Events:");
-      sampleSkippedEvents.forEach(event => {
-        console.log(`     - ${event.Event_ID}: ${event.failed_reason || 'No reason specified'}`);
-      });
-    }
-    
-    console.log("✅ Skip_Scraping logic test completed");
-    return results;
-    
-  } catch (error) {
-    console.error("❌ Skip_Scraping test failed:", error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
 

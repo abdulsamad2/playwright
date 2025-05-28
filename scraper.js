@@ -3,36 +3,24 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { chromium,devices } from "playwright";
+import { devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
-import { simulateHumanBehavior } from "./helpers/humanBehavior.js";
 import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
 import pRetry from 'p-retry';
 import { CookieManager } from './helpers/CookieManager.js';
-import ProxyManager from './helpers/ProxyManager.js'; 
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 // Import functions from browser-cookies.js
 import {
-  initBrowser,
-  captureCookies,
   refreshCookies,
   loadCookiesFromFile,
-  saveCookiesToFile,
-  cleanup,
-  handleTicketmasterChallenge,
-  checkForTicketmasterChallenge,
-  enhancedFingerprint,
-  getRandomLocation,
-  getRealisticIphoneUserAgent,
-  simulateMobileInteractions
-} from './browser-cookies.js';
+  getRealisticIphoneUserAgent} from './browser-cookies.js';
 
 // Initialize CookieManager instance
 const cookieManager = new CookieManager();
@@ -236,7 +224,8 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
     forceRefresh;
 
   if (needsRefresh) {
-    const jitter = Math.random() * 600000 - 300000; // ±5 minutes
+    const jitter = Math.random() * 20000 + 10000; // 10s to 30s
+
     const effectiveInterval = CookieManager.CONFIG.COOKIE_REFRESH_INTERVAL + jitter;
     
     const needsRefreshWithJitter = 
@@ -434,44 +423,7 @@ function generateFallbackHeaders() {
   };
 }
 
-// Function to check for Ticketmaster challenge (e.g., CAPTCHA)
-// async function checkForTicketmasterChallenge(page) {
-//   try {
-//     // Check for CAPTCHA or other blocking mechanisms
-//     const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
-//     const isChallengePresent = (await page.$(challengeSelector)) !== null;
 
-//     if (isChallengePresent) {
-//       console.warn("Ticketmaster challenge detected");
-//       return true;
-//     }
-
-//     return false;
-//   } catch (error) {
-//     console.error("Error checking for Ticketmaster challenge:", error);
-//     return false;
-//   }
-// }
-
-// Function to save cookies to a JSON file
-// async function saveCookiesToFile(cookies) {
-//   try {
-//     return await saveCookiesToFile(cookies);
-//   } catch (error) {
-//     console.error('Error saving cookies:', error);
-//   }
-// }
-
-// async function loadCookiesFromFile() {
-//   try {
-//     return await loadCookiesFromFile();
-//   } catch (error) {
-//     console.error('Error loading cookies:', error);
-//     return null;
-//   }
-// }
-
-// Throttled request function optimized for 1000+ events with better resilience
 const throttle = pThrottle({
   limit: 100, // Increased from 50 for even higher volume
   interval: 1000 // Keep at 1 second for good balance
@@ -742,11 +694,6 @@ const ScrapeEvent = async (
       );
     }
 
-    // DISABLED: No more shared headers for batch processing
-    // Each event now gets its own unique session and headers
-    // This ensures proper isolation and bypasses rate limiting
-
-    // Update rate limits
     ScrapeEvent.rateLimits.hourlyCount++;
     domainLimits.count++;
 
@@ -757,8 +704,6 @@ const ScrapeEvent = async (
       proxy = proxyData.proxy;
     }
 
-    // DISABLED: No more shared headers - each event gets unique session
-    // This ensures proper isolation and bypasses rate limiting
     console.log(`Processing event ${eventId} with unique session and headers`);
     useProvidedHeaders = false; // Always use fresh headers
 
@@ -1678,14 +1623,6 @@ function trimCookieString(cookieString, maxLength) {
   return result;
 }
 
-// async function cleanup(browser, context) {
-//   try {
-//     // Never close the browser or context to maintain persistent session
-//     console.log("Keeping browser and context open for reuse");
-//   } catch (error) {
-//     console.warn("Cleanup error:", error);
-//   }
-// }
 
 function resetCapturedState() {
   capturedState = {
