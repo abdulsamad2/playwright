@@ -11,41 +11,24 @@ import { v4 as uuidv4 } from 'uuid';
 export function splitConcatenatedSeats(seatString) {
   if (!seatString) return [];
   
-  const seatStr = seatString.toString();
+  // Force string conversion and trim
+  const seatStr = String(seatString).trim();
   
-  // If it's already comma-separated, return as is
+  // Return empty array for scientific notation
+  if (/[eE][+-]?\d+/.test(seatStr)) {
+    console.warn(`Rejected scientific notation in seats: ${seatStr}`);
+    return [];
+  }
+  
+  // If already properly formatted, return as is
   if (seatStr.includes(',')) {
     return seatStr.split(',').map(s => s.trim());
   }
   
-  // Handle scientific notation (e.g., 6.12613614615617E+026)
-  if (seatStr.includes('E+') || seatStr.includes('e+')) {
-    // This is likely a corrupted value, return empty array
-    console.warn(`Detected scientific notation in seats: ${seatStr}`);
-    return [];
-  }
-  
-  // Handle concatenated numbers (e.g., "91011121314151617181920212223242526")
-  // Try to split into consecutive seat numbers
+  // Handle concatenated numbers by splitting into 2-digit chunks
   const numbers = [];
-  let current = '';
-  
-  for (let i = 0; i < seatStr.length; i++) {
-    current += seatStr[i];
-    
-    // Check if we have a valid seat number (typically 1-3 digits)
-    if (current.length >= 1) {
-      const num = parseInt(current);
-      
-      // If we have a valid number and the next character would make it too large
-      // or we're at the end, save this number
-      if (!isNaN(num) && (i === seatStr.length - 1 || 
-          (current.length >= 2 && seatStr[i + 1] !== '0') ||
-          current.length >= 3)) {
-        numbers.push(current);
-        current = '';
-      }
-    }
+  for (let i = 0; i < seatStr.length; i += 2) {
+    numbers.push(seatStr.substr(i, 2));
   }
   
   return numbers;
@@ -325,7 +308,7 @@ export function formatInventoryForExport(data) {
   
   // Simply ensure seats are stored as strings - no need to split if already formatted
   if (seats) {
-    seats = seats.toString();
+    seats = String(seats).trim();
     
     // Only validate/fix if we detect an issue (concatenated numbers or scientific notation)
     if (!seats.includes(',') || seats.includes('E+') || seats.includes('e+')) {
@@ -399,4 +382,16 @@ export function formatInventoryForExport(data) {
     passthrough: data.passthrough || "",
  
   };
+}
+
+/**
+ * Formats seats for CSV output
+ * @param {string} seats - Seats string
+ * @returns {string} - Formatted seats string
+ */
+export function formatSeatsForCSV(seats) {
+  if (Array.isArray(seats)) {
+    return seats.join(',');
+  }
+  return String(seats || ''); // Force string conversion
 }
