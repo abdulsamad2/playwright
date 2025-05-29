@@ -2733,7 +2733,7 @@ export class ScraperManager {
 
       // Start multiple parallel processing workers
       for (let i = 0; i < this.maxParallelWorkers; i++) {
-        this.startParallelWorker(i);
+        this.parallelWorkers.push(this.startParallelWorker(i));
       }
 
       // Main event queue management loop
@@ -2758,7 +2758,8 @@ export class ScraperManager {
           }
 
           // Process retry queue
-          const retryEvents = this.getRetryEventsToProcess();
+          const now = moment();
+          const retryEvents = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
           for (const job of retryEvents) {
             if (!this.eventProcessingQueue.some(e => e === job.eventId) && 
                 !this.processingEvents.has(job.eventId)) {
@@ -2770,6 +2771,8 @@ export class ScraperManager {
               });
             }
           }
+          // Remove processed retry jobs
+          this.retryQueue = this.retryQueue.filter(job => !retryEvents.includes(job));
 
           // Short pause before next cycle
           await setTimeout(100); // Check every 100ms for new events
@@ -2845,7 +2848,183 @@ export class ScraperManager {
   /**
    * Handle stale events - try recovery first, then auto-stop if needed
    */
- 
+  async handleStaleEvents(processedEventsSet) {
+    try {
+      const stats = await this.getStaleEventStats();
+      if (!stats) return;
+      
+      // Log summary of stale events
+      if (stats.staleOver10Min.length > 0 || stats.staleOver6Min.length > 0 || stats.staleOver3Min.length > 0) {
+        this.logWithTime(
+          `⚠️ Stale Event Summary: ${stats.staleOver10Min.length} events >10min, ${stats.staleOver6Min.length} events >6min, ${stats.staleOver3Min.length} events >3min`,
+          "warning"
+        );
+      } else {
+        this.logWithTime(`✅ No stale events: ${stats.recentlyUpdated.length} events updated recently`, "success");
+      }
+      
+      // Handle CRITICAL events (>10 minutes) with AGGRESSIVE recovery
+      if (stats.staleOver10Min.length > 0) {
+        const criticalEventIds = stats.staleOver10Min.map(e => e.eventId);
+        this.logWithTime(`🚨 CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`, "error");
+        
+        // Try AGGRESSIVE recovery first for ALL critical events
+        const recoveryResult = await this.attemptAggressiveRecovery(criticalEventIds);
+        
+        // Log recovery results
+        this.logWithTime(
+          `🚨 CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+          recoveryResult.recovered.length > 0 ? "success" : "error"
+        );
+        
+        // Add recovered events to processed set
+        recoveryResult.recovered.forEach(eventId => processedEventsSet.add(eventId));
+        
+        // For failed recovery events, check if they should be auto-stopped
+        if (recoveryResult.failed.length > 0) {
+          await this.autoStopStaleEvents(recoveryResult.failed);
+        }
+      }
+      
+      // Handle STANDARD stale events (3-10 minutes) with intensive recovery
+      if (stats.staleOver3Min.length > 0 || stats.staleOver6Min.length > 0) {
+        const staleEvents = stats.staleOver3Min.concat(stats.staleOver6Min);
+        // Filter to events not recently processed to avoid over-recovery
+        const eventsToRecover = staleEvents.filter(event => 
+          !processedEventsSet.has(event.eventId) && 
+          event.minutesSinceUpdate >= 3
+        );
+        
+        if (eventsToRecover.length > 0) {
+          const eventIdsToRecover = eventsToRecover.map(e => e.eventId);
+          this.logWithTime(`🔄 STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`, "warning");
+          
+          // Try intensive recovery for batches of events
+          const recoveryResult = await this.attemptIntensiveRecovery(eventIdsToRecover);
+          
+          // Log recovery results
+          this.logWithTime(
+            `🔄 STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+            recoveryResult.recovered.length > 0 ? "success" : "warning"
+          );
+          
+          // Add recovered events to processed set to prevent over-recovery
+          recoveryResult.recovered.forEach(eventId => processedEventsSet.add(eventId));
+        }
+      }
+    } catch (error) {
+      this.logWithTime(`Error handling stale events: ${error.message}`, "error");
+    }
+  }
+
+  /**
+   * Handle CRITICAL stale events (>10 minutes) with AGGRESSIVE recovery and potential auto-stop
+   */
+  async handleCriticalStaleEvents(criticalEvents, processedEventsSet) {
+    if (criticalEvents.length === 0) return;
+    
+    const criticalEventIds = criticalEvents.map(e => e.eventId);
+    this.logWithTime(`🚨 CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`, "error");
+    
+    // Try AGGRESSIVE recovery first for ALL critical events
+    const recoveryResult = await this.attemptAggressiveRecovery(criticalEventIds);
+    
+    // Log recovery results
+    this.logWithTime(
+      `🚨 CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+      recoveryResult.recovered.length > 0 ? "success" : "error"
+    );
+    
+    // Add recovered events to processed set
+    recoveryResult.recovered.forEach(eventId => processedEventsSet.add(eventId));
+    
+    // For failed recovery events, check if they should be auto-stopped
+    if (recoveryResult.failed.length > 0) {
+      await this.handleAutoStopEvents(recoveryResult.failed);
+    }
+  }
+
+  /**
+   * Handle STANDARD stale events (3-10 minutes) with intensive recovery
+   */
+  async handleStandardStaleEvents(staleEvents, processedEventsSet) {
+    if (staleEvents.length === 0) return;
+    
+    // Filter to events not recently processed to avoid over-recovery
+    const eventsToRecover = staleEvents.filter(event => 
+      !processedEventsSet.has(event.eventId) && 
+      event.minutesSinceUpdate >= 3
+    );
+    
+    if (eventsToRecover.length === 0) {
+      this.logWithTime(`Skipping recovery - ${staleEvents.length} stale events already recently processed`, "info");
+      return;
+    }
+    
+    const eventIdsToRecover = eventsToRecover.map(e => e.eventId);
+    this.logWithTime(`🔄 STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`, "warning");
+    
+    // Try intensive recovery for batches of events
+    const recoveryResult = await this.attemptIntensiveRecovery(eventIdsToRecover);
+    
+    // Log recovery results
+    this.logWithTime(
+      `🔄 STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+      recoveryResult.recovered.length > 0 ? "success" : "warning"
+    );
+    
+    // Add recovered events to processed set to prevent over-recovery
+    recoveryResult.recovered.forEach(eventId => processedEventsSet.add(eventId));
+    
+    // For failed recovery events over 10 minutes, consider auto-stop
+    if (recoveryResult.failed.length > 0) {
+      const failedEvents = staleEvents.filter(e => recoveryResult.failed.includes(e.eventId));
+      const failedOver10Min = failedEvents.filter(e => e.minutesSinceUpdate >= 10).map(e => e.eventId);
+      
+      if (failedOver10Min.length > 0) {
+        await this.handleAutoStopEvents(failedOver10Min);
+      } else {
+        this.logWithTime(
+          `Not auto-stopping ${recoveryResult.failed.length} failed events - under 10 minute threshold`,
+          "info"
+        );
+      }
+    }
+  }
+
+  /**
+   * Handle events that failed recovery - decide whether to auto-stop based on time
+   */
+  async handleAutoStopEvents(eventIds) {
+    if (eventIds.length === 0) return;
+    
+    this.logWithTime(`🛑 Evaluating ${eventIds.length} events for auto-stop after failed recovery`, "warning");
+    
+    // Get full event stats to check exact staleness
+    const stats = await this.getStaleEventStats();
+    if (!stats) return;
+    
+    // Filter to events that are still over 10 minutes stale
+    const eventsStillStale = stats.staleOver10Min
+      .filter(event => eventIds.includes(event.eventId));
+    
+    const eventsToAutoStop = eventsStillStale.map(e => e.eventId);
+    
+    if (eventsToAutoStop.length > 0) {
+      this.logWithTime(
+        `🛑 AUTO-STOPPING ${eventsToAutoStop.length} events: Failed recovery and still >10 minutes stale - setting Skip_Scraping = true`,
+        "error"
+      );
+      
+      // Auto-stop events that remain critically stale
+      await this.autoStopStaleEvents(eventsToAutoStop);
+    } else {
+      this.logWithTime(
+        `Not auto-stopping ${eventIds.length} events - no longer critically stale`,
+        "info"
+      );
+    }
+  }
 
   /**
    * Attempt AGGRESSIVE recovery for critically stale events (>8 minutes)
@@ -3605,6 +3784,94 @@ export class ScraperManager {
       ],
       processingStatus: { $ne: 'completed' }
     }).limit(100);
+  }
+
+  /**
+   * Clean up all tracking data for an event
+   * @param {string} eventId - The event ID to clean up
+   */
+  cleanupEventTracking(eventId) {
+    // Remove from all tracking maps and sets
+    this.eventUpdateTimestamps.delete(eventId);
+    this.eventLastProcessedTime.delete(eventId);
+    this.eventFailureCounts.delete(eventId);
+    this.eventFailureTimes.delete(eventId);
+    this.processingEvents.delete(eventId);
+    this.failedEvents.delete(eventId);
+    this.cooldownEvents.delete(eventId);
+    this.processingLocks.delete(eventId);
+    this.eventPriorityScores.delete(eventId);
+    this.eventUpdateSchedule.delete(eventId);
+    this.headersCache.delete(eventId);
+    this.headerRefreshTimestamps.delete(eventId);
+    
+    // Remove from retry queue
+    this.retryQueue = this.retryQueue.filter(job => job.eventId !== eventId);
+    
+    // Remove from processing queue
+    this.eventProcessingQueue = this.eventProcessingQueue.filter(item => 
+      (typeof item === 'string' ? item : item.eventId) !== eventId
+    );
+    
+    // Remove from active jobs
+    this.activeJobs.delete(eventId);
+    
+    // Release any associated proxies
+    this.proxyManager.releaseProxy(eventId, false);
+    
+    if (LOG_LEVEL >= 3) {
+      this.logWithTime(`🧹 Cleaned up all tracking data for event ${eventId}`, "debug");
+    }
+  }
+
+  /**
+   * Set Skip_Scraping = true for an event and clean up tracking
+   * @param {string} eventId - The event ID
+   * @param {string} reason - Reason for skipping
+   * @param {number} retryCount - Current retry count
+   * @param {number} retryLimit - Retry limit
+   */
+  async setEventSkipScraping(eventId, reason, retryCount, retryLimit) {
+    try {
+      // Update event in database to stop scraping
+      await Event.updateOne(
+        { Event_ID: eventId },
+        { 
+          $set: { 
+            Skip_Scraping: true,
+            status: "stopped",
+            skip_reason: reason,
+            skip_retry_count: retryCount,
+            skip_retry_limit: retryLimit,
+            skip_timestamp: new Date()
+          } 
+        }
+      );
+      
+      this.logWithTime(
+        `🚫 STOPPED event ${eventId}: Skip_Scraping = true (Reason: ${reason}, Retries: ${retryCount}/${retryLimit}) - excluded from future scraping`,
+        "warning"
+      );
+      
+      // Clean up all tracking data for this event
+      this.cleanupEventTracking(eventId);
+      
+      // Log to error log for audit trail
+      await this.logError(
+        eventId,
+        "EVENT_STOPPED",
+        new Error(`Event scraping stopped: ${reason}`),
+        {
+          reason,
+          retryCount,
+          retryLimit,
+          timestamp: new Date().toISOString(),
+          skipScrapingSet: true
+        }
+      );
+    } catch (error) {
+      this.logWithTime(`Error setting Skip_Scraping for event ${eventId}: ${error.message}`, "error");
+    }
   }
 }
 
