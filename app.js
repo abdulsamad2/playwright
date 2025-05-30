@@ -15,6 +15,7 @@ import cookieRefreshRoutes from "./routes/cookieRefreshRoutes.js";
 
 // Import global setup
 import setupGlobals from "./setup.js";
+import scraperManager from "./scraperManager.js"; // Added for command-line start and graceful shutdown
 
 dotenv.config();
 
@@ -75,8 +76,26 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", () => {
   console.log(`Server running on port ${port}`);
+
+  // Check for --start-scraper argument to start scraper automatically
+  if (process.argv.includes('--start-scraper')) {
+    console.log('Command-line argument --start-scraper detected. Attempting to start scraper...');
+    if (scraperManager && scraperManager.isRunning) {
+      console.log("Scraper is already running.");
+    } else if (scraperManager && typeof scraperManager.startContinuousScraping === 'function') {
+      scraperManager.startContinuousScraping().catch((error) => {
+        console.error("Error starting scraper from command line:", error);
+        if (scraperManager) {
+          scraperManager.isRunning = false; // Ensure state is updated on error
+        }
+      });
+      console.log("Scraper initiated via command line.");
+    } else {
+      console.error("Scraper manager or startContinuousScraping method is not available.");
+    }
+  }
 });
 
 // Graceful shutdown
@@ -84,18 +103,36 @@ process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Starting graceful shutdown...");
 
   // Stop the scraper
-  if (scraperManager.isRunning) {
-    scraperManager.stop();
+  if (scraperManager && typeof scraperManager.stop === 'function') {
+    try {
+      console.log("Attempting to stop scraper gracefully...");
+      await scraperManager.stop(); // Assuming stop() is async and returns a Promise
+      console.log("Scraper stopped successfully.");
+    } catch (error) {
+      console.error("Error during scraper stop:", error);
+    }
+  } else {
+    console.log("Scraper manager not found or stop method is unavailable. Skipping scraper stop.");
   }
 
   // Close server
-  server.close(() => {
-    console.log("HTTP server closed");
+  console.log("Closing HTTP server...");
+  server.close((err) => {
+    if (err) {
+      console.error("Error closing HTTP server:", err);
+    } else {
+      console.log("HTTP server closed successfully.");
+    }
 
     // Close database connection
-    mongoose.connection.close(false, () => {
-      console.log("MongoDB connection closed");
-      process.exit(0);
+    console.log("Closing MongoDB connection...");
+    mongoose.connection.close(false, (dbErr) => {
+      if (dbErr) {
+        console.error("Error closing MongoDB connection:", dbErr);
+      } else {
+        console.log("MongoDB connection closed successfully.");
+      }
+      process.exit(err || dbErr ? 1 : 0); // Exit with 1 if any error occurred
     });
   });
 });
