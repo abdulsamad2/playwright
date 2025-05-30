@@ -2028,12 +2028,17 @@ export class ScraperManager {
     
     this.logWithTime("Starting 15-minute cookie and session rotation schedule", "info");
     
-    // Immediately rotate on start
-    this.rotateAllCookiesAndSessions();
+    // Immediately rotate on start (non-blocking)
+    this.rotateAllCookiesAndSessions().catch(err => {
+      this.logWithTime(`Initial cookie rotation error: ${err.message}`, "error");
+    });
     
     // Set up rotation interval (15 minutes)
     this.cookieRotationIntervalId = setInterval(() => {
-      this.rotateAllCookiesAndSessions();
+      // Non-blocking rotation
+      this.rotateAllCookiesAndSessions().catch(err => {
+        this.logWithTime(`Periodic cookie rotation error: ${err.message}`, "error");
+      });
     }, SESSION_REFRESH_INTERVAL);
     
     return this.cookieRotationIntervalId;
@@ -2043,91 +2048,151 @@ export class ScraperManager {
    * Rotates all cookies and sessions to ensure freshness
    */
   async rotateAllCookiesAndSessions() {
-    try {
-      this.logWithTime("Performing full cookie and session rotation", "info");
-      
-      // Clear header cache to force refresh
-      this.headersCache.clear();
-      this.headerRefreshTimestamps.clear();
-      
-      // Rotate sessions via session manager
+    // Make the entire process non-blocking by wrapping in a Promise with timeout
+    return new Promise(async (resolve) => {
+      // Set a maximum timeout for the entire rotation process
+      const rotationTimeout = setTimeout(() => {
+        this.logWithTime("Cookie and session rotation timed out after 2 minutes - continuing operation", "warning");
+        resolve(false);
+      }, 120000); // 2 minute timeout
+
       try {
-        await this.sessionManager.forceSessionRotation();
-        this.logWithTime("Successfully rotated all sessions", "success");
-      } catch (sessionError) {
-        this.logWithTime(`Error rotating sessions: ${sessionError.message}`, "error");
-      }
-      
-      // Force cookie reset
-      try {
-        await this.resetCookiesAndHeaders();
-        this.logWithTime("Successfully reset all cookies and headers", "success");
-      } catch (cookieError) {
-        this.logWithTime(`Error resetting cookies: ${cookieError.message}`, "error");
-      }
-      
-      // Create multiple fresh test sessions to prime the cache
-      try {
-        // Get multiple random event IDs from the database
-        const randomEvents = await Event.aggregate([
-          {
-            $match: {
-              Skip_Scraping: { $ne: true },
-              url: { $exists: true, $ne: "" },
-            },
-          },
-          { $sample: { size: 5 } }, // Get 5 random events to create diversity
-          { $project: { Event_ID: 1 } },
-        ]);
+        this.logWithTime("Performing full cookie and session rotation", "info");
         
-        if (randomEvents && randomEvents.length > 0) {
-          this.logWithTime(`Creating ${randomEvents.length} fresh test sessions with random events`, "info");
-          
-          // Process each random event to create multiple fresh sessions
-          for (const randomEvent of randomEvents) {
-            const eventId = randomEvent.Event_ID;
-            // Force refresh headers to create new cookies
-            await this.refreshEventHeaders(eventId, true);
-            this.logWithTime(`Created fresh test session using random event ${eventId}`, "info");
-            
-            // Small delay between refreshes
-            await setTimeout(500);
-          }
-        } else {
-          // Fallback to using cached event IDs if available
-          if (this.headerRefreshTimestamps.size > 0) {
-            const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
-            this.logWithTime(`No database events found, using ${Math.min(3, cachedEvents.length)} cached event IDs`, "warning");
-            
-            // Use up to 3 cached event IDs
-            const eventsToUse = cachedEvents.slice(0, 3);
-            for (const cachedId of eventsToUse) {
-              await this.refreshEventHeaders(cachedId, true);
-              this.logWithTime(`Created fresh test session using cached event ID ${cachedId}`, "info");
-              await setTimeout(500);
-            }
-          } else {
-            this.logWithTime(`No database events or cached events found, skipping test session creation`, "warning");
-          }
+        // Clear header cache to force refresh
+        this.headersCache.clear();
+        this.headerRefreshTimestamps.clear();
+        
+        // Rotate sessions via session manager with timeout
+        try {
+          const sessionPromise = this.sessionManager.forceSessionRotation();
+          const sessionResult = await Promise.race([
+            sessionPromise,
+            setTimeout(30000).then(() => { throw new Error("Session rotation timed out after 30 seconds"); })
+          ]);
+          this.logWithTime("Successfully rotated all sessions", "success");
+        } catch (sessionError) {
+          this.logWithTime(`Error rotating sessions: ${sessionError.message}`, "error");
+          // Continue execution even after session error
         }
-      } catch (testError) {
-        this.logWithTime(`Error creating test sessions: ${testError.message}`, "warning");
         
-                  // Even on error, try with any available event ID from cache
+        // Force cookie reset with timeout
+        try {
+          const cookiePromise = this.resetCookiesAndHeaders();
+          const cookieResult = await Promise.race([
+            cookiePromise,
+            setTimeout(30000).then(() => { throw new Error("Cookie reset timed out after 30 seconds"); })
+          ]);
+          this.logWithTime("Successfully reset all cookies and headers", "success");
+        } catch (cookieError) {
+          this.logWithTime(`Error resetting cookies: ${cookieError.message}`, "error");
+          // Continue execution even after cookie error
+        }
+        
+        // Create multiple fresh test sessions to prime the cache
+        try {
+          // Get multiple random event IDs from the database with timeout
+          const randomEventsPromise = Event.aggregate([
+            {
+              $match: {
+                Skip_Scraping: { $ne: true },
+                url: { $exists: true, $ne: "" },
+              },
+            },
+            { $sample: { size: 5 } }, // Get 5 random events to create diversity
+            { $project: { Event_ID: 1 } },
+          ]);
+          
+          const randomEvents = await Promise.race([
+            randomEventsPromise,
+            setTimeout(10000).then(() => { throw new Error("Database query timed out after 10 seconds"); })
+          ]);
+          
+          if (randomEvents && randomEvents.length > 0) {
+            this.logWithTime(`Creating ${randomEvents.length} fresh test sessions with random events`, "info");
+            
+            // Process each random event to create multiple fresh sessions
+            const sessionPromises = [];
+            for (const randomEvent of randomEvents) {
+              const eventId = randomEvent.Event_ID;
+              // Push each refresh promise to array but don't await
+              sessionPromises.push(
+                Promise.race([
+                  this.refreshEventHeaders(eventId, true),
+                  setTimeout(15000).then(() => { throw new Error(`Header refresh timed out for ${eventId}`); })
+                ])
+                .then(() => this.logWithTime(`Created fresh test session using random event ${eventId}`, "info"))
+                .catch(err => this.logWithTime(`Error creating session for ${eventId}: ${err.message}`, "warning"))
+              );
+              
+              // Small delay between starting refreshes
+              await setTimeout(100);
+            }
+            
+            // Wait for all session promises with overall timeout
+            await Promise.race([
+              Promise.allSettled(sessionPromises),
+              setTimeout(60000).then(() => { throw new Error("Session creation timed out after 60 seconds"); })
+            ]);
+          } else {
+            // Fallback to using cached event IDs if available
+            if (this.headerRefreshTimestamps.size > 0) {
+              const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
+              this.logWithTime(`No database events found, using ${Math.min(3, cachedEvents.length)} cached event IDs`, "warning");
+              
+              // Use up to 3 cached event IDs with timeouts
+              const fallbackPromises = [];
+              const eventsToUse = cachedEvents.slice(0, 3);
+              for (const cachedId of eventsToUse) {
+                fallbackPromises.push(
+                  Promise.race([
+                    this.refreshEventHeaders(cachedId, true),
+                    setTimeout(15000).then(() => { throw new Error(`Header refresh timed out for ${cachedId}`); })
+                  ])
+                  .then(() => this.logWithTime(`Created fresh test session using cached event ID ${cachedId}`, "info"))
+                  .catch(err => this.logWithTime(`Error creating session for ${cachedId}: ${err.message}`, "warning"))
+                );
+                await setTimeout(100);
+              }
+              
+              // Wait for all fallback promises with timeout
+              await Promise.race([
+                Promise.allSettled(fallbackPromises),
+                setTimeout(45000).then(() => { throw new Error("Fallback session creation timed out after 45 seconds"); })
+              ]);
+            } else {
+              this.logWithTime(`No database events or cached events found, skipping test session creation`, "warning");
+            }
+          }
+        } catch (testError) {
+          this.logWithTime(`Error creating test sessions: ${testError.message}`, "warning");
+          
+          // Even on error, try with any available event ID from cache (with timeout)
           try {
             if (this.headerRefreshTimestamps.size > 0) {
               // Get any event ID from the cache
               const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
               const fallbackId = cachedEvents[Math.floor(Math.random() * cachedEvents.length)];
               
-              await this.refreshEventHeaders(fallbackId, true);
+              await Promise.race([
+                this.refreshEventHeaders(fallbackId, true),
+                setTimeout(15000).then(() => { throw new Error(`Final header refresh timed out for ${fallbackId}`); })
+              ]);
               this.logWithTime(`Created fallback session after error using cached event ID ${fallbackId}`, "info");
             } else {
-              // Try a direct database query as last resort
+              // Try a direct database query as last resort (with timeout)
               try {
-                const fallbackEvent = await Event.findOne().sort({ Last_Updated: 1 }).limit(1).lean();
+                const fallbackEventPromise = Event.findOne().sort({ Last_Updated: 1 }).limit(1).lean();
+                const fallbackEvent = await Promise.race([
+                  fallbackEventPromise,
+                  setTimeout(10000).then(() => { throw new Error("Final database query timed out after 10 seconds"); })
+                ]);
+                
                 if (fallbackEvent) {
-                  await this.refreshEventHeaders(fallbackEvent.Event_ID, true);
+                  await Promise.race([
+                    this.refreshEventHeaders(fallbackEvent.Event_ID, true),
+                    setTimeout(15000).then(() => { throw new Error(`Final header refresh timed out for ${fallbackEvent.Event_ID}`); })
+                  ]);
                   this.logWithTime(`Created fallback session using database event ID ${fallbackEvent.Event_ID}`, "info");
                 } else {
                   this.logWithTime(`No fallback events available, skipping session creation`, "error");
@@ -2139,12 +2204,17 @@ export class ScraperManager {
           } catch (fallbackError) {
             this.logWithTime(`Failed to create fallback sessions: ${fallbackError.message}`, "error");
           }
+        }
+        
+        this.logWithTime("Cookie and session rotation complete", "success");
+        clearTimeout(rotationTimeout);
+        resolve(true);
+      } catch (error) {
+        this.logWithTime(`Error in cookie rotation: ${error.message}`, "error");
+        clearTimeout(rotationTimeout);
+        resolve(false);
       }
-      
-      this.logWithTime("Cookie and session rotation complete", "success");
-    } catch (error) {
-      this.logWithTime(`Error in cookie rotation: ${error.message}`, "error");
-    }
+    });
   }
 
   // Helper method to get retry events ready to process
@@ -3609,6 +3679,7 @@ export class ScraperManager {
   startPerformanceMonitoring() {
     let monitoringCycleCount = 0;
     const processedEvents = new Set(); // Track processed events
+    let lastSuccessfulScrapeTime = Date.now(); // Track last successful scrape time
     
     setInterval(async () => {
       monitoringCycleCount++;
@@ -3626,6 +3697,22 @@ export class ScraperManager {
       // Run stale event recovery every 6 cycles (3 minutes)
       if (monitoringCycleCount % 6 === 0) {
         await this.handleStaleEvents(processedEvents);
+      }
+      
+      // Check if system is completely stuck (no successful scrapes in 5 minutes)
+      const currentTime = Date.now();
+      const timeSinceLastSuccess = this.lastSuccessTime ? currentTime - this.lastSuccessTime.valueOf() : Infinity;
+      
+      if (timeSinceLastSuccess > 300000) { // 5 minutes
+        this.logWithTime(`⚠️ SYSTEM STALLED: No successful scrapes in ${Math.floor(timeSinceLastSuccess/60000)} minutes - initiating emergency recovery!`, "error");
+        
+        // Emergency recovery procedure
+        await this.performEmergencyRecovery();
+        
+        // Reset tracking to avoid multiple recoveries
+        if (this.lastSuccessTime) {
+          this.lastSuccessTime = moment();
+        }
       }
       
       const stats = await this.getPerformanceStats();
@@ -3713,6 +3800,91 @@ export class ScraperManager {
         );
       }
     }, 30000);
+  }
+
+  /**
+   * Emergency recovery procedure when system is completely stuck
+   */
+  async performEmergencyRecovery() {
+    this.logWithTime("🚨 INITIATING EMERGENCY SYSTEM RECOVERY 🚨", "error");
+    
+    try {
+      // 1. Reset all processing maps and sets
+      this.logWithTime("Clearing all processing locks and states", "warning");
+      this.processingEvents.clear();
+      this.processingLocks.clear();
+      this.activeJobs.clear();
+      
+      // 2. Force reset of all session and cookie data
+      this.logWithTime("Force resetting all sessions and cookies", "warning");
+      this.headersCache.clear();
+      this.headerRefreshTimestamps.clear();
+      this.headerRotationPool = [];
+      
+      // 3. Release all proxies
+      this.logWithTime("Releasing all proxies", "warning");
+      this.proxyManager.releaseAllProxies();
+      
+      // 4. Hard reset sessions
+      try {
+        await Promise.race([
+          this.sessionManager.forceSessionRotation(),
+          setTimeout(20000).then(() => { throw new Error("Session rotation timed out during emergency recovery"); })
+        ]);
+        this.logWithTime("Successfully reset session manager", "success");
+      } catch (sessionError) {
+        this.logWithTime(`Session manager reset failed: ${sessionError.message}`, "error");
+      }
+      
+      // 5. Reset circuit breaker if tripped
+      if (this.apiCircuitBreaker.tripped) {
+        this.logWithTime("Resetting API circuit breaker", "warning");
+        this.apiCircuitBreaker.tripped = false;
+        this.apiCircuitBreaker.failures = 0;
+        this.apiCircuitBreaker.lastTripped = null;
+      }
+      
+      // 6. Reset global error counters
+      this.globalConsecutiveErrors = 0;
+      
+      // 7. Reload a subset of critical events into processing queue
+      try {
+        const criticalEvents = await Event.find({
+          Skip_Scraping: { $ne: true },
+          $or: [
+            { Last_Updated: { $lt: new Date(Date.now() - 120000) } }, // Not updated in 2 minutes
+            { Last_Updated: { $exists: false } }
+          ]
+        })
+        .sort({ Last_Updated: 1 })
+        .limit(50)
+        .select("Event_ID")
+        .lean();
+        
+        if (criticalEvents.length > 0) {
+          // Clear current processing queue and add critical events
+          this.eventProcessingQueue = [];
+          for (const event of criticalEvents) {
+            this.eventProcessingQueue.push(event.Event_ID);
+          }
+          
+          this.logWithTime(`Added ${criticalEvents.length} critical events to processing queue`, "success");
+        } else {
+          this.logWithTime("No critical events found for emergency recovery", "warning");
+        }
+      } catch (dbError) {
+        this.logWithTime(`Error loading critical events: ${dbError.message}`, "error");
+      }
+      
+      // 8. Ensure concurrency semaphore is reset
+      this.concurrencySemaphore = CONCURRENT_LIMIT;
+      
+      this.logWithTime("🔄 EMERGENCY RECOVERY COMPLETE - resuming operation", "success");
+      return true;
+    } catch (error) {
+      this.logWithTime(`Emergency recovery failed: ${error.message}`, "error");
+      return false;
+    }
   }
 
   /**
