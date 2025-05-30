@@ -23,7 +23,8 @@ dotenv.config();
 setupGlobals();
 
 const app = express();
-const port = process.env.PORT || 3000;
+const initialPort = parseInt(process.env.PORT, 10) || 3000; // Renamed and parsed
+let serverInstance; // To hold the server instance for graceful shutdown
 const mongoUri =
   process.env.DATABASE_URL || "mongodb://localhost:27017/ticketScraper";
 
@@ -76,27 +77,50 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-const server = app.listen(port, "0.0.0.0", () => {
-  console.log(`Server running on port ${port}`);
-
-  // Check for --start-scraper argument to start scraper automatically
-  if (process.argv.includes('--start-scraper')) {
-    console.log('Command-line argument --start-scraper detected. Attempting to start scraper...');
-    if (scraperManager && scraperManager.isRunning) {
-      console.log("Scraper is already running.");
-    } else if (scraperManager && typeof scraperManager.startContinuousScraping === 'function') {
-      scraperManager.startContinuousScraping().catch((error) => {
-        console.error("Error starting scraper from command line:", error);
-        if (scraperManager) {
-          scraperManager.isRunning = false; // Ensure state is updated on error
-        }
-      });
-      console.log("Scraper initiated via command line.");
-    } else {
-      console.error("Scraper manager or startContinuousScraping method is not available.");
-    }
+function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20) {
+  if (attempt >= maxAttempts) {
+    console.error(`Failed to bind to a port after ${maxAttempts} attempts. Exiting.`);
+    process.exit(1);
+    return;
   }
-});
+
+  const server = app.listen(currentPort, "0.0.0.0");
+
+  server.on('listening', () => {
+    serverInstance = server; // Assign to the higher-scoped variable
+    console.log(`Server running on port ${currentPort}`);
+
+    // Check for --start-scraper argument
+    if (process.argv.includes('--start-scraper')) {
+      console.log('Command-line argument --start-scraper detected. Attempting to start scraper...');
+      if (scraperManager && scraperManager.isRunning) {
+        console.log("Scraper is already running.");
+      } else if (scraperManager && typeof scraperManager.startContinuousScraping === 'function') {
+        scraperManager.startContinuousScraping().catch((error) => {
+          console.error("Error starting scraper from command line:", error);
+          if (scraperManager) scraperManager.isRunning = false;
+        });
+        console.log("Scraper initiated via command line.");
+      } else {
+        console.error("Scraper manager or startContinuousScraping method is not available.");
+      }
+    }
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Port ${currentPort} is in use. Trying port ${currentPort + 1}...`);
+      server.close(); // Close the server that failed to listen
+      startServerWithPortFallback(currentPort + 1, attempt + 1, maxAttempts);
+    } else {
+      console.error("Failed to start server:", err);
+      process.exit(1);
+    }
+  });
+}
+
+// Start server
+startServerWithPortFallback(initialPort);
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
@@ -106,7 +130,7 @@ process.on("SIGTERM", async () => {
   if (scraperManager && typeof scraperManager.stop === 'function') {
     try {
       console.log("Attempting to stop scraper gracefully...");
-      await scraperManager.stop(); // Assuming stop() is async and returns a Promise
+      await scraperManager.stop();
       console.log("Scraper stopped successfully.");
     } catch (error) {
       console.error("Error during scraper stop:", error);
@@ -115,16 +139,7 @@ process.on("SIGTERM", async () => {
     console.log("Scraper manager not found or stop method is unavailable. Skipping scraper stop.");
   }
 
-  // Close server
-  console.log("Closing HTTP server...");
-  server.close((err) => {
-    if (err) {
-      console.error("Error closing HTTP server:", err);
-    } else {
-      console.log("HTTP server closed successfully.");
-    }
-
-    // Close database connection
+  const closeDbAndExit = (serverError) => {
     console.log("Closing MongoDB connection...");
     mongoose.connection.close(false, (dbErr) => {
       if (dbErr) {
@@ -132,9 +147,24 @@ process.on("SIGTERM", async () => {
       } else {
         console.log("MongoDB connection closed successfully.");
       }
-      process.exit(err || dbErr ? 1 : 0); // Exit with 1 if any error occurred
+      process.exit(serverError || dbErr ? 1 : 0);
     });
-  });
+  };
+
+  if (serverInstance && serverInstance.listening) {
+    console.log("Closing HTTP server...");
+    serverInstance.close((serverCloseErr) => {
+      if (serverCloseErr) {
+        console.error("Error closing HTTP server:", serverCloseErr);
+      } else {
+        console.log("HTTP server closed successfully.");
+      }
+      closeDbAndExit(serverCloseErr);
+    });
+  } else {
+    console.log("HTTP server was not started or already closed. Proceeding to close database.");
+    closeDbAndExit(null);
+  }
 });
 
 export default app;

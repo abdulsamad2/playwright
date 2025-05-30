@@ -3,14 +3,13 @@
   "version": "1.0.0",
   "main": "index.js",
   "type": "module",
- "scripts": {
-   "start": "node app.js",
-   "start-scraper": "node app.js --start-scraper", 
-   "dev": "node --watch app.js",
-   "process-csv": "node processInventory.js process",
-   "sync": "node syncInventory.js",
-   "test-sync": "node testSyncService.js"
- },
+  "scripts": {
+    "start": "node app.js",
+    "start-scraper": "node app.js --start-scraper",
+    "dev": "node --watch app.js",
+    "process-csv": "node processInventory.js process",
+    "test-sync": "node testSyncService.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
