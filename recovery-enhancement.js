@@ -1,12 +1,25 @@
 // Enhanced Recovery System for ScraperManager
 // This file contains the optimized recovery methods to be integrated into scraperManager.js
 
-// Recovery Configuration Constants
-const CRITICAL_RECOVERY_INTERVAL = 15000; // 15 seconds
-const AGGRESSIVE_RECOVERY_INTERVAL = 30000; // 30 seconds
-const RECOVERY_BATCH_SIZE = 50; // events per batch
-const MAX_RECOVERY_BATCHES = 10; // max concurrent batches
-const LONG_COOLDOWN_MINUTES = 1; // 30 minute cooldown
+// Recovery Configuration Constants - Optimized for 1000+ events
+const CRITICAL_RECOVERY_INTERVAL = 10000; // 10 seconds - faster for 1000+ events
+const AGGRESSIVE_RECOVERY_INTERVAL = 20000; // 20 seconds - more frequent
+const STANDARD_RECOVERY_INTERVAL = 30000; // 30 seconds for standard recovery
+const AUTO_STOP_CHECK_INTERVAL = 60000; // 1 minute for auto-stop checks
+
+// Enhanced batch processing for 1000+ events
+const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
+const MAX_RECOVERY_BATCHES = 20; // Increased from 10 for parallel processing
+const CONCURRENT_RECOVERY_LIMIT = 500; // Max concurrent recovery operations
+
+// Aggressive thresholds for 3-minute guarantee
+const CRITICAL_THRESHOLD = 120000; // 2 minutes - faster than 3 minutes
+const STALE_THRESHOLD = 180000; // 3 minutes - maximum allowed
+const AUTO_STOP_THRESHOLD = 600000; // 10 minutes - auto-stop threshold
+
+// Enhanced cooldown settings
+const SHORT_RECOVERY_COOLDOWN = 5000; // 5 seconds between recovery attempts
+const LONG_RECOVERY_COOLDOWN = 15000; // 15 seconds for persistent failures
 
 /**
  * Start recovery monitoring intervals for aggressive stale event handling
@@ -14,7 +27,7 @@ const LONG_COOLDOWN_MINUTES = 1; // 30 minute cooldown
 function startRecoveryMonitoring() {
   this.logWithTime("Starting enhanced recovery monitoring for 3-minute update guarantee", "info");
   
-  // Critical recovery check every 15 seconds
+  // Critical recovery check every 10 seconds
   this.criticalRecoveryIntervalId = setInterval(async () => {
     try {
       await this.handleCriticalStaleEvents();
@@ -30,24 +43,24 @@ function startRecoveryMonitoring() {
     } catch (error) {
       this.logWithTime(`Standard recovery error: ${error.message}`, "error");
     }
-  }, AGGRESSIVE_RECOVERY_INTERVAL);
+  }, STANDARD_RECOVERY_INTERVAL);
 
-  // Auto-stop check every 2 minutes
+  // Auto-stop check every 1 minute
   this.autoStopIntervalId = setInterval(async () => {
     try {
       await this.handleAutoStopEvents();
     } catch (error) {
       this.logWithTime(`Auto-stop check error: ${error.message}`, "error");
     }
-  }, 120000);
+  }, AUTO_STOP_CHECK_INTERVAL);
 }
 
 /**
- * Handle critical stale events (>2.5 minutes) with immediate recovery
+ * Handle critical stale events (>2 minutes) with immediate recovery
  */
 async function handleCriticalStaleEvents() {
   const now = Date.now();
-  const criticalThreshold = 150000; // 2.5 minutes
+  const criticalThreshold = CRITICAL_THRESHOLD;
   
   try {
     // Verify database connection first
@@ -64,7 +77,7 @@ async function handleCriticalStaleEvents() {
 
     if (criticalEvents.length > 0) {
       const eventIds = criticalEvents.map(e => e.Event_ID);
-      this.logWithTime(`🚨 CRITICAL: ${eventIds.length} events >2.5min stale - immediate recovery`, "error");
+      this.logWithTime(`🚨 CRITICAL: ${eventIds.length} events >2min stale - immediate recovery`, "error");
       
       // Process in parallel batches for speed
       const batches = [];
@@ -92,8 +105,8 @@ async function handleCriticalStaleEvents() {
  * Handle standard stale events (>3 minutes) with standard recovery
  */
 async function handleStandardStaleEvents(processedEvents = new Set()) {
-  const CRITICAL_THRESHOLD = 180000; // 3 minutes
-  const STOP_THRESHOLD = 600000; // 10 minutes
+  const CRITICAL_THRESHOLD = STALE_THRESHOLD;
+  const STOP_THRESHOLD = AUTO_STOP_THRESHOLD;
   
   try {
     if (!this.db || !this.db.readyState) throw new Error('Database connection not ready');
@@ -123,7 +136,7 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
         continue;
       }
       
-      // Skip if in cooldown (30 seconds)
+      // Skip if in cooldown (5 seconds)
       if (this.cooldownEvents.has(eventId)) continue;
       
       // Skip if already processed
@@ -134,10 +147,10 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
         const attempts = (this.eventAttempts.get(eventId) || 0) + 1;
         this.eventAttempts.set(eventId, attempts);
         
-        // Short cooldown (30 seconds) after 3 attempts
+        // Short cooldown (5 seconds) after 3 attempts
         if (attempts > 3) {
           this.cooldownEvents.add(eventId);
-          setTimeout(() => this.cooldownEvents.delete(eventId), 30000);
+          setTimeout(() => this.cooldownEvents.delete(eventId), SHORT_RECOVERY_COOLDOWN);
           continue;
         }
         
@@ -175,7 +188,7 @@ async function handleAutoStopEvents() {
 
     const eventsToStop = await Event.find({
       Skip_Scraping: { $ne: true },
-      Last_Updated: { $lt: new Date(now - STALE_EVENT_THRESHOLD) }
+      Last_Updated: { $lt: new Date(now - AUTO_STOP_THRESHOLD) }
     }).select("Event_ID").lean().catch(err => {
       throw new Error(`Database query failed: ${err.message}`);
     });
