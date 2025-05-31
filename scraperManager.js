@@ -846,7 +846,7 @@ export class ScraperManager {
         {
           $set: {
             Available_Seats: currentTicketCount,
-            Last_Updated: new Date(),
+            Last_Updated: new Date(), // Ensure Last_Updated is always set to now
             "metadata.lastUpdate": new Date(),
             "metadata.ticketCount": currentTicketCount
           },
@@ -942,6 +942,12 @@ export class ScraperManager {
         eventId,
         moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, "milliseconds")
       );
+      
+      // Make sure to properly update the timestamp in memory as well
+      this.eventUpdateTimestamps.set(eventId, moment());
+      
+      // Also update the last processed time to prevent immediate reprocessing
+      this.eventLastProcessedTime.set(eventId, Date.now());
 
       if (LOG_LEVEL >= 3) {
         this.logWithTime(
@@ -1183,15 +1189,14 @@ export class ScraperManager {
         );
       }
 
-      // ENHANCED: Force proxy rotation on retries
+      // Get a new proxy on retries - no blocking
       if (retryCount > 0) {
-        // Release any existing proxy to force rotation
+        // Release any existing proxy to get a new one
         this.proxyManager.releaseProxy(eventId, false);
-        this.proxyManager.blacklistCurrentProxy(eventId);
         
         if (LOG_LEVEL >= 2) {
           this.logWithTime(
-            `Forced proxy rotation for retry #${retryCount} of event ${eventId}`,
+            `Getting new proxy for retry #${retryCount} of event ${eventId}`,
             "info"
           );
         }
@@ -1714,93 +1719,6 @@ export class ScraperManager {
     }
   }
 
-  // Removed batch event processing functionality - simplified to sequential processing only
-
-  // Get events to process in priority order (simplified version without domain grouping)
-  async getEvents() {
-    try {
-      const now = moment();
-
-      // Find ALL active events - no limit for 1000+ events
-      // CRITICAL: Only get events where Skip_Scraping is explicitly NOT true
-      const events = await Event.find({
-        $or: [
-          { Skip_Scraping: { $ne: true } },
-          { Skip_Scraping: { $exists: false } }, // Include events without the field
-          { Skip_Scraping: null },
-          { Skip_Scraping: false }
-        ]
-      })
-        .select("Event_ID url Last_Updated")
-        .lean();
-
-      if (!events.length) {
-        return [];
-      }
-
-      // Get current time
-      const currentTime = now.valueOf();
-
-      // Calculate priority for each event and filter those needing updates
-      const eventsNeedingUpdate = [];
-      
-      for (const event of events) {
-        const lastUpdated = event.Last_Updated
-          ? moment(event.Last_Updated).valueOf()
-          : 0;
-        const timeSinceLastUpdate = currentTime - lastUpdated;
-        
-        // Skip if updated too recently (unless critical)
-        if (timeSinceLastUpdate < 30000 && lastUpdated > 0) {
-          continue; // Skip events updated in last 30 seconds
-        }
-
-        // Calculate priority score
-        let priorityScore = timeSinceLastUpdate / 1000;
-
-        // Critical events approaching 3-minute threshold
-        if (timeSinceLastUpdate > 150000) { // 2.5 minutes
-          priorityScore = priorityScore * 1000;
-        }
-        // Very urgent - approaching 2 minutes
-        else if (timeSinceLastUpdate > 110000) {
-          priorityScore = priorityScore * 500;
-        }
-        // Urgent - over 1.5 minutes
-        else if (timeSinceLastUpdate > 90000) {
-          priorityScore = priorityScore * 100;
-        }
-        // High - over 1 minute
-        else if (timeSinceLastUpdate > 60000) {
-          priorityScore = priorityScore * 50;
-        }
-        // Medium - over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
-          priorityScore = priorityScore * 10;
-        }
-
-        eventsNeedingUpdate.push({
-          eventId: event.Event_ID,
-          priorityScore,
-          timeSinceLastUpdate,
-          isCritical: timeSinceLastUpdate > 150000
-        });
-        
-        // Cache the priority score
-        this.eventPriorityScores.set(event.Event_ID, priorityScore);
-      }
-
-      // Sort by priority (highest first)
-      eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
-
-      // Return all events that need updating
-      return eventsNeedingUpdate.map((event) => event.eventId);
-    } catch (error) {
-      console.error("Error getting events to process:", error);
-      return [];
-    }
-  }
-
   /**
    * Calculate adaptive pause time for sequential processing
    * @returns {number} Pause time in milliseconds
@@ -1872,17 +1790,19 @@ export class ScraperManager {
         return true; // Error was handled by circuit breaker
       }
 
-      // Try rotating proxy and headers for this event
+      // Try rotating proxy (just get a new one, no blocking)
       if (this.proxyManager.getAvailableProxyCount() > 1) {
         if (LOG_LEVEL >= 2) {
           this.logWithTime(
-            `Rotating proxy for event ${eventId} due to ${
+            `Getting new proxy for event ${eventId} due to ${
               is403Error ? "403" : "429"
             } error`,
             "info"
           );
         }
-        this.proxyManager.blacklistCurrentProxy(eventId);
+        
+        // Just release the proxy to get a new one next time
+        this.proxyManager.releaseProxy(eventId, false);
         return true; // Error handled by proxy rotation
       }
     }
@@ -2364,12 +2284,11 @@ export class ScraperManager {
     let proxy = null;
 
     try {
-      // ENHANCED: Force proxy rotation on retries
+      // Simply get a new proxy on retries - no blocking
       if (retryCount > 0) {
-        // Release any existing proxy to ensure we get a fresh one
+        // Just release the proxy and get a new one
         this.proxyManager.releaseProxy(eventId, false);
-        this.proxyManager.blacklistCurrentProxy(eventId);
-        this.logWithTime(`Forcing new proxy for retry #${retryCount} of event ${eventId}`, "info");
+        this.logWithTime(`Getting fresh proxy for retry #${retryCount} of event ${eventId}`, "info");
       }
 
       // Get a unique proxy for this specific event
@@ -2443,7 +2362,23 @@ export class ScraperManager {
       // Success tracking
       this.successCount++;
       this.lastSuccessTime = moment();
+      
+      // FIX: Always update eventUpdateTimestamps with moment object (not Date)
       this.eventUpdateTimestamps.set(eventId, moment());
+      
+      // FIX: Also update Last_Updated in database to ensure getEvents() stops returning this event
+      try {
+        await Event.updateOne(
+          { Event_ID: eventId },
+          { $set: { Last_Updated: new Date() } }
+        );
+      } catch (dbError) {
+        this.logWithTime(`Error updating Last_Updated for ${eventId}: ${dbError.message}`, "warning");
+      }
+      
+      // Update processed time to prevent immediate reprocessing
+      this.eventLastProcessedTime.set(eventId, Date.now());
+      
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
 
@@ -2505,14 +2440,28 @@ export class ScraperManager {
    * Async metadata update to avoid blocking
    */
   async updateEventMetadataAsync(eventId, scrapeResult) {
-    // Process in background
-    setImmediate(async () => {
-      try {
-        await this.updateEventMetadata(eventId, scrapeResult);
-      } catch (error) {
-        console.error(`Async metadata update error for ${eventId}: ${error.message}`);
-      }
-    });
+    try {
+      // Immediately update tracking before processing in background
+      this.eventUpdateTimestamps.set(eventId, moment());
+      this.eventLastProcessedTime.set(eventId, Date.now());
+      
+      // Update Last_Updated directly to ensure events stop appearing in getEvents()
+      await Event.updateOne(
+        { Event_ID: eventId },
+        { $set: { Last_Updated: new Date() } }
+      );
+      
+      // Process full metadata update in background
+      setImmediate(async () => {
+        try {
+          await this.updateEventMetadata(eventId, scrapeResult);
+        } catch (error) {
+          console.error(`Async metadata update error for ${eventId}: ${error.message}`);
+        }
+      });
+    } catch (error) {
+      console.error(`Error updating Last_Updated for ${eventId}: ${error.message}`);
+    }
   }
 
   /**
@@ -2689,123 +2638,6 @@ export class ScraperManager {
     }
   }
 
-  // This is the main getEvents method for sequential processing
-
-  // Get events to process in priority order (simplified version without domain grouping)
-  async getEvents() {
-    try {
-      const now = moment();
-
-      // Find ALL active events - no limit for 1000+ events
-      // CRITICAL: Only get events where Skip_Scraping is explicitly NOT true
-      const events = await Event.find({
-        $or: [
-          { Skip_Scraping: { $ne: true } },
-          { Skip_Scraping: { $exists: false } }, // Include events without the field
-          { Skip_Scraping: null },
-          { Skip_Scraping: false }
-        ]
-      })
-        .select("Event_ID url Last_Updated")
-        .lean();
-
-      if (!events.length) {
-        return [];
-      }
-
-      // Get current time
-      const currentTime = now.valueOf();
-
-      // Calculate priority for each event and filter those needing updates
-      const eventsNeedingUpdate = [];
-      
-      for (const event of events) {
-        const lastUpdated = event.Last_Updated
-          ? moment(event.Last_Updated).valueOf()
-          : 0;
-        const timeSinceLastUpdate = currentTime - lastUpdated;
-        
-        // Skip if updated too recently (unless critical)
-        if (timeSinceLastUpdate < 30000 && lastUpdated > 0) {
-          continue; // Skip events updated in last 30 seconds
-        }
-
-        // Calculate priority score
-        let priorityScore = timeSinceLastUpdate / 1000;
-
-        // Critical events approaching 3-minute threshold
-        if (timeSinceLastUpdate > 150000) { // 2.5 minutes
-          priorityScore = priorityScore * 1000;
-        }
-        // Very urgent - approaching 2 minutes
-        else if (timeSinceLastUpdate > 110000) {
-          priorityScore = priorityScore * 500;
-        }
-        // Urgent - over 1.5 minutes
-        else if (timeSinceLastUpdate > 90000) {
-          priorityScore = priorityScore * 100;
-        }
-        // High - over 1 minute
-        else if (timeSinceLastUpdate > 60000) {
-          priorityScore = priorityScore * 50;
-        }
-        // Medium - over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
-          priorityScore = priorityScore * 10;
-        }
-
-        eventsNeedingUpdate.push({
-          eventId: event.Event_ID,
-          priorityScore,
-          timeSinceLastUpdate,
-          isCritical: timeSinceLastUpdate > 150000
-        });
-        
-        // Cache the priority score
-        this.eventPriorityScores.set(event.Event_ID, priorityScore);
-      }
-
-      // Sort by priority (highest first)
-      eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
-
-      // Return all events that need updating
-      return eventsNeedingUpdate.map((event) => event.eventId);
-    } catch (error) {
-      console.error("Error getting events to process:", error);
-      return [];
-    }
-  }
-
-  /**
-   * Calculate adaptive pause time for sequential processing
-   * @returns {number} Pause time in milliseconds
-   */
-  getAdaptivePauseTime() {
-    // Minimal pause for high-performance processing
-    let pauseTime = 10; // Reduced from 200ms to 10ms
-
-    // Only add significant pause if system is overloaded
-    const activeJobCount = this.activeJobs.size;
-    const failedEventCount = this.failedEvents.size;
-
-    // Only throttle if we have many active jobs
-    if (activeJobCount > CONCURRENT_LIMIT * 0.8) {
-      pauseTime += 50;
-    }
-
-    // Add small pause for failed events
-    if (failedEventCount > 100) {
-      pauseTime += 20;
-    }
-
-    // Circuit breaker adds minimal pause
-    if (this.apiCircuitBreaker.tripped) {
-      pauseTime += 100;
-    }
-
-    return Math.min(pauseTime, 200); // Cap at 200ms max
-  }
-
   /**
    * Start continuous scraping process
    * @returns {Promise<void>}
@@ -2865,11 +2697,40 @@ export class ScraperManager {
         this.parallelWorkers.push(this.startParallelWorker(i));
       }
 
+      // Track metrics to detect stuck loops
+      let lastEventsCount = 0;
+      let sameEventsCounter = 0;
+      let lastEventIds = [];
+
       // Main event queue management loop
       while (this.isRunning) {
         try {
           // Get all events that need processing
           const events = await this.getEvents();
+          
+          // CRITICAL FIX: Track if we're getting the same events repeatedly
+          const currentEventIds = JSON.stringify(events.slice(0, 10).sort());
+          if (currentEventIds === lastEventIds) {
+            sameEventsCounter++;
+            
+            // If we've seen the same events 5 times, something is wrong
+            if (sameEventsCounter >= 5) {
+              this.logWithTime(
+                `WARNING: Same ${events.length} events returned ${sameEventsCounter} times in a row. Potential processing loop detected.`,
+                "error"
+              );
+              
+              // Force cleanup of tracking to break the loop
+              await this.forceCleanupAllTracking();
+              
+              // Reset counter after cleanup
+              sameEventsCounter = 0;
+            }
+          } else {
+            // Different events, reset counter
+            lastEventIds = currentEventIds;
+            sameEventsCounter = 0;
+          }
           
           if (events.length > 0) {
             this.logWithTime(
@@ -2878,19 +2739,37 @@ export class ScraperManager {
             );
 
             // Add events to processing queue if not already there
+            let addedCount = 0;
             for (const eventId of events) {
-              if (!this.eventProcessingQueue.some(e => e === eventId) && 
+              // Only add if not already in queue and not being processed
+              if (!this.eventProcessingQueue.some(e => (typeof e === 'string' ? e === eventId : e.eventId === eventId)) && 
                   !this.processingEvents.has(eventId)) {
                 this.eventProcessingQueue.push(eventId);
+                addedCount++;
               }
+            }
+            
+            // Report if we're adding events but not processing them
+            if (addedCount > 0) {
+              this.logWithTime(
+                `Added ${addedCount} new events to processing queue (total: ${this.eventProcessingQueue.length})`,
+                "info"
+              );
+            } else if (events.length > 0 && addedCount === 0) {
+              this.logWithTime(
+                `Warning: Found ${events.length} events needing updates but added 0 to queue - they may be stuck in processing`,
+                "warning"
+              );
             }
           }
 
           // Process retry queue
           const now = moment();
           const retryEvents = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
+          let retryAddedCount = 0;
+          
           for (const job of retryEvents) {
-            if (!this.eventProcessingQueue.some(e => e === job.eventId) && 
+            if (!this.eventProcessingQueue.some(e => (typeof e === 'string' ? e === job.eventId : e.eventId === job.eventId)) && 
                 !this.processingEvents.has(job.eventId)) {
               // Add to front of queue with retry info
               this.eventProcessingQueue.unshift({
@@ -2898,8 +2777,17 @@ export class ScraperManager {
                 retryCount: job.retryCount,
                 isRetry: true
               });
+              retryAddedCount++;
             }
           }
+          
+          if (retryAddedCount > 0) {
+            this.logWithTime(
+              `Added ${retryAddedCount} retry events to processing queue`,
+              "info"
+            );
+          }
+          
           // Remove processed retry jobs
           this.retryQueue = this.retryQueue.filter(job => !retryEvents.includes(job));
 
@@ -3186,9 +3074,13 @@ export class ScraperManager {
         this.eventFailureTimes.delete(eventId);
         this.processingEvents.delete(eventId);
         
-        // STEP 2: Force complete proxy reset
-        this.proxyManager.releaseProxy(eventId, false);
-        this.proxyManager.blacklistCurrentProxy(eventId);
+        // STEP 2: Just release proxy - no blocking
+        try {
+          this.proxyManager.releaseProxy(eventId, false);
+          this.logWithTime(`Released proxy for event ${eventId} during recovery`, "info");
+        } catch (proxyError) {
+          this.logWithTime(`Error releasing proxy: ${proxyError.message}`, "warning");
+        }
         
         // STEP 3: Force complete session reset
         try {
@@ -3237,8 +3129,14 @@ export class ScraperManager {
                 break;
                 
               case 'new_proxy':
-                // Force new proxy assignment
-                const { proxyAgent, proxy } = this.proxyManager.getProxyForEvent(eventId);
+                // Just get a new proxy - no blocking
+                try {
+                  this.proxyManager.releaseProxy(eventId, false);
+                  const { proxyAgent, proxy } = this.proxyManager.getProxyForEvent(eventId);
+                  this.logWithTime(`Using new proxy for ${eventId} during recovery`, "info");
+                } catch (proxyError) {
+                  this.logWithTime(`Error getting new proxy: ${proxyError.message}`, "warning");
+                }
                 break;
                 
               case 'fallback_headers':
@@ -4143,6 +4041,109 @@ export class ScraperManager {
     } catch (error) {
       this.logWithTime(`Error setting Skip_Scraping for event ${eventId}: ${error.message}`, "error");
       return false;
+    }
+  }
+
+  /**
+   * Get events to process in priority order
+   * @returns {Promise<string[]>} Array of event IDs to process
+   */
+  async getEvents() {
+    try {
+      const now = moment();
+
+      // Find ALL active events - no limit for 1000+ events
+      // CRITICAL: Only get events where Skip_Scraping is explicitly NOT true
+      const events = await Event.find({
+        $or: [
+          { Skip_Scraping: { $ne: true } },
+          { Skip_Scraping: { $exists: false } }, // Include events without the field
+          { Skip_Scraping: null },
+          { Skip_Scraping: false }
+        ]
+      })
+        .select("Event_ID url Last_Updated")
+        .lean();
+
+      if (!events.length) {
+        return [];
+      }
+
+      // Get current time
+      const currentTime = now.valueOf();
+
+      // Calculate priority for each event and filter those needing updates
+      const eventsNeedingUpdate = [];
+      
+      for (const event of events) {
+        const eventId = event.Event_ID;
+        
+        // CRITICAL FIX: First check if this event was recently processed in memory
+        // This prevents returning events that have been processed but DB hasn't been updated yet
+        const lastProcessedTime = this.eventLastProcessedTime.get(eventId);
+        if (lastProcessedTime && (Date.now() - lastProcessedTime) < 60000) {
+          // Skip events processed in the last minute regardless of database state
+          continue;
+        }
+        
+        // Also check processing lock to avoid duplicate processing
+        if (this.processingEvents.has(eventId)) {
+          continue;
+        }
+        
+        const lastUpdated = event.Last_Updated
+          ? moment(event.Last_Updated).valueOf()
+          : 0;
+        const timeSinceLastUpdate = currentTime - lastUpdated;
+        
+        // Skip if updated too recently (unless critical)
+        if (timeSinceLastUpdate < 30000 && lastUpdated > 0) {
+          continue; // Skip events updated in last 30 seconds
+        }
+
+        // Calculate priority score
+        let priorityScore = timeSinceLastUpdate / 1000;
+
+        // Critical events approaching 3-minute threshold
+        if (timeSinceLastUpdate > 150000) { // 2.5 minutes
+          priorityScore = priorityScore * 1000;
+        }
+        // Very urgent - approaching 2 minutes
+        else if (timeSinceLastUpdate > 110000) {
+          priorityScore = priorityScore * 500;
+        }
+        // Urgent - over 1.5 minutes
+        else if (timeSinceLastUpdate > 90000) {
+          priorityScore = priorityScore * 100;
+        }
+        // High - over 1 minute
+        else if (timeSinceLastUpdate > 60000) {
+          priorityScore = priorityScore * 50;
+        }
+        // Medium - over 45 seconds
+        else if (timeSinceLastUpdate > 45000) {
+          priorityScore = priorityScore * 10;
+        }
+
+        eventsNeedingUpdate.push({
+          eventId: event.Event_ID,
+          priorityScore,
+          timeSinceLastUpdate,
+          isCritical: timeSinceLastUpdate > 150000
+        });
+        
+        // Cache the priority score
+        this.eventPriorityScores.set(event.Event_ID, priorityScore);
+      }
+
+      // Sort by priority (highest first)
+      eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
+
+      // Return all events that need updating
+      return eventsNeedingUpdate.map((event) => event.eventId);
+    } catch (error) {
+      console.error("Error getting events to process:", error);
+      return [];
     }
   }
 }
