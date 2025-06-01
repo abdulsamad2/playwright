@@ -16,7 +16,7 @@ import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_PROCESSING = true; // Set to false to disable all CSV generation
-export const ENABLE_CSV_UPLOAD = true; // Set to false to disable all_events_combined.csv upload
+export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
