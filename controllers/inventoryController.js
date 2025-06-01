@@ -11,6 +11,7 @@ import {
 } from '../helpers/csvInventoryHelper.js';
 import SyncService from '../services/syncService.js';
 import { ensureBlankCsvExists } from '../uploadInventory.js';
+import { ENABLE_CSV_PROCESSING } from '../scraperManager.js'; // Import the flag
 
 // Constants for SyncService (mirroring uploadInventory.js)
 // Ideally, these should be in environment variables
@@ -150,6 +151,11 @@ const shouldGenerateCSV = () => {
 };
 
 const generateCombinedCSVBackground = async () => {
+  if (!ENABLE_CSV_PROCESSING) {
+    console.log('CSV processing is disabled by ENABLE_CSV_PROCESSING flag. Skipping combined CSV generation.');
+    isGeneratingCSV = false; // Ensure this is reset if we bail early
+    return;
+  }
   if (isGeneratingCSV) return;
   
   isGeneratingCSV = true;
