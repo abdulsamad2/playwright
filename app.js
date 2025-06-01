@@ -12,6 +12,7 @@ import statsRoutes from "./routes/statsRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import inventoryRoutes from "./routes/inventoryRoutes.js";
 import cookieRefreshRoutes from "./routes/cookieRefreshRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
 
 // Import global setup
 import setupGlobals from "./setup.js";
@@ -65,6 +66,7 @@ app.use("/api/events", eventRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/cookies", cookieRefreshRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -88,6 +90,7 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
 
   server.on('listening', () => {
     serverInstance = server; // Assign to the higher-scoped variable
+    global.serverInstance = server; // Make it globally accessible for restart logic
     console.log(`Server running on port ${currentPort}`);
 
     // Check for --start-scraper argument

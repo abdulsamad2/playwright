@@ -16,7 +16,7 @@ const UPLOAD_INTERVAL = 6 * 60 * 1000;
 
 // Path to the combined events CSV file
 const dataDir = path.join(__dirname, 'data');
-const combinedCsvPath = path.join(dataDir, "blank.csv");
+const combinedCsvPath = path.join(dataDir, "all_events_combined.csv");
 
 // Initialize the Sync service
 const syncService = new SyncService(COMPANY_ID, API_TOKEN);
