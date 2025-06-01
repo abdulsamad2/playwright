@@ -31,6 +31,7 @@ const mongoUri =
 
 // Middleware
 const allowedOrigins = [
+  "https://americanwebgeek.com",
   "http://3.81.42.229", // Production", // Production
   "http://localhost:5173", // Local development
 ];
