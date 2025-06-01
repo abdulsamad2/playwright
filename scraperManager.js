@@ -16,7 +16,7 @@ import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_PROCESSING = true; // Set to false to disable all CSV generation
-export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
+export const ENABLE_CSV_UPLOAD = true; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
@@ -126,7 +126,6 @@ export class ScraperManager {
     this.globalConsecutiveErrors = 0; // Track consecutive errors across all events
     this.lastCookieReset = null; // Track when cookies were last reset
     this.cookiesPath = path.join(process.cwd(), "cookies.json"); // Path to cookies file
-   this.runCsvUploadCycle = runCsvUploadCycle;
     // Initialize the proxy manager
     this.proxyManager = new ProxyManager(this);
     this.batchProxies = new Map(); // Map batch ID to proxy
@@ -1907,30 +1906,24 @@ export class ScraperManager {
       this.logWithTime("Cookie rotation cycle stopped", "info");
     }
     
-    // // Clear the CSV upload interval if it exists
-    // if (this.csvUploadIntervalId) {
-    //   clearInterval(this.csvUploadIntervalId);
-    //   this.csvUploadIntervalId = null;
-    //   this.logWithTime("CSV upload cycle stopped", "info");
-    // }
+    // Clear the CSV upload interval if it exists
+    if (this.csvUploadIntervalId) {
+      clearInterval(this.csvUploadIntervalId);
+      this.csvUploadIntervalId = null;
+      this.logWithTime("CSV upload cycle stopped", "info");
+    }
     
-    // // Wait for CSV processing to complete
-    // if (this.csvProcessingActive) {
-    //   this.logWithTime("Waiting for CSV processing to complete...", "info");
-    //   let waitTime = 0;
-    //   while (this.csvProcessingActive && waitTime < 30000) {
-    //     await setTimeout(100);
-    //     waitTime += 100;
-    //   }
-    // }
-    
-    // // Run one final CSV upload to ensure latest data is uploaded
-    // try {
-    //   this.logWithTime("Running final CSV upload before shutdown", "info");
-    //   await this.runCsvUploadCycle();
-    // } catch (error) {
-    //   this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
-    // }
+    // Run one final CSV upload to ensure latest data is uploaded
+    if (ENABLE_CSV_UPLOAD) {
+      try {
+        this.logWithTime("Running final CSV upload before shutdown", "info");
+        const { runCsvUploadCycle } = await import('./helpers/csvUploadCycle.js');
+        await runCsvUploadCycle();
+        this.logWithTime("Final CSV upload completed", "success");
+      } catch (error) {
+        this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
+      }
+    }
     
     // Release any active proxies
     this.proxyManager.releaseAllProxies();
@@ -2759,13 +2752,28 @@ export class ScraperManager {
 
       // Start CSV upload cycle immediately (non-blocking)
       if (ENABLE_CSV_UPLOAD) {
-        this.runCsvUploadCycle();
+        try {
+          const { runCsvUploadCycle } = await import('./helpers/csvUploadCycle.js');
+          runCsvUploadCycle();
+          this.logWithTime("Started CSV upload cycle - initial upload executed", "info");
 
-        // Set up recurring CSV upload cycle every 6 minutes
-        this.csvUploadIntervalId = setInterval(() => {
-          // Each interval call is non-blocking
-          this.runCsvUploadCycle();
-        }, CSV_UPLOAD_INTERVAL);
+          // Set up recurring CSV upload cycle every 6 minutes
+          this.csvUploadIntervalId = setInterval(async () => {
+            try {
+              // Each interval call is non-blocking
+              await runCsvUploadCycle();
+              this.lastCsvUploadTime = moment(); // Track successful upload time
+            } catch (uploadError) {
+              this.logWithTime(`CSV upload cycle error: ${uploadError.message}`, "error");
+            }
+          }, CSV_UPLOAD_INTERVAL);
+          
+          this.logWithTime(`CSV upload cycle scheduled to run every ${CSV_UPLOAD_INTERVAL/60000} minutes`, "info");
+        } catch (error) {
+          this.logWithTime(`Error setting up CSV upload cycle: ${error.message}`, "error");
+        }
+      } else {
+        this.logWithTime("CSV upload is disabled (ENABLE_CSV_UPLOAD = false)", "warning");
       }
 
       // Start multiple parallel processing workers
