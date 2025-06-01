@@ -133,7 +133,14 @@ export async function saveInventoryToCSV(data, filePath) {
     const csvStream = csv.format({ 
       headers: true,
       quoteColumns: true, // Quote columns that contain commas or special characters
-      quoteHeaders: true
+      quoteHeaders: true,
+      transform: (row) => {
+        // Ensure 'seats' is treated as a string to prevent scientific notation
+        if (row.seats !== undefined && row.seats !== null) {
+          row.seats = String(row.seats);
+        }
+        return row;
+      }
     });
     
     csvStream.pipe(ws)

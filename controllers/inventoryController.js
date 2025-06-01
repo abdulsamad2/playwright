@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { customAlphabet } from 'nanoid';
+const generateNumericId10 = customAlphabet('0123456789', 10);
 import { 
   validateConsecutiveSeats, 
   saveInventoryToCSV, 
@@ -43,56 +44,24 @@ const areRecordsIdentical = (record1, record2) => {
   return true;
 };
 
-// Helper function to fix seat formatting issues
-const fixSeatFormatting = async (seats) => {
-  if (!seats) return '';
-  
-  try {
-    // Import the validation function
-    const { validateConsecutiveSeats } = await import('../helpers/csvInventoryHelper.js');
-    const validation = validateConsecutiveSeats(seats);
-    
-    // Log when seat formatting is applied
-    if (validation.originalSeats !== validation.fixedSeats) {
-      console.log(`🔧 Seat Format Fix: "${validation.originalSeats}" → "${validation.fixedSeats}"`);
-    }
-    
-    return validation.fixedSeats || seats;
-  } catch (error) {
-    console.error(`Error fixing seat formatting: ${error.message}`);
-    return seats;
-  }
-};
-
 // Load existing CSV data for comparison (non-blocking)
 const loadExistingCsvData = async () => {
   try {
     if (fs.existsSync(COMBINED_EVENTS_FILE)) {
-      const csvContent = fs.readFileSync(COMBINED_EVENTS_FILE, 'utf8');
-      const lines = csvContent.split('\n');
-      
-      if (lines.length > 1) {
-        const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-        existingCsvData.clear();
-        
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          
-          const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
-          const record = {};
-          
-          headers.forEach((header, index) => {
-            record[header] = values[index] || '';
-          });
-          
-          if (record.inventory_id) {
+      const records = await readInventoryFromCSV(COMBINED_EVENTS_FILE);
+      existingCsvData.clear();
+
+      if (records && records.length > 0) {
+        records.forEach(record => {
+          // Ensure record is valid and has an inventory_id before processing
+          if (record && record.inventory_id) { 
             const compositeKey = generateCompositeKey(record);
             existingCsvData.set(compositeKey, record);
           }
-        }
-        
-        console.log(`Loaded ${existingCsvData.size} existing records from CSV for comparison`);
+        });
+        console.log(`Loaded ${existingCsvData.size} existing records from CSV for comparison using readInventoryFromCSV`);
+      } else {
+        console.log('No records found or empty CSV when loading existing data via readInventoryFromCSV.');
       }
     }
     lastCsvLoad = Date.now();
@@ -217,7 +186,7 @@ const generateCombinedCSVBackground = async () => {
               event_date: record.event_date || eventDetails?.Event_DateTime?.toISOString() || new Date().toISOString(),
               event_id: record.event_id || record.mapping_id || eventId,
               source_event_id: eventId,
-              seats: await fixSeatFormatting(record.seats) // Fix seat formatting to prevent scientific notation
+              seats: record.seats // Removed fixSeatFormatting call
             })));
             allRecords.push(...enrichedRecords);
             includedEvents++;
@@ -259,12 +228,12 @@ const generateCombinedCSVBackground = async () => {
                 newRecordsCount.preserved++;
               } else {
                 // Record has changes - generate new inventory_id (delete old, insert new)
-                record.inventory_id = uuidv4();
+                record.inventory_id = generateNumericId10();
                 newRecordsCount.updated++;
               }
             } else {
               // New record - generate new inventory_id
-              record.inventory_id = uuidv4();
+              record.inventory_id = generateNumericId10();
               newRecordsCount.created++;
             }
             
@@ -383,7 +352,7 @@ class InventoryController {
           
           // Ensure inventory_id is present (will be properly assigned during CSV generation)
           if (!record.inventory_id) {
-            record.inventory_id = uuidv4(); // Temporary ID for in-memory storage
+            record.inventory_id = generateNumericId10(); // Temporary ID for in-memory storage
           }
           
           return record;

@@ -28,6 +28,8 @@ class DatabaseManager {
    * Update event metadata and ticket info
    */
   async updateEventMetadata(eventId, scrapeResult, scheduler) {
+    const LOG_LEVEL = (config && typeof config.LOG_LEVEL !== 'undefined') ? config.LOG_LEVEL : (process.env.LOG_LEVEL || 2);
+    const CHUNK_SIZE = (config && config.CHUNK_SIZE) ? config.CHUNK_SIZE : 100;
     const startTime = performance.now();
     const session = await Event.startSession();
 
@@ -73,7 +75,7 @@ class DatabaseManager {
           const existingGroups = await ConsecutiveGroup.find(
             { eventId },
             { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 }
-          ).lean();
+          ).lean().session(session);
 
           const existingSeats = new Set(
             existingGroups.flatMap((g) =>
@@ -89,10 +91,25 @@ class DatabaseManager {
             )
           );
 
-          if (
+          // ADD DIAGNOSTIC LOGGING
+          if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
+            this.logger.logWithTime(`[Debug ${eventId}] Existing Seats Count: ${existingSeats.size}`, "debug");
+            if (existingSeats.size > 0) this.logger.logWithTime(`[Debug ${eventId}] Sample Existing Seats: ${Array.from(existingSeats).slice(0, 3).join(', ')}`, "debug");
+            this.logger.logWithTime(`[Debug ${eventId}] New Seats Count: ${newSeats.size}`, "debug");
+            if (newSeats.size > 0) this.logger.logWithTime(`[Debug ${eventId}] Sample New Seats: ${Array.from(newSeats).slice(0, 3).join(', ')}`, "debug");
+          }
+
+          // ROBUST CHANGE DETECTION LOGIC
+          const hasChanges =
             existingSeats.size !== newSeats.size ||
-            [...existingSeats].some((s) => !newSeats.has(s))
-          ) {
+            [...existingSeats].some((s) => !newSeats.has(s)) ||
+            [...newSeats].some((s) => !existingSeats.has(s));
+
+          if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
+            this.logger.logWithTime(`[Debug ${eventId}] Change Detected for ConsecutiveGroup: ${hasChanges}`, "debug");
+          }
+
+          if (hasChanges) {
             // Bulk delete and insert for better performance
             await ConsecutiveGroup.deleteMany({ eventId }).session(session);
 
@@ -121,9 +138,19 @@ class DatabaseManager {
             }));
 
             // Use fewer documents in a single batch insert
-            for (let i = 0; i < groupsToInsert.length; i += config.CHUNK_SIZE) {
-              const chunk = groupsToInsert.slice(i, i + config.CHUNK_SIZE);
+            if (LOG_LEVEL >= 2 && groupsToInsert.length > 0) { // Assuming 2 is info level
+              this.logger.logWithTime(`[Info ${eventId}] Inserting ${groupsToInsert.length} groups in chunks. First group sample: ${JSON.stringify(groupsToInsert[0], null, 2)}`, "info");
+            }
+            for (let i = 0; i < groupsToInsert.length; i += CHUNK_SIZE) { // Using CHUNK_SIZE defined at the top
+              const chunk = groupsToInsert.slice(i, i + CHUNK_SIZE);
               await ConsecutiveGroup.insertMany(chunk, { session });
+            }
+            if (LOG_LEVEL >= 2) { // Assuming 2 is info level
+              this.logger.logWithTime(`[Info ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`, "info");
+            }
+          } else {
+            if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
+              this.logger.logWithTime(`[Debug ${eventId}] No change detected for ConsecutiveGroup. Skipping update.`, "debug");
             }
           }
         }

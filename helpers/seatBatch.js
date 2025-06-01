@@ -188,7 +188,6 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   //let singleExtraCharges=parseFloat(parseFloat(offer?.charges.filter(x=>x?.reason=="order_processing").reduce((total, item) => total + item.amount, 0)));
   //console.log(parseFloat(parseFloat(offer?.charges.filter(x=>x?.reason=="order_processing").reduce((total, item) => total + item.amount, 0))))
   //Remove single fee's
-  fs.writeFileSync("data.json", JSON.stringify(offer, null, 2));
   let repeatExtraCharges = parseFloat(
     offer?.charges
       .filter((x) => x?.reason != "order_processing")

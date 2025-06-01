@@ -853,89 +853,154 @@ export class ScraperManager {
         }
       );
 
-      // Only update consecutive groups if there are changes
+      const LOG_LEVEL = (global.config && typeof global.config.LOG_LEVEL !== 'undefined') ? global.config.LOG_LEVEL : (process.env.LOG_LEVEL || 2);
+
       if (validScrapeResult?.length > 0) {
-        // Use bulk operations for efficiency
-        const bulkOps = [];
-        
-        // Delete existing groups
-        bulkOps.push({
-          deleteMany: {
-            filter: { eventId }
-          }
-        });
+        // Fetch existing groups for comparison
+        const existingGroups = await ConsecutiveGroup.find(
+          { eventId }, 
+          { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 } // Assuming inventory.listPrice is comparable or seats have their own price
+        ).lean();
 
-        // Prepare groups to insert
-        const groupsToInsert = validScrapeResult.map((group) => {
-          const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
-          const increasedPrice = basePrice * (1 + priceIncreasePercentage / 100);
-          const formattedInHandDate = inHandDate instanceof Date ? inHandDate : new Date();
+        const existingSeats = new Set(
+          existingGroups.flatMap((g) =>
+            g.seats.map((s) => `${g.section}-${g.row}-${s.number}-${s.price || g.inventory?.listPrice}`) // Use seat price, fallback to group price
+          )
+        );
 
-          return {
-            insertOne: {
-              document: {
-                eventId,
-                mapping_id,
-                section: group.section,
-                row: group.row,
-                seatCount: group.inventory.quantity,
-                seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
-                seats: group.seats.map((seatNumber) => ({
-                  number: seatNumber.toString(),
-                  inHandDate: formattedInHandDate,
-                  price: increasedPrice,
-                  mapping_id,
-                })),
-                inventory: {
-                  quantity: group.inventory.quantity,
-                  section: group.section,
-                  hideSeatNumbers: group.inventory.hideSeatNumbers || true,
-                  row: group.row,
-                  cost: group.inventory.cost,
-                  stockType: group.inventory.stockType || "MOBILE_TRANSFER",
-                  lineType: group.inventory.lineType,
-                  seatType: group.inventory.seatType,
-                  inHandDate: formattedInHandDate,
-                  notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
-                  tags: group.inventory.tags || "john drew don",
-                  inventoryId: group.inventory.inventoryId,
-                  offerId: group.inventory.offerId,
-                  splitType: group.inventory.splitType || "CUSTOM",
-                  publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
-                  listPrice: increasedPrice,
-                  customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
-                  mapping_id,
-                  tickets: group.inventory.tickets.map((ticket) => ({
-                    id: ticket.id,
-                    seatNumber: ticket.seatNumber,
-                    notes: ticket.notes,
-                    cost: ticket.cost,
-                    faceValue: ticket.faceValue,
-                    taxedCost: ticket.taxedCost,
-                    sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice)
-                      ? ticket.sellPrice
-                      : parseFloat(ticket?.cost || ticket?.faceValue || 0),
-                    stockType: ticket.stockType,
-                    eventId: ticket.eventId,
-                    accountId: ticket.accountId,
-                    status: ticket.status,
-                    auditNote: ticket.auditNote,
-                    mapping_id: mapping_id,
-                  })),
-                },
-              }
-            }
-          };
-        });
+        const newSeats = new Set(
+          validScrapeResult.flatMap((g) =>
+            g.seats.map(
+              (s) => `${g.section}-${g.row}-${s}-${g.inventory.listPrice}` // Assuming g.inventory.listPrice is the comparable price for new seats
+            )
+          )
+        );
 
-        // Add all insert operations
-        bulkOps.push(...groupsToInsert);
-
-        // Execute bulk operation
-        if (bulkOps.length > 1) { // More than just the delete
-          await ConsecutiveGroup.bulkWrite(bulkOps, { ordered: false });
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(`[Debug SM ${eventId}] Existing Seats Count: ${existingSeats.size}`, "debug");
+          if (existingSeats.size > 0) this.logWithTime(`[Debug SM ${eventId}] Sample Existing Seats: ${Array.from(existingSeats).slice(0, 3).join(', ')}`, "debug");
+          this.logWithTime(`[Debug SM ${eventId}] New Seats Count: ${newSeats.size}`, "debug");
+          if (newSeats.size > 0) this.logWithTime(`[Debug SM ${eventId}] Sample New Seats: ${Array.from(newSeats).slice(0, 3).join(', ')}`, "debug");
         }
-      }
+
+        const hasChanges =
+          existingSeats.size !== newSeats.size ||
+          [...existingSeats].some((s) => !newSeats.has(s)) ||
+          [...newSeats].some((s) => !existingSeats.has(s));
+
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(`[Debug SM ${eventId}] Change Detected for ConsecutiveGroup: ${hasChanges}`, "debug");
+        }
+
+        if (!hasChanges) {
+          if (LOG_LEVEL >= 3) {
+              this.logWithTime(`[Debug SM ${eventId}] No seat changes detected. Skipping ConsecutiveGroup update.`, "debug");
+          }
+        } else {
+          // Use bulk operations for efficiency
+          const bulkOps = [];
+          
+          // Delete existing groups
+          bulkOps.push({
+            deleteMany: {
+              filter: { eventId }
+            }
+          });
+
+          // Prepare groups to insert
+          const groupsToInsert = validScrapeResult.map((group) => {
+            const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
+            const increasedPrice = basePrice * (1 + priceIncreasePercentage / 100);
+            const formattedInHandDate = inHandDate instanceof Date ? inHandDate : new Date();
+
+            return {
+              insertOne: {
+                document: {
+                  eventId,
+                  mapping_id,
+                  section: group.section,
+                  row: group.row,
+                  seatCount: group.inventory.quantity,
+                  seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
+                  seats: group.seats.map((seatNumber) => ({
+                    number: seatNumber.toString(),
+                    inHandDate: formattedInHandDate,
+                    price: increasedPrice,
+                    mapping_id,
+                  })),
+                  inventory: {
+                    quantity: group.inventory.quantity,
+                    section: group.section,
+                    hideSeatNumbers: group.inventory.hideSeatNumbers || true,
+                    row: group.row,
+                    cost: group.inventory.cost,
+                    stockType: group.inventory.stockType || "MOBILE_TRANSFER",
+                    lineType: group.inventory.lineType,
+                    seatType: group.inventory.seatType,
+                    inHandDate: formattedInHandDate,
+                    notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
+                    tags: group.inventory.tags || "john drew don",
+                    inventoryId: group.inventory.inventoryId,
+                    offerId: group.inventory.offerId,
+                    splitType: group.inventory.splitType || "CUSTOM",
+                    publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
+                    listPrice: increasedPrice,
+                    customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
+                    mapping_id,
+                    tickets: group.inventory.tickets.map((ticket) => ({
+                      id: ticket.id,
+                      seatNumber: ticket.seatNumber,
+                      notes: ticket.notes,
+                      cost: ticket.cost,
+                      faceValue: ticket.faceValue,
+                      taxedCost: ticket.taxedCost,
+                      sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice)
+                        ? ticket.sellPrice
+                        : parseFloat(ticket?.cost || ticket?.faceValue || 0),
+                      stockType: ticket.stockType,
+                      eventId: ticket.eventId,
+                      accountId: ticket.accountId,
+                      status: ticket.status,
+                      auditNote: ticket.auditNote,
+                      mapping_id: mapping_id,
+                    })),
+                  },
+                }
+              }
+            };
+          });
+
+          // Add all insert operations
+          bulkOps.push(...groupsToInsert);
+
+          // Execute bulk operation
+          if (bulkOps.length > 1) { // More than just the delete
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(`[Info SM ${eventId}] Updating ${groupsToInsert.length} consecutive groups.`, "info");
+            }
+            await ConsecutiveGroup.bulkWrite(bulkOps, { ordered: false });
+          } else if (bulkOps.length === 1 && groupsToInsert.length === 0 && existingGroups.length > 0) {
+            // This means only a delete operation was added (to clear all groups) and no new groups to insert, but there were existing groups.
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(`[Info SM ${eventId}] Deleting all ${existingGroups.length} existing consecutive groups as no new valid groups found.`, "info");
+            }
+            await ConsecutiveGroup.bulkWrite(bulkOps, { ordered: false }); // Execute the delete
+          }
+        } // This closes the 'else' from 'if (!hasChanges)'
+      } else if (validScrapeResult?.length === 0) {
+          // Handle case where scrape result is empty: delete all existing groups for this eventId
+          const existingGroupCount = await ConsecutiveGroup.countDocuments({ eventId });
+          if (existingGroupCount > 0) {
+              if (LOG_LEVEL >= 2) {
+                  this.logWithTime(`[Info SM ${eventId}] No valid groups in scrape result. Deleting ${existingGroupCount} existing consecutive groups.`, "info");
+              }
+              await ConsecutiveGroup.deleteMany({ eventId });
+          } else {
+              if (LOG_LEVEL >= 3) {
+                  this.logWithTime(`[Debug SM ${eventId}] No valid groups in scrape result and no existing groups to delete.`, "debug");
+              }
+          }
+      }  
 
       // Update schedule
       this.eventUpdateSchedule.set(
@@ -4004,10 +4069,6 @@ export class ScraperManager {
         { 
           $set: { 
             Skip_Scraping: true,
-            status: "stopped",
-            skip_reason: reason,
-            skip_retry_count: retryCount,
-            skip_retry_limit: retryLimit,
             skip_timestamp: new Date(),
             time_since_update: timeSinceUpdate
           } 
