@@ -17,21 +17,7 @@ const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q
 export async function runCsvUploadCycle() {
     try {
       console.log(`[${new Date().toISOString()}] Starting CSV upload cycle...`);
-      
-      // Force generation of combined CSV before upload
-      try {
-        const inventoryController = await import('../controllers/inventoryController.js');
-        const result = inventoryController.forceCombinedCSVGeneration();
-        
-        if (result.success) {
-          console.log(`[${new Date().toISOString()}] Generated fresh combined CSV: ${result.recordCount} records from ${result.eventCount} events`);
-        } else {
-          console.log(`[${new Date().toISOString()}] Failed to generate combined CSV: ${result.message}`);
-        }
-      } catch (generationError) {
-        console.error(`[${new Date().toISOString()}] Error generating combined CSV: ${generationError.message}`);
-      }
-
+    
       // Create the path to the all_events_combined.csv file
       const allEventsCsvPath = path.join(DATA_DIR, 'all_events_combined.csv');
       

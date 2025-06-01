@@ -46,15 +46,28 @@ const generateCompositeKey = (record) => {
 
 // Helper function to check if two records are identical (excluding inventory_id)
 const areRecordsIdentical = (record1, record2) => {
-  const excludeFields = ['inventory_id'];
-  const keys1 = Object.keys(record1).filter(k => !excludeFields.includes(k));
-  const keys2 = Object.keys(record2).filter(k => !excludeFields.includes(k));
+  // Only compare important fields that should trigger a change in inventory_id
+  const importantFields = [
+    'section', 
+    'row', 
+    'seats',
+    'quantity',
+    'list_price',
+    'face_price',
+    'cost',
+    'in_hand_date'
+  ];
   
-  if (keys1.length !== keys2.length) return false;
-  
-  for (const key of keys1) {
-    if (String(record1[key]) !== String(record2[key])) {
-      return false;
+  for (const field of importantFields) {
+    // Only compare if both records have the field
+    if (record1[field] !== undefined || record2[field] !== undefined) {
+      // Convert to string for consistent comparison
+      const val1 = record1[field] !== undefined ? String(record1[field]) : '';
+      const val2 = record2[field] !== undefined ? String(record2[field]) : '';
+      
+      if (val1 !== val2) {
+        return false;
+      }
     }
   }
   
