@@ -1906,30 +1906,30 @@ export class ScraperManager {
       this.logWithTime("Cookie rotation cycle stopped", "info");
     }
     
-    // Clear the CSV upload interval if it exists
-    if (this.csvUploadIntervalId) {
-      clearInterval(this.csvUploadIntervalId);
-      this.csvUploadIntervalId = null;
-      this.logWithTime("CSV upload cycle stopped", "info");
-    }
+    // // Clear the CSV upload interval if it exists
+    // if (this.csvUploadIntervalId) {
+    //   clearInterval(this.csvUploadIntervalId);
+    //   this.csvUploadIntervalId = null;
+    //   this.logWithTime("CSV upload cycle stopped", "info");
+    // }
     
-    // Wait for CSV processing to complete
-    if (this.csvProcessingActive) {
-      this.logWithTime("Waiting for CSV processing to complete...", "info");
-      let waitTime = 0;
-      while (this.csvProcessingActive && waitTime < 30000) {
-        await setTimeout(100);
-        waitTime += 100;
-      }
-    }
+    // // Wait for CSV processing to complete
+    // if (this.csvProcessingActive) {
+    //   this.logWithTime("Waiting for CSV processing to complete...", "info");
+    //   let waitTime = 0;
+    //   while (this.csvProcessingActive && waitTime < 30000) {
+    //     await setTimeout(100);
+    //     waitTime += 100;
+    //   }
+    // }
     
-    // Run one final CSV upload to ensure latest data is uploaded
-    try {
-      this.logWithTime("Running final CSV upload before shutdown", "info");
-      await this.runCsvUploadCycle();
-    } catch (error) {
-      this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
-    }
+    // // Run one final CSV upload to ensure latest data is uploaded
+    // try {
+    //   this.logWithTime("Running final CSV upload before shutdown", "info");
+    //   await this.runCsvUploadCycle();
+    // } catch (error) {
+    //   this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
+    // }
     
     // Release any active proxies
     this.proxyManager.releaseAllProxies();
@@ -2466,35 +2466,45 @@ export class ScraperManager {
       // Get last update time to check 10-minute threshold
       const lastUpdate = this.eventUpdateTimestamps.get(eventId);
       const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
-      
-      // MODIFIED: Continue retrying as long as we haven't hit 10-minute threshold
-      if (timeSinceUpdate < 600000) { // 10 minutes in milliseconds
-        // Add to retry queue with a small gap between retries (dynamic backoff)
-        const backoffTime = Math.min(5000 * (retryCount + 1), 30000); // Max 30 second backoff
-        
-        this.eventProcessingQueue.push({
-          eventId,
-          retryCount: retryCount + 1,
-          isRetry: true,
-          retryAfter: moment().add(backoffTime, 'milliseconds'),
-          // Explicitly mark as needing fresh proxy and session for retry
-          needsFreshProxy: true,
-          needsFreshSession: true
-        });
-        
+
+      if (timeSinceUpdate >= STALE_EVENT_THRESHOLD) {
         this.logWithTime(
-          `Queuing retry #${retryCount + 1} for ${eventId} in ${backoffTime}ms (${Math.floor(timeSinceUpdate/1000)}s since last update) with fresh proxy and session`,
-          "info"
-        );
-      } else {
-        // Event exceeded 10-minute threshold - mark for stopping using the central stopping mechanism
-        this.logWithTime(
-          `Event ${eventId} exceeded 10-minute threshold (${Math.floor(timeSinceUpdate/1000)}s) - marking for auto-stop`,
+          `Event ${eventId} exceeded staleness threshold (${Math.floor(timeSinceUpdate/1000)}s) in optimized path. Retry count: ${retryCount}. Marking for auto-stop.`,
           "error"
         );
+        await this.setEventSkipScraping(eventId, "exceeded_staleness_threshold_optimized", retryCount, STALE_EVENT_THRESHOLD);
+      } else if (retryCount >= MAX_RETRIES) {
+        this.logWithTime(
+          `Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}) in optimized path. Time since last update: ${Math.floor(timeSinceUpdate/1000)}s. Marking for auto-stop.`,
+          "error"
+        );
+        await this.setEventSkipScraping(eventId, "max_retries_exceeded_optimized", retryCount, MAX_RETRIES);
+      } else {
+        // Event is not stale and has retries remaining
+        const newRetryCount = retryCount + 1;
+        const baseBackoff = 15000; // 15 seconds
+        const incrementFactor = 5000; // 5 seconds per retry count
+        const maxBackoff = 300000; // 5 minutes
+        const jitter = Math.floor(Math.random() * 5000); // 0-5 seconds jitter
         
-        // Use the unified auto-stop mechanism
-        await this.setEventSkipScraping(eventId, "exceeded_10min_threshold", retryCount, "10min");
+        let backoffDuration = baseBackoff + (retryCount * incrementFactor) + jitter;
+        backoffDuration = Math.min(backoffDuration, maxBackoff);
+
+        const retryJob = {
+          eventId,
+          retryCount: newRetryCount,
+          retryAfter: moment().add(backoffDuration, 'milliseconds'),
+          priority: 10, // Default priority, consistent with scrapeEvent
+          needsFreshProxy: true,
+          needsFreshSession: true
+        };
+
+        this.retryQueue.push(retryJob); // Push to the central retryQueue
+        
+        this.logWithTime(
+          `Queuing retry #${newRetryCount} for ${eventId} (optimized path) in ${backoffDuration}ms. Time since last update: ${Math.floor(timeSinceUpdate/1000)}s.`,
+          "info"
+        );
       }
       
       return false;

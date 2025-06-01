@@ -174,4 +174,13 @@ router.post('/import/csv', upload.single('file'), (req, res) => {
   res.json(result);
 });
 
-export default router; 
+// Route to upload a blank CSV with comprehensive headers
+router.post('/clear-sync', async (req, res) => {
+  // inventoryController is an instance, so we call the method on it.
+  // Make sure the method is bound correctly if 'this' context is an issue, 
+  // or ensure methods are defined with arrow functions if they rely on 'this' from the class.
+  // For an async method on a class instance, direct call should be fine.
+  await inventoryController.uploadBlankCsv(req, res);
+});
+
+export default router;

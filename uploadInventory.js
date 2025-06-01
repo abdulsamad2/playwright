@@ -17,16 +17,20 @@ const DATA_DIR = path.join(__dirname, 'data');
 const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank.csv');
 
 // Ensure blank CSV exists
-function ensureBlankCsvExists() {
+export function ensureBlankCsvExists(headersArray) {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-  
-  if (!fs.existsSync(BLANK_CSV_PATH)) {
-    // Create empty CSV with headers
-    fs.writeFileSync(BLANK_CSV_PATH, 'inventory_id,event_name,venue_name,event_date,event_id,quantity,section,row,seats,barcodes,internal_notes,public_notes,tags,list_price,face_price,taxed_cost,cost,hide_seats,in_hand,in_hand_date,instant_transfer,files_available,split_type,custom_split,stock_type,zone,shown_quantity,passthrough,mapping_id\n');
-    console.log('Created blank CSV file');
-  }
+  // Determine which headers to use
+  const headersToUse = Array.isArray(headersArray) && headersArray.length > 0 
+    ? headersArray 
+    : ['sku', 'quantity', 'price'];
+
+  // Always create/overwrite the blank.csv with the specified or default headers
+  // This ensures it has the correct headers for the current operation (e.g., clearing sync)
+  const csvContent = headersToUse.join(',') + '\n';
+  fs.writeFileSync(BLANK_CSV_PATH, csvContent);
+  console.log(`Blank CSV ensured at ${BLANK_CSV_PATH} with headers: ${headersToUse.join(', ')}`);
 }
 
 // Get all event CSV files

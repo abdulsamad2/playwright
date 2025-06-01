@@ -9,6 +9,22 @@ import {
   validateAndFixInventoryRecord,
   formatInventoryForExport
 } from '../helpers/csvInventoryHelper.js';
+import SyncService from '../services/syncService.js';
+import { ensureBlankCsvExists } from '../uploadInventory.js';
+
+// Constants for SyncService (mirroring uploadInventory.js)
+// Ideally, these should be in environment variables
+const COMPANY_ID = '702';
+const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q9eKV_Jt';
+
+const COMPREHENSIVE_CSV_HEADERS = [
+  'inventory_id', 'event_name', 'venue_name', 'event_date', 'event_id',
+  'quantity', 'section', 'row', 'seats', 'barcodes', 'internal_notes',
+  'public_notes', 'tags', 'list_price', 'face_price', 'taxed_cost', 'cost',
+  'hide_seats', 'in_hand', 'in_hand_date', 'instant_transfer', 'files_available',
+  'split_type', 'custom_split', 'stock_type', 'zone', 'shown_quantity',
+  'passthrough', 'mapping_id'
+];
 
 // Store path for inventory data
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -530,6 +546,48 @@ class InventoryController {
     }, 0);
 
     return 0; // Return immediately
+  }
+
+  async uploadBlankCsv (req, res) {
+    const DATA_DIR = path.join(process.cwd(), 'data'); 
+    const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank.csv');
+
+    try {
+      // Ensure data directory exists
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+
+      const syncService = new SyncService(COMPANY_ID, API_TOKEN);
+
+      // Create the blank CSV with comprehensive headers
+      ensureBlankCsvExists(COMPREHENSIVE_CSV_HEADERS);
+      console.log(`Blank CSV with comprehensive headers ensured at ${BLANK_CSV_PATH}`);
+
+      // Upload it
+      const uploadResult = await syncService.uploadCsvToSync(BLANK_CSV_PATH);
+      console.log('Comprehensive blank CSV upload result:', uploadResult);
+
+      if (uploadResult && uploadResult.success) {
+        res.json({ success: true, message: 'Comprehensive blank CSV uploaded successfully.', uploadId: uploadResult.uploadId });
+      } else {
+        // If uploadResult itself indicates failure but doesn't throw
+        throw new Error(uploadResult?.message || 'Failed to upload comprehensive blank CSV.');
+      }
+    } catch (error) {
+      console.error('Error in uploadComprehensiveBlankCsv:', error.message);
+      res.status(500).json({ success: false, message: error.message || 'Internal server error during blank CSV upload.' });
+    } finally {
+      // Clean up the temporary file in both success and error cases (after response is sent)
+      if (fs.existsSync(BLANK_CSV_PATH)) {
+        try {
+          fs.unlinkSync(BLANK_CSV_PATH);
+          console.log(`Temporary blank CSV deleted from ${BLANK_CSV_PATH}`);
+        } catch (cleanupError) {
+          console.error('Error cleaning up temp CSV:', cleanupError);
+        }
+      }
+    }
   }
 
   // Legacy methods for compatibility (all fast/non-blocking)
