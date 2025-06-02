@@ -205,6 +205,18 @@ const generateCombinedCSVBackground = async () => {
         
         console.log(`CSV Filter: Found ${recentEventIds.size} events updated in last 6 minutes (out of ${allEventsData.size} total events)`);
         
+        // Create a set to track which existing records to keep
+        const existingRecordsToKeep = new Set();
+        
+        // Identify existing records from events that haven't been updated
+        for (const [compositeKey, record] of existingCsvData) {
+          const sourceEventId = record.source_event_id;
+          // Keep record if its event wasn't updated recently
+          if (sourceEventId && !recentEventIds.has(sourceEventId)) {
+            existingRecordsToKeep.add(compositeKey);
+          }
+        }
+        
         // Collect only records from events updated in the last 6 minutes
         const allRecords = [];
         let includedEvents = 0;
@@ -232,15 +244,24 @@ const generateCombinedCSVBackground = async () => {
         
         console.log(`CSV Filter: Including ${includedEvents} events, excluding ${excludedEvents} events (stale > 6 min)`);
         
-        if (allRecords.length === 0) {
-          console.log('CSV Filter: No recent records to include in CSV - all events are stale');
+        if (allRecords.length === 0 && existingRecordsToKeep.size === 0) {
+          console.log('CSV Filter: No records to include in CSV - all events are stale and no existing records to keep');
           isGeneratingCSV = false;
           return;
         }
 
         // Process records according to behavior rules
         const finalRecords = new Map(); // composite_key -> record
-        const newRecordsCount = { preserved: 0, updated: 0, created: 0 };
+        const newRecordsCount = { preserved: 0, updated: 0, created: 0, removed: 0 };
+        
+        // First, add all existing records that should be kept (from non-updated events)
+        for (const compositeKey of existingRecordsToKeep) {
+          const existingRecord = existingCsvData.get(compositeKey);
+          if (existingRecord) {
+            finalRecords.set(compositeKey, existingRecord);
+            newRecordsCount.preserved++;
+          }
+        }
         
         // Process in chunks to avoid blocking
         const CHUNK_SIZE = 100; // Smaller chunks for better performance
@@ -248,9 +269,19 @@ const generateCombinedCSVBackground = async () => {
         for (let i = 0; i < allRecords.length; i += CHUNK_SIZE) {
           const chunk = allRecords.slice(i, i + CHUNK_SIZE);
           
+          // Track which composite keys we've seen for each event
+          const processedKeysPerEvent = new Map();
+          
           chunk.forEach(record => {
             // Generate composite key for this record
             const compositeKey = generateCompositeKey(record);
+            const eventId = record.source_event_id;
+            
+            // Track this key for the event
+            if (!processedKeysPerEvent.has(eventId)) {
+              processedKeysPerEvent.set(eventId, new Set());
+            }
+            processedKeysPerEvent.get(eventId).add(compositeKey);
             
             // Check if this record already exists in CSV
             const existingRecord = existingCsvData.get(compositeKey);
@@ -283,6 +314,18 @@ const generateCombinedCSVBackground = async () => {
             finalRecords.set(compositeKey, record);
           });
           
+          // Remove records that no longer exist for each updated event
+          for (const [eventId, processedKeys] of processedKeysPerEvent) {
+            // Find all existing records for this event
+            for (const [compositeKey, record] of existingCsvData) {
+              if (record.source_event_id === eventId && !processedKeys.has(compositeKey)) {
+                // This record is from an updated event but wasn't in the new data
+                // It should be removed (by not adding it to finalRecords)
+                newRecordsCount.removed++;
+              }
+            }
+          }
+          
           // Yield control after each chunk
           if (i + CHUNK_SIZE < allRecords.length) {
             await new Promise(resolve => setImmediate(resolve));
@@ -304,16 +347,13 @@ const generateCombinedCSVBackground = async () => {
           }
         }
 
-        // Calculate removed records (existed in CSV but not in new data)
-        const removedRecords = existingCsvData.size - newRecordsCount.preserved - newRecordsCount.updated;
-
         // Save to file (this is the only potentially slow operation)
         await new Promise((resolve, reject) => {
           setImmediate(async () => {
             try {
               await saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
-              console.log(`✅ Background: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recent events`);
-              console.log(`📊 CSV Changes: ${newRecordsCount.preserved} preserved, ${newRecordsCount.updated} updated, ${newRecordsCount.created} created, ${Math.max(0, removedRecords)} removed`);
+              console.log(`✅ Background: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recent events and kept records from ${excludedEvents} stale events`);
+              console.log(`📊 CSV Changes: ${newRecordsCount.preserved} preserved, ${newRecordsCount.updated} updated, ${newRecordsCount.created} created, ${newRecordsCount.removed} removed`);
               console.log(`🚫 Excluded: ${excludedEvents} stale events (>6 min)`);
               resolve();
             } catch (error) {
