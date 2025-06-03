@@ -377,8 +377,6 @@ export const AttachRowSection = (
             return undefined;
           } else if (offerGet?.protected == true) {
             return undefined;
-          } else if (offerGet.inventoryType == "resale") {
-            return undefined;
           } else {
             return CreateInventoryAndLine(x, offerGet, event, descriptions);
           }

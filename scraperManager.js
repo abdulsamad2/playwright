@@ -897,16 +897,12 @@ export class ScraperManager {
               this.logWithTime(`[Debug SM ${eventId}] No seat changes detected. Skipping ConsecutiveGroup update.`, "debug");
           }
         } else {
-          // Use bulk operations for efficiency
-          const bulkOps = [];
+          // First delete all existing groups for this event
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(`[Info SM ${eventId}] Deleting existing consecutive groups before inserting new ones.`, "info");
+          }
+          await ConsecutiveGroup.deleteMany({ eventId });
           
-          // Delete existing groups
-          bulkOps.push({
-            deleteMany: {
-              filter: { eventId }
-            }
-          });
-
           // Prepare groups to insert
           const groupsToInsert = validScrapeResult.map((group) => {
             const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
@@ -914,77 +910,74 @@ export class ScraperManager {
             const formattedInHandDate = inHandDate instanceof Date ? inHandDate : new Date();
 
             return {
-              insertOne: {
-                document: {
-                  eventId,
-                  mapping_id,
-                  section: group.section,
-                  row: group.row,
-                  seatCount: group.inventory.quantity,
-                  seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
-                  seats: group.seats.map((seatNumber) => ({
-                    number: seatNumber.toString(),
-                    inHandDate: formattedInHandDate,
-                    price: increasedPrice,
-                    mapping_id,
-                  })),
-                  inventory: {
-                    quantity: group.inventory.quantity,
-                    section: group.section,
-                    hideSeatNumbers: group.inventory.hideSeatNumbers || true,
-                    row: group.row,
-                    cost: group.inventory.cost,
-                    stockType: group.inventory.stockType || "MOBILE_TRANSFER",
-                    lineType: group.inventory.lineType,
-                    seatType: group.inventory.seatType,
-                    inHandDate: formattedInHandDate,
-                    notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
-                    tags: group.inventory.tags || "john drew don",
-                    inventoryId: group.inventory.inventoryId,
-                    offerId: group.inventory.offerId,
-                    splitType: group.inventory.splitType || "CUSTOM",
-                    publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
-                    listPrice: increasedPrice,
-                    customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
-                    mapping_id,
-                    tickets: group.inventory.tickets.map((ticket) => ({
-                      id: ticket.id,
-                      seatNumber: ticket.seatNumber,
-                      notes: ticket.notes,
-                      cost: ticket.cost,
-                      faceValue: ticket.faceValue,
-                      taxedCost: ticket.taxedCost,
-                      sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice)
-                        ? ticket.sellPrice
-                        : parseFloat(ticket?.cost || ticket?.faceValue || 0),
-                      stockType: ticket.stockType,
-                      eventId: ticket.eventId,
-                      accountId: ticket.accountId,
-                      status: ticket.status,
-                      auditNote: ticket.auditNote,
-                      mapping_id: mapping_id,
-                    })),
-                  },
-                }
-              }
+              eventId,
+              mapping_id,
+              section: group.section,
+              row: group.row,
+              seatCount: group.inventory.quantity,
+              seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
+              seats: group.seats.map((seatNumber) => ({
+                number: seatNumber.toString(),
+                inHandDate: formattedInHandDate,
+                price: increasedPrice,
+                mapping_id,
+              })),
+              inventory: {
+                quantity: group.inventory.quantity,
+                section: group.section,
+                hideSeatNumbers: group.inventory.hideSeatNumbers || true,
+                row: group.row,
+                cost: group.inventory.cost,
+                stockType: group.inventory.stockType || "MOBILE_TRANSFER",
+                lineType: group.inventory.lineType,
+                seatType: group.inventory.seatType,
+                inHandDate: formattedInHandDate,
+                notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
+                tags: group.inventory.tags || "john drew don",
+                inventoryId: group.inventory.inventoryId,
+                offerId: group.inventory.offerId,
+                splitType: group.inventory.splitType || "CUSTOM",
+                publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
+                listPrice: increasedPrice,
+                customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
+                mapping_id,
+                tickets: group.inventory.tickets.map((ticket) => ({
+                  id: ticket.id,
+                  seatNumber: ticket.seatNumber,
+                  notes: ticket.notes,
+                  cost: ticket.cost,
+                  faceValue: ticket.faceValue,
+                  taxedCost: ticket.taxedCost,
+                  sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice)
+                    ? ticket.sellPrice
+                    : parseFloat(ticket?.cost || ticket?.faceValue || 0),
+                  stockType: ticket.stockType,
+                  eventId: ticket.eventId,
+                  accountId: ticket.accountId,
+                  status: ticket.status,
+                  auditNote: ticket.auditNote,
+                  mapping_id: mapping_id,
+                })),
+              },
             };
           });
 
-          // Add all insert operations
-          bulkOps.push(...groupsToInsert);
-
-          // Execute bulk operation
-          if (bulkOps.length > 1) { // More than just the delete
+          // Insert new groups in batches for better performance
+          if (groupsToInsert.length > 0) {
             if (LOG_LEVEL >= 2) {
-              this.logWithTime(`[Info SM ${eventId}] Updating ${groupsToInsert.length} consecutive groups.`, "info");
+              this.logWithTime(`[Info SM ${eventId}] Inserting ${groupsToInsert.length} consecutive groups.`, "info");
             }
-            await ConsecutiveGroup.bulkWrite(bulkOps, { ordered: false });
-          } else if (bulkOps.length === 1 && groupsToInsert.length === 0 && existingGroups.length > 0) {
-            // This means only a delete operation was added (to clear all groups) and no new groups to insert, but there were existing groups.
+            
+            // Use insertMany with ordered:false for better performance
+            const BATCH_SIZE = 100;
+            for (let i = 0; i < groupsToInsert.length; i += BATCH_SIZE) {
+              const batch = groupsToInsert.slice(i, i + BATCH_SIZE);
+              await ConsecutiveGroup.insertMany(batch, { ordered: false });
+            }
+            
             if (LOG_LEVEL >= 2) {
-              this.logWithTime(`[Info SM ${eventId}] Deleting all ${existingGroups.length} existing consecutive groups as no new valid groups found.`, "info");
+              this.logWithTime(`[Info SM ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`, "info");
             }
-            await ConsecutiveGroup.bulkWrite(bulkOps, { ordered: false }); // Execute the delete
           }
         } // This closes the 'else' from 'if (!hasChanges)'
       } else if (validScrapeResult?.length === 0) {
