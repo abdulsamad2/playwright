@@ -2,7 +2,7 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
-import { cpus } from "os";
+import os from "os";
 import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
@@ -122,6 +122,7 @@ export class ScraperManager {
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
     this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
     this.eventFailureCounts = new Map(); // Track consecutive failures per event
+    this.workerPool = null; // Worker pool for parallel processing
     this.eventFailureTimes = new Map(); // Track when failures happened
     this.globalConsecutiveErrors = 0; // Track consecutive errors across all events
     this.lastCookieReset = null; // Track when cookies were last reset
@@ -2707,7 +2708,7 @@ export class ScraperManager {
   async startContinuousScraping() {
     if (!this.isRunning) {
       this.isRunning = true;
-      this.logWithTime("Starting high-performance parallel scraping for 1000+ events...", "info");
+      this.logWithTime("Starting high-performance parallel scraping with worker threads for 1000+ events...", "info");
 
       // Log Skip_Scraping status summary at startup
       try {
@@ -2769,9 +2770,39 @@ export class ScraperManager {
         this.logWithTime("CSV upload is disabled (ENABLE_CSV_UPLOAD = false)", "warning");
       }
 
-      // Start multiple parallel processing workers
-      for (let i = 0; i < this.maxParallelWorkers; i++) {
-        this.parallelWorkers.push(this.startParallelWorker(i));
+      // Initialize worker pool for event processing
+      try {
+        const { WorkerPool } = await import('./workers/workerPool.js');
+        
+        // Determine optimal number of workers based on CPU cores
+        const cpuCount = os.cpus().length;
+        const optimalWorkerCount = Math.max(1, cpuCount - 1); // Leave one CPU for main thread
+        
+        this.logWithTime(`Detected ${cpuCount} CPU cores, initializing ${optimalWorkerCount} worker threads`, "info");
+        
+        // Create worker pool with scrape event handler
+        this.workerPool = new WorkerPool({
+          maxWorkers: optimalWorkerCount,
+          workerScript: path.join(process.cwd(), 'workers', 'realEventWorker.js'),
+          logger: (message, level) => this.logWithTime(message, level),
+          scrapeEventHandler: async (eventId, retryCount) => {
+            // This function will be called by the worker pool when a worker needs to scrape an event
+            return await this.scrapeEventOptimized(eventId, retryCount, null);
+          }
+        });
+        
+        // Initialize the worker pool
+        const workerCount = await this.workerPool.initialize();
+        this.logWithTime(`Successfully initialized worker pool with ${workerCount} worker threads`, "success");
+      } catch (error) {
+        this.logWithTime(`Failed to initialize worker pool: ${error.message}. Falling back to in-process execution.`, "error");
+      }
+
+      // Start legacy parallel processing workers as fallback
+      if (!this.workerPool) {
+        for (let i = 0; i < this.maxParallelWorkers; i++) {
+          this.parallelWorkers.push(this.startParallelWorker(i));
+        }
       }
 
       // Track metrics to detect stuck loops
@@ -2811,58 +2842,158 @@ export class ScraperManager {
           
           if (events.length > 0) {
             this.logWithTime(
-              `Found ${events.length} events needing updates, distributing to parallel workers`,
+              `Found ${events.length} events needing updates`,
               "info"
             );
 
-            // Add events to processing queue if not already there
-            let addedCount = 0;
-            for (const eventId of events) {
-              // Only add if not already in queue and not being processed
-              if (!this.eventProcessingQueue.some(e => (typeof e === 'string' ? e === eventId : e.eventId === eventId)) && 
-                  !this.processingEvents.has(eventId)) {
-                this.eventProcessingQueue.push(eventId);
-                addedCount++;
+            // Process events using worker pool if available
+            if (this.workerPool) {
+              // Create batches of events for worker pool
+              const batchSize = 10; // Process 10 events per batch
+              const batches = [];
+              
+              for (let i = 0; i < events.length; i += batchSize) {
+                batches.push(events.slice(i, i + batchSize));
               }
-            }
-            
-            // Report if we're adding events but not processing them
-            if (addedCount > 0) {
-              this.logWithTime(
-                `Added ${addedCount} new events to processing queue (total: ${this.eventProcessingQueue.length})`,
-                "info"
-              );
-            } else if (events.length > 0 && addedCount === 0) {
-              this.logWithTime(
-                `Warning: Found ${events.length} events needing updates but added 0 to queue - they may be stuck in processing`,
-                "warning"
-              );
+              
+              // Submit batches to worker pool (non-blocking)
+              for (const batch of batches) {
+                // Filter out events already being processed
+                const filteredBatch = batch.filter(eventId => !this.processingEvents.has(eventId));
+                
+                if (filteredBatch.length > 0) {
+                  // Mark events as being processed
+                  filteredBatch.forEach(eventId => this.processingEvents.add(eventId));
+                  
+                  // Submit batch to worker pool (non-blocking)
+                  this.workerPool.submitBatch(filteredBatch)
+                    .then(results => {
+                      // Process results
+                      results.forEach(result => {
+                        // Remove from processing set
+                        this.processingEvents.delete(result.eventId);
+                        
+                        // Update stats
+                        if (result.success) {
+                          this.successCount++;
+                          this.lastSuccessTime = moment();
+                          this.failedEvents.delete(result.eventId);
+                          this.clearFailureCount(result.eventId);
+                        } else {
+                          this.failedEvents.add(result.eventId);
+                          this.incrementFailureCount(result.eventId);
+                        }
+                      });
+                    })
+                    .catch(error => {
+                      this.logWithTime(`Error processing batch: ${error.message}`, "error");
+                      // Remove events from processing set
+                      filteredBatch.forEach(eventId => this.processingEvents.delete(eventId));
+                    });
+                }
+              }
+            } else {
+              // Fallback to legacy queue-based processing
+              let addedCount = 0;
+              for (const eventId of events) {
+                // Only add if not already in queue and not being processed
+                if (!this.eventProcessingQueue.some(e => (typeof e === 'string' ? e === eventId : e.eventId === eventId)) && 
+                    !this.processingEvents.has(eventId)) {
+                  this.eventProcessingQueue.push(eventId);
+                  addedCount++;
+                }
+              }
+              
+              // Report if we're adding events but not processing them
+              if (addedCount > 0) {
+                this.logWithTime(
+                  `Added ${addedCount} new events to processing queue (total: ${this.eventProcessingQueue.length})`,
+                  "info"
+                );
+              } else if (events.length > 0 && addedCount === 0) {
+                this.logWithTime(
+                  `Warning: Found ${events.length} events needing updates but added 0 to queue - they may be stuck in processing`,
+                  "warning"
+                );
+              }
             }
           }
 
           // Process retry queue
           const now = moment();
           const retryEvents = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
-          let retryAddedCount = 0;
           
-          for (const job of retryEvents) {
-            if (!this.eventProcessingQueue.some(e => (typeof e === 'string' ? e === job.eventId : e.eventId === job.eventId)) && 
-                !this.processingEvents.has(job.eventId)) {
-              // Add to front of queue with retry info
-              this.eventProcessingQueue.unshift({
+          if (retryEvents.length > 0) {
+            if (this.workerPool) {
+              // Process retry events with worker pool
+              const retryBatch = retryEvents.map(job => ({
                 eventId: job.eventId,
                 retryCount: job.retryCount,
                 isRetry: true
-              });
-              retryAddedCount++;
+              }));
+              
+              // Filter out events already being processed
+              const filteredRetryBatch = retryBatch.filter(item => !this.processingEvents.has(item.eventId));
+              
+              if (filteredRetryBatch.length > 0) {
+                this.logWithTime(
+                  `Processing ${filteredRetryBatch.length} retry events with worker pool`,
+                  "info"
+                );
+                
+                // Mark events as being processed
+                filteredRetryBatch.forEach(item => this.processingEvents.add(item.eventId));
+                
+                // Submit batch to worker pool (non-blocking)
+                this.workerPool.submitBatch(filteredRetryBatch)
+                  .then(results => {
+                    // Process results
+                    results.forEach(result => {
+                      // Remove from processing set
+                      this.processingEvents.delete(result.eventId);
+                      
+                      // Update stats
+                      if (result.success) {
+                        this.successCount++;
+                        this.lastSuccessTime = moment();
+                        this.failedEvents.delete(result.eventId);
+                        this.clearFailureCount(result.eventId);
+                      } else {
+                        this.failedEvents.add(result.eventId);
+                        this.incrementFailureCount(result.eventId);
+                      }
+                    });
+                  })
+                  .catch(error => {
+                    this.logWithTime(`Error processing retry batch: ${error.message}`, "error");
+                    // Remove events from processing set
+                    filteredRetryBatch.forEach(item => this.processingEvents.delete(item.eventId));
+                  });
+              }
+            } else {
+              // Fallback to legacy queue-based processing
+              let retryAddedCount = 0;
+              
+              for (const job of retryEvents) {
+                if (!this.eventProcessingQueue.some(e => (typeof e === 'string' ? e === job.eventId : e.eventId === job.eventId)) && 
+                    !this.processingEvents.has(job.eventId)) {
+                  // Add to front of queue with retry info
+                  this.eventProcessingQueue.unshift({
+                    eventId: job.eventId,
+                    retryCount: job.retryCount,
+                    isRetry: true
+                  });
+                  retryAddedCount++;
+                }
+              }
+              
+              if (retryAddedCount > 0) {
+                this.logWithTime(
+                  `Added ${retryAddedCount} retry events to processing queue`,
+                  "info"
+                );
+              }
             }
-          }
-          
-          if (retryAddedCount > 0) {
-            this.logWithTime(
-              `Added ${retryAddedCount} retry events to processing queue`,
-              "info"
-            );
           }
           
           // Remove processed retry jobs

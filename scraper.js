@@ -2,7 +2,6 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
-const fs = require("fs");
 import { devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
@@ -27,19 +26,8 @@ const cookieManager = new CookieManager();
 cookieManager.persistedPage = null;
 cookieManager.persistedContext = null;
 
-const iphone13 = devices["iPhone 13"];
 
-const COOKIES_FILE = "cookies.json";
-const CONFIG = {
-  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 30000, // Increased from 15000 for better success rate
-  MAX_RETRIES: 5, // Increased from 3 for better recovery
-  RETRY_DELAY: 3000, // Reduced from 5000 for faster recovery
-  CHALLENGE_TIMEOUT: 8000, // Increased from 5000 for better challenge handling
-};
 
-let browser = null;
-let context = null;
 let capturedState = {
   cookies: null,
   fingerprint: null,
@@ -47,9 +35,7 @@ let capturedState = {
   proxy: null,
 };
 // Flag to track if we're currently refreshing cookies
-let isRefreshingCookies = false;
 // Queue for pending cookie refresh requests
-let cookieRefreshQueue = [];
 // Flag to track if periodic refresh has been started
 let isPeriodicRefreshStarted = false;
 
@@ -83,104 +69,6 @@ const COOKIE_MANAGEMENT = {
 };
 
 // Enhanced cookie handling
-const handleCookies = {
-  // Extract and validate essential cookies
-  extractEssentialCookies: (cookies) => {
-    if (!cookies) return "";
-
-    const cookieMap = new Map();
-    cookies.split(";").forEach((cookie) => {
-      const [name, value] = cookie.trim().split("=");
-      if (name && value) {
-        cookieMap.set(name, value);
-      }
-    });
-
-    // Prioritize auth cookies
-    const essentialCookies = [];
-    COOKIE_MANAGEMENT.AUTH_COOKIES.forEach((name) => {
-      if (cookieMap.has(name)) {
-        essentialCookies.push(`${name}=${cookieMap.get(name)}`);
-        cookieMap.delete(name);
-      }
-    });
-
-    // Add other essential cookies if we have space
-    COOKIE_MANAGEMENT.ESSENTIAL_COOKIES.forEach((name) => {
-      if (cookieMap.has(name) && essentialCookies.length < 20) {
-        // Increased from 10
-        essentialCookies.push(`${name}=${cookieMap.get(name)}`);
-        cookieMap.delete(name);
-      }
-    });
-
-    // Add any remaining cookies if they fit
-    if (
-      essentialCookies.join("; ").length < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH
-    ) {
-      for (const [name, value] of cookieMap.entries()) {
-        const potentialCookie = `${name}=${value}`;
-        if (
-          essentialCookies.join("; ").length + potentialCookie.length + 2 <
-          COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH
-        ) {
-          essentialCookies.push(potentialCookie);
-        }
-      }
-    }
-
-    return essentialCookies.join("; ");
-  },
-
-  // Validate cookie freshness with improved logic
-  areCookiesFresh: (cookies) => {
-    if (!cookies) return false;
-
-    const cookieMap = new Map();
-    cookies.split(";").forEach((cookie) => {
-      const [name, value] = cookie.trim().split("=");
-      if (name && value) {
-        cookieMap.set(name, value);
-      }
-    });
-
-    // More lenient check: require at least 3 auth cookies
-    const authCookiesPresent = COOKIE_MANAGEMENT.AUTH_COOKIES.filter(
-      (name) => cookieMap.has(name) && cookieMap.get(name).length > 0
-    );
-
-    return authCookiesPresent.length >= 3; // Need at least 3 auth cookies
-  },
-
-  // Merge cookies from different sources
-  mergeCookies: (existingCookies, newCookies) => {
-    if (!existingCookies) return newCookies;
-    if (!newCookies) return existingCookies;
-
-    const cookieMap = new Map();
-
-    // Add existing cookies first
-    existingCookies.split(";").forEach((cookie) => {
-      const [name, value] = cookie.trim().split("=");
-      if (name && value) {
-        cookieMap.set(name, value);
-      }
-    });
-
-    // Update with new cookies
-    newCookies.split(";").forEach((cookie) => {
-      const [name, value] = cookie.trim().split("=");
-      if (name && value) {
-        cookieMap.set(name, value);
-      }
-    });
-
-    // Convert back to string
-    return Array.from(cookieMap.entries())
-      .map(([name, value]) => `${name}=${value}`)
-      .join("; ");
-  },
-};
 
 function generateCorrelationId() {
   return crypto.randomUUID();
@@ -425,7 +313,7 @@ function generateFallbackHeaders() {
 
 
 const throttle = pThrottle({
-  limit: 100, // Increased from 50 for even higher volume
+  limit: 600, // Increased from 50 for even higher volume
   interval: 1000 // Keep at 1 second for good balance
 });
 
@@ -437,83 +325,6 @@ const throttledRequest = throttle(async (options) => {
 });
 
 // Replace the GetData function with this improved version
-const GetData = async (headers, proxyAgent, url, eventId) => {
-  let abortController = new AbortController();
-
-  try {
-    const timeout = setTimeout(() => {
-      abortController.abort();
-      console.log("Request aborted due to timeout");
-      console.log(eventId, "eventId");
-    }, CONFIG.PAGE_TIMEOUT);
-
-    try {
-      // Add subtle variations to headers to look more human
-      const modifiedHeaders = { ...headers };
-      
-      // Occasionally modify accept-language with slight variations
-      if (Math.random() > 0.7 && modifiedHeaders['Accept-Language']) {
-        const languages = ['en-US', 'en-GB', 'en-CA', 'en'];
-        const weights = [0.8, 0.9, 0.7, 0.6];
-        const baseLanguage = languages[Math.floor(Math.random() * languages.length)];
-        const weight = weights[Math.floor(Math.random() * weights.length)];
-        modifiedHeaders['Accept-Language'] = `${baseLanguage},en;q=${weight}`;
-      }
-      
-      // Use an unpredictable order for cache directives
-      if (Math.random() > 0.5) {
-        modifiedHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
-      } else {
-        modifiedHeaders['Cache-Control'] = 'no-store, no-cache, must-revalidate';
-      }
-      
-      // Randomly adjust connection setting
-      modifiedHeaders['Connection'] = Math.random() > 0.3 ? 'keep-alive' : 'close';
-      
-      const response = await pRetry(() => throttledRequest({
-        url,
-        agent: {
-          https: proxyAgent
-        },
-        headers: modifiedHeaders,
-        timeout: {
-          request: CONFIG.PAGE_TIMEOUT
-        },
-        retry: {
-          limit: 5, // Increased from 3 for better recovery
-          methods: ['GET'],
-          statusCodes: [408, 413, 429, 500, 502, 503, 504],
-          errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'ENETUNREACH', 'EAI_AGAIN']
-        },
-        throwHttpErrors: false,
-        signal: abortController.signal
-      }), {
-        retries: 7, // Increased from 5 for maximum recovery
-        onFailedAttempt: error => {
-          console.log(`Request attempt ${error.attemptNumber} failed for ${eventId}. ${error.retriesLeft} retries left.`);
-          // Longer delays between retries
-          return delay(error.attemptNumber * 2000 + Math.random() * 1000);
-        }
-      });
-
-      clearTimeout(timeout);
-      
-      if (response.statusCode !== 200) {
-        console.log(`Request failed with status code ${response.statusCode} for ${eventId}`);
-        return false;
-      }
-      
-      return JSON.parse(response.body);
-    } catch (error) {
-      clearTimeout(timeout);
-      console.log(`Request failed: ${error.message}`);
-      return false;
-    }
-  } catch (error) {
-    console.log(error, "error");
-    return false;
-  }
-};
 
 const GetProxy = async () => {
   try {
@@ -895,14 +706,10 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   // Add a fallback for startTime if not provided
   startTime = startTime || Date.now();
   
-  const maxRetries = 3;
   const baseDelayMs = 1000; // Increased base delay
   const maxDelayMs = 5000; // Increased max delay
   const jitterFactor = 0.3; // Increased jitter
   
-  let attempts = 0;
-  let lastError = null;
-  let result = null;
   
   // Enhanced proxy rotation with better error tracking
   let alternativeProxies = [];
@@ -1214,13 +1021,24 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     
     // Handle the case where we have partial data
     try {
-      return AttachRowSection(
-        DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [],
+      const facetPlaces = DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [];
+      const offers = DataFacets?._embedded?.offer || [];
+      const descriptions = DataFacets?._embedded?.description || {};
+      
+      console.log(`Event ${eventId}: Facet places found: ${facetPlaces?.length || 0}`);
+      console.log(`Event ${eventId}: Offers found: ${offers?.length || 0}`);
+      console.log(`Event ${eventId}: Has geometry data: ${DataMap ? 'Yes' : 'No'}`);
+      
+      const result = AttachRowSection(
+        facetPlaces,
         DataMap || {},
-        DataFacets?._embedded?.offer || [],
+        offers,
         { eventId, inHandDate: event?.inHandDate },
-        DataFacets?._embedded?.description || {}
+        descriptions
       );
+      
+      console.log(`Event ${eventId}: Final inventory items: ${result?.length || 0}`);
+      return result;
     } catch (processError) {
       console.error(`Error processing API response for event ${eventId}:`, processError.message);
       // If we can't process the data, return null so calling function knows to handle it
@@ -1395,82 +1213,6 @@ function getRandomBrowserVersion(browserName) {
 }
 
 // Enhanced human behavior simulation
-const simulateEnhancedHumanBehavior = async (page) => {
-  try {
-    // Random delays between actions
-    const delayOptions = [100, 200, 300, 400, 500];
-    const randomDelay = () => delayOptions[Math.floor(Math.random() * delayOptions.length)];
-    
-    // Random mouse movements with error handling
-    try {
-      const viewportSize = page.viewportSize();
-      if (viewportSize) {
-        const steps = 3 + Math.floor(Math.random() * 3);
-        for (let i = 0; i < steps; i++) {
-          try {
-            await page.mouse.move(
-              Math.floor(Math.random() * viewportSize.width),
-              Math.floor(Math.random() * viewportSize.height),
-              { steps: 4 + Math.floor(Math.random() * 3) }
-            );
-            await page.waitForTimeout(randomDelay());
-          } catch (moveError) {
-            console.warn("Mouse movement error, continuing:", moveError.message);
-            continue;
-          }
-        }
-      }
-    } catch (error) {
-      console.warn("Viewport error in human behavior, continuing:", error.message);
-    }
-    
-    // Random scrolling with error handling
-    try {
-      const scrollAmount = Math.floor(Math.random() * 500) + 200;
-      const scrollSteps = 3 + Math.floor(Math.random() * 2);
-      const stepSize = scrollAmount / scrollSteps;
-      
-      for (let i = 0; i < scrollSteps; i++) {
-        try {
-          await page.mouse.wheel(0, stepSize);
-          await page.waitForTimeout(randomDelay());
-        } catch (scrollError) {
-          console.warn("Scroll error, continuing:", scrollError.message);
-          continue;
-        }
-      }
-    } catch (error) {
-      console.warn("Scrolling error in human behavior, continuing:", error.message);
-    }
-    
-    // Random keyboard activity with error handling
-    if (Math.random() > 0.6) {
-      try {
-        await page.keyboard.press('Tab');
-        await page.waitForTimeout(randomDelay());
-      } catch (keyboardError) {
-        console.warn("Keyboard error, continuing:", keyboardError.message);
-      }
-    }
-    
-    // Random viewport resizing with error handling
-    if (Math.random() > 0.7) {
-      try {
-        const viewportSize = page.viewportSize();
-        if (viewportSize) {
-          const newWidth = Math.max(800, viewportSize.width + Math.floor(Math.random() * 100) - 50);
-          const newHeight = Math.max(600, viewportSize.height + Math.floor(Math.random() * 100) - 50);
-          await page.setViewportSize({ width: newWidth, height: newHeight });
-          await page.waitForTimeout(randomDelay());
-        }
-      } catch (resizeError) {
-        console.warn("Viewport resize error, continuing:", resizeError.message);
-      }
-    }
-  } catch (error) {
-    console.warn('Error in human behavior simulation, continuing:', error.message);
-  }
-}
 
 // Enhanced request headers
 const generateEnhancedHeaders = (fingerprint, cookies) => {
@@ -1624,14 +1366,6 @@ function trimCookieString(cookieString, maxLength) {
 }
 
 
-function resetCapturedState() {
-  capturedState = {
-    cookies: null,
-    fingerprint: null,
-    lastRefresh: null,
-    proxy: null,
-  };
-}
 
 export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders, refreshCookiesPeriodically };
 
@@ -1669,7 +1403,6 @@ async function refreshCookiesPeriodically() {
   
   let retryCount = 0;
   let lastError = null;
-  let localContext = null;
   let refreshRecord = null;
   
   while (retryCount < MAX_RETRIES) {

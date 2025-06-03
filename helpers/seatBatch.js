@@ -3,36 +3,69 @@ import fs from "fs";
 //it will break map into seats
 function GetMapSeats(data) {
   let seatArray = [];
-  if (
-    data &&
-    data.pages &&
-    data.pages.length > 0 &&
-    data.pages[0] &&
-    data.pages[0].segments
-  ) {
-    data.pages[0].segments.map((composit) => {
-      if (composit?.segments) {
-        composit.segments.map((SECTION) => {
-          if (SECTION.segments && SECTION.segments.length > 0)
-            SECTION.segments.map((ROW) => {
-              ROW.placesNoKeys.map((seat) => {
-                seatArray.push({
-                  section: SECTION?.name,
-                  row: ROW?.name,
-                  seat: seat[1],
-                  seatId: seat[0],
-                });
-              });
-            });
-          else {
-            //GernalAdmission seats
-            //console.log(SECTION,"sec")
-          }
-        });
-      }
-    });
+  
+  if (!data?.pages?.[0]?.segments) {
+    console.warn('GetMapSeats: Missing pages or segments in geometry data');
+    return seatArray;
   }
 
+  data.pages[0].segments.forEach((composit) => {
+    if (!composit?.segments) {
+      console.warn(`GetMapSeats: Missing segments in composite: ${composit?.name || 'unknown'}`);
+      return;
+    }
+    
+    composit.segments.forEach((SECTION) => {
+      if (SECTION.segments && SECTION.segments.length > 0) {
+        // Regular sections with rows
+        SECTION.segments.forEach((ROW) => {
+          if (!ROW.placesNoKeys || !Array.isArray(ROW.placesNoKeys)) {
+            console.warn(`GetMapSeats: Missing or invalid placesNoKeys in row: ${ROW?.name || 'unknown'} in section: ${SECTION?.name || 'unknown'}`);
+            return;
+          }
+          
+          ROW.placesNoKeys.forEach((seat) => {
+            if (seat && seat.length >= 2) {
+              seatArray.push({
+                section: SECTION?.name,
+                row: ROW?.name,
+                seat: seat[1],
+                seatId: seat[0],
+              });
+            } else {
+              console.warn(`GetMapSeats: Invalid seat data in row ${ROW?.name}, section ${SECTION?.name}:`, seat);
+            }
+          });
+        });
+      } else {
+        // General Admission seats or sections without traditional rows
+        console.log(`GetMapSeats: Processing GA/non-row section: ${SECTION?.name}`);
+        
+        // Check if section has direct placesNoKeys (GA seats)
+        if (SECTION.placesNoKeys && Array.isArray(SECTION.placesNoKeys)) {
+          SECTION.placesNoKeys.forEach((seat) => {
+            if (seat && seat.length >= 2) {
+              seatArray.push({
+                section: SECTION?.name,
+                row: 'GA', // Mark as General Admission
+                seat: seat[1],
+                seatId: seat[0],
+              });
+            }
+          });
+        }
+        
+        // Check if section has totalPlaces but no segments (another GA pattern)
+        if (SECTION.totalPlaces && SECTION.totalPlaces > 0 && (!SECTION.segments || SECTION.segments.length === 0)) {
+          console.log(`GetMapSeats: Found GA section with ${SECTION.totalPlaces} total places: ${SECTION?.name}`);
+          // This might need special handling depending on the API structure
+          // For now, we'll log it for investigation
+        }
+      }
+    });
+  });
+  
+  console.log(`GetMapSeats: Extracted ${seatArray.length} seats from geometry data`);
   return seatArray;
 }
 function breakArray(arr) {
@@ -259,7 +292,12 @@ export const AttachRowSection = (
   let allAvailableSeats = GetMapSeats(mapData);
   let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
   let returnData = [];
+  
+  console.log(`AttachRowSection: Event ${event?.eventMappingId || event?.eventId} - Geometry seats: ${allAvailableSeats.length}, Facet data items: ${data.length}, Offers: ${offers.length}`);
   //get all seats number by seat id
+  let matchedSeats = 0;
+  let unmatchedPlaces = 0;
+  
   let customData = data
     .map((x) => {
       if (x.places.length > 0) {
@@ -277,9 +315,11 @@ export const AttachRowSection = (
 
                   let foundSeatFromMap = allAvailableSeats[indexOfZ];
                   if (foundSeatFromMap && indexOfZ != -1) {
+                    matchedSeats++;
                     return { ...foundSeatFromMap, offerId: x.offerId };
                   }
                   foundSeatFromMap = undefined;
+                  unmatchedPlaces++;
 
                   //SORT BY (seat) NUMBER
                 })
@@ -297,6 +337,8 @@ export const AttachRowSection = (
               };
             }
             found = undefined;
+          } else {
+            unmatchedPlaces += x.places.length;
           }
         }
       }
@@ -304,32 +346,53 @@ export const AttachRowSection = (
       return undefined;
     })
     .filter((x) => x != undefined);
+    
+  console.log(`AttachRowSection: Event ${event?.eventMappingId || event?.eventId} - Matched seats: ${matchedSeats}, Unmatched places: ${unmatchedPlaces}, Custom data items: ${customData.length}`);
 
   //it will check if pair has same row as some events are giving pair of different row
   let groupedSeats = [];
   customData.forEach((seatGroup) => {
     const rows = [...new Set(seatGroup.seats.map((seat) => seat.row))];
-    rows.forEach((row) => {
-      const seatsInRow = seatGroup.seats.filter((seat) => seat.row === row);
+    // If the row is an empty string, treat all seats as belonging to that single (empty) row.
+    // Otherwise, group by actual row names.
+    if (rows.length === 1 && rows[0] === "") {
       groupedSeats.push({
         section: seatGroup.section,
-        seats: seatsInRow,
+        row: "", // Explicitly set row to empty string
+        seats: seatGroup.seats,
         eventId: seatGroup.eventId,
         offerId: seatGroup.offerId,
         accessibility: seatGroup.accessibility,
         descriptionId: seatGroup.descriptionId,
         attributes: seatGroup.attributes,
       });
-    });
+    } else {
+      rows.forEach((row) => {
+        const seatsInRow = seatGroup.seats.filter((seat) => seat.row === row);
+        groupedSeats.push({
+          section: seatGroup.section,
+          row: row, // Ensure row is explicitly set here
+          seats: seatsInRow,
+          eventId: seatGroup.eventId,
+          offerId: seatGroup.offerId,
+          accessibility: seatGroup.accessibility,
+          descriptionId: seatGroup.descriptionId,
+          attributes: seatGroup.attributes,
+        });
+      });
+    }
   });
 
   //add row and get seats in order
   groupedSeats
     .map((x) => {
       if (x?.seats.length > 0) {
+        // If the row is already defined, use it. Otherwise, infer from the first seat.
+        // Ensure that an empty string for row is also considered a valid row.
+        const row = (x.row !== undefined && x.row !== null) ? x.row : x?.seats[0]?.row;
         return {
           ...x,
-          row: x?.seats[0]?.row,
+          row: row,
           seats: x?.seats
             .map((y) => parseInt(y.seat))
             .sort((a, b) => {
@@ -351,10 +414,17 @@ export const AttachRowSection = (
           returnData.push({
             ...x,
             seats: y,
+            lineItemType: "",
+            amount: y.length,
           });
         });
       } else {
-        returnData.push(x);
+        // If no break is needed, push the original seat group
+        returnData.push({
+          ...x,
+          lineItemType: "",
+          amount: x.seats.length,
+        });
       }
     });
 
@@ -362,39 +432,38 @@ export const AttachRowSection = (
   returnData = CreateConsicutiveSeats(returnData);
 
   //attach offer
+  console.log(`AttachRowSection: Event ${event?.eventMappingId || event?.eventId} - Before offer attachment: ${returnData.length} items`);
 
-  return (
-    returnData
-      .map((x) => {
-        let offerGet = offers.find((e) => e.offerId == x.offerId);
-
-        if (offerGet) {
-          if (offerGet.name == "Special Offers") {
-            return undefined;
-          } else if (offerGet.name == "Summer's Live 4 Pack") {
-            return undefined;
-          } else if (offerGet.name == "Me + 3 4-Pack Offer") {
-            return undefined;
-          } else if (offerGet?.protected == true) {
-            return undefined;
-          } else {
-            return CreateInventoryAndLine(x, offerGet, event, descriptions);
-          }
-        } else {
-          return undefined;
-        }
-      })
-      .filter((x) => x != undefined)
-      .filter((obj, index, self) => {
-        // Convert dbId value to string to compare
-        var dbId = obj.dbId.toString();
-
-        // Check if the current dbId is the first occurrence in the array
-        return index === self.findIndex((o) => o.dbId.toString() === dbId);
-      })
-      .filter((x) => x.inventory.quantity > 1)
+  const processedData = returnData
+    .map((x) => {
+      let offerGet = offers.find((e) => e.offerId == x.offerId);
+      if (!offerGet) {
+        console.warn(`AttachRowSection: No offer found for offerId ${x.offerId} in event ${event?.eventMappingId || event?.eventId}`);
+        return undefined;
+      }
+      return CreateInventoryAndLine(x, offerGet, event, descriptions);
+    })
+    .filter((x) => x != undefined);
+    
+  console.log(`AttachRowSection: Event ${event?.eventMappingId || event?.eventId} - After offer processing: ${processedData.length} items`);
+  
+  const deduplicatedData = processedData.filter((obj, index, self) => {
+    // Convert dbId value to string to compare
+    var dbId = obj.dbId.toString();
+    // Check if the current dbId is the first occurrence in the array
+    return index === self.findIndex((o) => o.dbId.toString() === dbId);
+  });
+  
+  console.log(`AttachRowSection: Event ${event?.eventMappingId || event?.eventId} - After deduplication: ${deduplicatedData.length} items`);
+  
+  const finalData = deduplicatedData.filter((x) => x.inventory.quantity > 1);
+  
+  console.log(`AttachRowSection: Event ${event?.eventMappingId || event?.eventId} - After quantity filter (>1): ${finalData.length} items`);
+  
+  return finalData
 
       //remove duplicate
+      /*
       .filter((obj, index, self) => {
         // Check if any other object has the same row and section
         const hasDuplicate = self.some((otherObj, otherIndex) => {
@@ -408,5 +477,6 @@ export const AttachRowSection = (
 
         return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
       })
-  );
-};
+      */
+  // );
+}
