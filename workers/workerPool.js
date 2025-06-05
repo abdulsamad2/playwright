@@ -20,6 +20,7 @@ export class WorkerPool {
    * @param {number} options.maxWorkers - Maximum number of workers (defaults to CPU count)
    * @param {Function} options.scrapeEventHandler - Function to handle scrape event requests
    * @param {Function} options.logger - Logger function
+   * @param {number} options.scrapeTimeout - Timeout for scrape operations in milliseconds
    */
   constructor(options = {}) {
     // Set default options
@@ -27,7 +28,8 @@ export class WorkerPool {
       maxWorkers: options.maxWorkers || Math.max(1, os.cpus().length - 1), // Leave one CPU for main thread
       workerScript: options.workerScript || path.join(__dirname, 'eventWorker.js'),
       logger: options.logger || console.log,
-      scrapeEventHandler: options.scrapeEventHandler || null
+      scrapeEventHandler: options.scrapeEventHandler || null,
+      scrapeTimeout: options.scrapeTimeout || 30000 // Default to 30 seconds if not provided
     };
     
     // Initialize worker pool
@@ -191,7 +193,10 @@ export class WorkerPool {
       try {
         // Create the worker
         const worker = new Worker(this.options.workerScript, {
-          workerData: { workerId: id }
+          workerData: { 
+            workerId: id,
+            scrapeTimeout: this.options.scrapeTimeout // Pass scrapeTimeout to worker
+          }
         });
         
         // Add worker ID for tracking

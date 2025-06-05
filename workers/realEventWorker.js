@@ -17,7 +17,8 @@ const workerState = {
   eventsSucceeded: 0,
   eventsFailed: 0,
   startTime: Date.now(),
-  pendingEvents: new Map() // eventId -> { resolve, reject, startTime }
+  pendingEvents: new Map(), // eventId -> { resolve, reject, startTime }
+  scrapeTimeout: workerData.scrapeTimeout || 30000 // Use configured timeout, default to 30s
 };
 
 /**
@@ -123,14 +124,14 @@ function requestEventProcessing(eventId, retryCount) {
     });
     
     // Set a timeout to prevent hanging
-    setTimeout(30000).then(() => {
+    setTimeout(workerState.scrapeTimeout).then(() => {
       // Check if the request is still pending
       if (workerState.pendingEvents.has(requestId)) {
         // Remove the pending request
         workerState.pendingEvents.delete(requestId);
         
         // Reject the promise
-        reject(new Error(`Request timed out after 30 seconds: ${eventId}`));
+        reject(new Error(`Request timed out after ${workerState.scrapeTimeout / 1000} seconds: ${eventId}`));
       }
     });
   });

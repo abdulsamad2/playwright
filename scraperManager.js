@@ -14,6 +14,7 @@ import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 import config from './config/scraperManagerConfig.js';
+import { WorkerPool } from './workers/workerPool.js'; // Import WorkerPool
 
 // Export CSV processing flags from config
 export const ENABLE_CSV_PROCESSING = config.ENABLE_CSV_PROCESSING;
@@ -30,7 +31,6 @@ const EVENT_FAILURE_THRESHOLD = config.EVENT_FAILURE_THRESHOLD;
 const STALE_EVENT_THRESHOLD = config.STALE_EVENT_THRESHOLD;
 
 // Enhanced recovery settings
-const RECOVERY_BATCH_SIZE = config.RECOVERY_BATCH_SIZE;
 const MAX_RECOVERY_BATCHES = config.MAX_RECOVERY_BATCHES;
 const PARALLEL_BATCH_SIZE = config.PARALLEL_BATCH_SIZE;
 const MAX_PARALLEL_BATCHES = config.MAX_PARALLEL_BATCHES;
@@ -1710,16 +1710,23 @@ export class ScraperManager {
       // For critical events approaching the threshold, use smaller backoff times
       if (timeSinceUpdate > 540000) { // Over 9 minutes
         // Very aggressive retry for events approaching threshold
-        backoffTime = 3000; // Just 3 seconds for critical events
+        backoffTime = 3000; // Just 3 seconds for critical events (>9 min)
         this.logWithTime(
-          `CRITICAL: Event ${eventId} at ${Math.floor(timeSinceUpdate/1000)}s since update - using minimal 3s backoff`,
+          `CRITICAL (>9m): Event ${eventId} at ${Math.floor(timeSinceUpdate/1000)}s since update - using minimal 3s backoff`,
           "warning"
         );
-      } else if (timeSinceUpdate > 300000) { // Over 5 minutes
-        // Aggressive retry for stale events
+      } else if (timeSinceUpdate > 300000) { // Over 5 minutes (and <= 9 minutes)
+        // Aggressive retry for stale events (5-9 minutes)
         backoffTime = Math.min(5000, SHORT_COOLDOWNS[retryCount % SHORT_COOLDOWNS.length]);
         this.logWithTime(
-          `URGENT: Event ${eventId} at ${Math.floor(timeSinceUpdate/1000)}s since update - using reduced ${backoffTime}ms backoff`,
+          `URGENT (5-9m): Event ${eventId} at ${Math.floor(timeSinceUpdate/1000)}s since update - using reduced ${backoffTime}ms backoff`,
+          "warning"
+        );
+      } else if (timeSinceUpdate > 150000) { // Over 2.5 minutes (and <= 5 minutes)
+        // More aggressive retry for events approaching 3-min target (2.5-5 minutes)
+        backoffTime = Math.min(4000, SHORT_COOLDOWNS[retryCount % SHORT_COOLDOWNS.length]);
+        this.logWithTime(
+          `HIGH_PRIORITY (2.5-5m): Event ${eventId} at ${Math.floor(timeSinceUpdate/1000)}s since update - using aggressive ${backoffTime}ms backoff`,
           "warning"
         );
       } else if (retryCount < SHORT_COOLDOWNS.length) {
@@ -2816,10 +2823,11 @@ export class ScraperManager {
         
         // Create worker pool with scrape event handler
         this.workerPool = new WorkerPool({
+          scrapeTimeout: SCRAPE_TIMEOUT, // Pass SCRAPE_TIMEOUT to WorkerPool
           maxWorkers: optimalWorkerCount,
           workerScript: path.join(process.cwd(), 'workers', 'realEventWorker.js'),
           logger: (message, level) => this.logWithTime(message, level),
-          scrapeEventHandler: async (eventId, retryCount) => {
+          scrapeEventHandler: async (eventId, retryCount) => { // Existing handler
             // This function will be called by the worker pool when a worker needs to scrape an event
             return await this.scrapeEventOptimized(eventId, retryCount, null);
           }
@@ -4367,17 +4375,17 @@ export class ScraperManager {
         // Calculate priority score
         let priorityScore = timeSinceLastUpdate / 1000;
 
-        // Critical events approaching 3-minute threshold
-        if (timeSinceLastUpdate > 150000) { // 2.5 minutes
+        // Critical events approaching 3-minute threshold (2.5+ minutes)
+        if (timeSinceLastUpdate > 150000) { 
           priorityScore = priorityScore * 1000;
         }
-        // Very urgent - approaching 2 minutes
-        else if (timeSinceLastUpdate > 110000) {
-          priorityScore = priorityScore * 500;
+        // Very urgent - approaching 2.5 minutes (2.0 - 2.5 minutes)
+        else if (timeSinceLastUpdate > 120000) {
+          priorityScore = priorityScore * 800;
         }
-        // Urgent - over 1.5 minutes
-        else if (timeSinceLastUpdate > 90000) {
-          priorityScore = priorityScore * 100;
+        // Urgent - approaching 2 minutes (1.5 - 2.0 minutes)
+        else if (timeSinceLastUpdate > 90000) { // 1.5 minutes (was 110k, then 90k)
+          priorityScore = priorityScore * 500; // Boosted from 100
         }
         // High - over 1 minute
         else if (timeSinceLastUpdate > 60000) {
