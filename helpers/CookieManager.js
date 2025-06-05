@@ -46,7 +46,7 @@ export class CookieManager {
       ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
       LAST_ROTATION: Date.now()
     },
-    PERIODIC_REFRESH_INTERVAL: 30 * 60 * 1000 // 30 minutes
+    PERIODIC_REFRESH_INTERVAL: 15 * 60 * 1000 // 15 minutes
   };
 
   // Essential cookies that must be present
