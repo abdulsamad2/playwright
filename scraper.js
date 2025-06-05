@@ -58,7 +58,7 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
-  COOKIE_REFRESH_INTERVAL: 500 * 60 * 1000, // 30 minutes
+  COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes
   MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
   COOKIE_ROTATION: {
     ENABLED: true,

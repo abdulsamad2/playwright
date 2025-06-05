@@ -1268,19 +1268,56 @@ export class ScraperManager {
       // Use passed proxy if available, otherwise get a new one
       let proxyToUse = proxy;
       let proxyAgentToUse = proxyAgent;
-
-      if (!proxyAgentToUse || !proxyToUse) {
-        const { proxyAgent: newProxyAgent, proxy: newProxy } =
-          this.proxyManager.getProxyForBatch([eventId]);
-        proxyAgentToUse = newProxyAgent;
-        proxyToUse = newProxy;
+      let proxyValidated = false;
+      let proxyValidationAttempts = 0;
+      const MAX_PROXY_VALIDATION_ATTEMPTS = 3;
+      
+      // Robust proxy validation loop
+      while (!proxyValidated && proxyValidationAttempts < MAX_PROXY_VALIDATION_ATTEMPTS) {
+        proxyValidationAttempts++;
         
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Using proxy ${newProxy?.proxy || 'default'} for ${retryCount > 0 ? 'retry #' + retryCount : 'initial attempt'} of event ${eventId}`,
-            "info"
-          );
+        // Get a new proxy if needed
+        if (!proxyAgentToUse || !proxyToUse || proxyValidationAttempts > 1) {
+          const { proxyAgent: newProxyAgent, proxy: newProxy } =
+            this.proxyManager.getProxyForBatch([eventId]);
+          proxyAgentToUse = newProxyAgent;
+          proxyToUse = newProxy;
+          
+          if (LOG_LEVEL >= 2) {
+            this.logWithTime(
+              `Using proxy ${newProxy?.proxy || 'default'} for ${retryCount > 0 ? 'retry #' + retryCount : 'initial attempt'} of event ${eventId} (validation attempt ${proxyValidationAttempts})`,
+              "info"
+            );
+          }
         }
+        
+        // Validate proxy is properly defined
+        if (!proxyToUse || !proxyToUse.proxy) {
+          this.logWithTime(
+            `Invalid proxy for event ${eventId}: ${proxyToUse ? 'proxy object exists but proxy URL is undefined' : 'proxy object is undefined'} - getting new proxy`,
+            "warning"
+          );
+          
+          // Release this invalid proxy
+          this.proxyManager.markProxyAsFailed(proxyToUse?.proxy || 'undefined');
+          
+          // If we've tried too many times, use direct connection
+          if (proxyValidationAttempts >= MAX_PROXY_VALIDATION_ATTEMPTS) {
+            this.logWithTime(
+              `Failed to get valid proxy after ${MAX_PROXY_VALIDATION_ATTEMPTS} attempts for event ${eventId} - proceeding with direct connection`,
+              "warning"
+            );
+            proxyToUse = null;
+            proxyAgentToUse = null;
+            proxyValidated = true; // Proceed without proxy
+          }
+          
+          // Try again with a new proxy
+          continue;
+        }
+        
+        // Proxy is valid
+        proxyValidated = true;
       }
 
       // Look up the event first before trying to scrape
@@ -1779,25 +1816,57 @@ export class ScraperManager {
   }
 
   /**
-   * Calculate adaptive pause time for sequential processing
+   * Calculate adaptive pause time for sequential processing with rate limit awareness
    * @returns {number} Pause time in milliseconds
    */
   getAdaptivePauseTime() {
     // Minimal pause for high-performance processing
-    let pauseTime = 10; // Reduced from 200ms to 10ms
+    let pauseTime = 10; // Base pause time of 10ms
 
-    // Only add significant pause if system is overloaded
+    // Track rate limit related errors
+    const rateLimitErrors = Array.from(this.failureTypeGroups.get('RATE_LIMIT') || []).length;
+    const apiErrors = Array.from(this.failureTypeGroups.get('API_ERROR') || []).length;
+    
+    // Calculate rate limit pressure (0-100 scale)
+    const rateLimitPressure = Math.min(100, (rateLimitErrors * 5) + (apiErrors * 2));
+    
+    // System load factors
     const activeJobCount = this.activeJobs.size;
     const failedEventCount = this.failedEvents.size;
-
-    // Only throttle if we have many active jobs
-    if (activeJobCount > CONCURRENT_LIMIT * 0.8) {
+    const systemLoadPercentage = (activeJobCount / CONCURRENT_LIMIT) * 100;
+    
+    // Progressive backoff based on rate limit pressure
+    if (rateLimitPressure > 80) {
+      // Critical rate limit pressure - significant pause
+      pauseTime += 2000 + (Math.random() * 1000); // 2-3 second pause
+      this.logWithTime(
+        `⚠️ CRITICAL rate limit pressure (${rateLimitPressure.toFixed(0)}%) - adding ${pauseTime}ms pause to prevent API blocks`,
+        "warning"
+      );
+    } else if (rateLimitPressure > 50) {
+      // High rate limit pressure - moderate pause
+      pauseTime += 1000 + (Math.random() * 500); // 1-1.5 second pause
+      this.logWithTime(
+        `High rate limit pressure (${rateLimitPressure.toFixed(0)}%) - adding ${pauseTime}ms pause`,
+        "warning"
+      );
+    } else if (rateLimitPressure > 20) {
+      // Moderate rate limit pressure - small pause
+      pauseTime += 500 + (Math.random() * 300); // 500-800ms pause
+    }
+    
+    // System load based adjustments
+    if (systemLoadPercentage > 90) {
+      pauseTime += 200;
+    } else if (systemLoadPercentage > 80) {
+      pauseTime += 100;
+    } else if (systemLoadPercentage > 70) {
       pauseTime += 50;
     }
 
     // Add small pause for failed events
     if (failedEventCount > 100) {
-      pauseTime += 20;
+      pauseTime += 50;
     }
 
     // Circuit breaker adds minimal pause
@@ -2031,12 +2100,13 @@ export class ScraperManager {
     });
     
     // Set up rotation interval (15 minutes)
+    const COOKIE_ROTATION_INTERVAL = 15 * 60 * 1000; // 15 minutes
     this.cookieRotationIntervalId = setInterval(() => {
       // Non-blocking rotation
       this.rotateAllCookiesAndSessions().catch(err => {
         this.logWithTime(`Periodic cookie rotation error: ${err.message}`, "error");
       });
-    }, SESSION_REFRESH_INTERVAL);
+    }, COOKIE_ROTATION_INTERVAL);
     
     return this.cookieRotationIntervalId;
   }
@@ -2919,11 +2989,36 @@ export class ScraperManager {
             }
           }
 
-          // Process retry queue
-          const now = moment();
-          const retryEvents = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
-          
-          if (retryEvents.length > 0) {
+          // Process retry queue with deduplication
+      const now = moment();
+      
+      // Deduplicate retry queue - keep only the latest entry for each eventId
+      const deduplicatedRetryQueue = [];
+      const processedEventIds = new Set();
+      
+      // Process the retry queue in reverse to find the latest entry for each eventId
+      for (let i = this.retryQueue.length - 1; i >= 0; i--) {
+        const job = this.retryQueue[i];
+        if (!processedEventIds.has(job.eventId)) {
+          processedEventIds.add(job.eventId);
+          deduplicatedRetryQueue.unshift(job); // Add to the beginning to maintain original order
+        }
+      }
+      
+      // Replace the retry queue with the deduplicated version
+      if (this.retryQueue.length > deduplicatedRetryQueue.length) {
+        const removedCount = this.retryQueue.length - deduplicatedRetryQueue.length;
+        this.logWithTime(
+          `Removed ${removedCount} duplicate events from retry queue (before: ${this.retryQueue.length}, after: ${deduplicatedRetryQueue.length})`,
+          "info"
+        );
+        this.retryQueue = deduplicatedRetryQueue;
+      }
+      
+      // Get events ready for retry
+      const retryEvents = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
+      
+      if (retryEvents.length > 0) {
             if (this.workerPool) {
               // Process retry events with worker pool
               const retryBatch = retryEvents.map(job => ({
