@@ -208,41 +208,55 @@ const generateCombinedCSVBackground = async () => {
         // Create a set to track which existing records to keep
         const existingRecordsToKeep = new Set();
         
-        // Identify existing records from events that haven't been updated
+        // Identify existing records from events that haven't been updated AND are not considered stale
         for (const [compositeKey, record] of existingCsvData) {
           const sourceEventId = record.source_event_id;
-          // Keep record if its event wasn't updated recently
-          if (sourceEventId && !recentEventIds.has(sourceEventId)) {
+          // Only keep record if its event was updated recently or if it's not associated with a stale event
+          // The user wants to remove stale events from the final CSV, so we will only keep records from recent events.
+          if (sourceEventId && recentEventIds.has(sourceEventId)) {
             existingRecordsToKeep.add(compositeKey);
           }
         }
         
-        // Collect only records from events updated in the last 6 minutes
-        const allRecords = [];
-        let includedEvents = 0;
-        let excludedEvents = 0;
-        
-        for (const [eventId, records] of allEventsData) {
-          if (recentEventIds.has(eventId)) {
-            const eventDetails = eventDetailsMap.get(eventId);
-            // Enrich records with event details for composite key generation
-            const enrichedRecords = await Promise.all(records.map(async record => ({
+        // Collect records based on _meta flag and enrich them
+        const allRecords = []; 
+        let includedEvents = 0; // Counts events included
+        let excludedEvents = 0; // Counts events excluded
+        const sevenMinutesAgo = Date.now() - (7 * 60 * 1000); // As per user's intended replace_block logic
+
+        // Assumption: eventDetailsMap is populated from recentlyUpdatedEvents before this block.
+
+        for (const [eventId, recordsInEvent] of allEventsData.entries()) { 
+          const meta = (Array.isArray(recordsInEvent) && Object.prototype.hasOwnProperty.call(recordsInEvent, '_meta')) 
+                       ? recordsInEvent._meta 
+                       : null;
+
+          if (meta && meta.readyForNextCsv && meta.csvInclusionTimestamp && meta.csvInclusionTimestamp > sevenMinutesAgo) {
+            const eventDetails = eventDetailsMap.get(eventId); // Get details for enrichment
+            // if (!eventDetails) {
+            //   console.warn(`Event ${eventId} (meta-flagged for CSV) details not found in eventDetailsMap. Enrichment might be partial.`);
+            // }
+
+            const enrichedRecords = await Promise.all(recordsInEvent.map(async record => ({
               ...record,
               event_name: record.event_name || eventDetails?.Event_Name || `Event ${eventId}`,
               venue_name: record.venue_name || eventDetails?.Venue || "Unknown Venue",
               event_date: record.event_date || eventDetails?.Event_DateTime?.toISOString() || new Date().toISOString(),
-              event_id: record.event_id || record.mapping_id || eventId,
-              source_event_id: eventId,
-              seats: record.seats // Removed fixSeatFormatting call
+              event_id: record.event_id || record.mapping_id || eventId, 
+              source_event_id: eventId, 
+              seats: record.seats 
             })));
+            
             allRecords.push(...enrichedRecords);
             includedEvents++;
+            
+            meta.readyForNextCsv = false; // Reset the flag after processing
           } else {
             excludedEvents++;
           }
         }
         
-        console.log(`CSV Filter: Including ${includedEvents} events, excluding ${excludedEvents} events (stale > 6 min)`);
+        console.log(`CSV Filter (meta-based): ${includedEvents} events included, ${excludedEvents} events excluded. Total records collected for CSV processing: ${allRecords.length}`);
         
         if (allRecords.length === 0 && existingRecordsToKeep.size === 0) {
           console.log('CSV Filter: No records to include in CSV - all events are stale and no existing records to keep');
@@ -352,9 +366,9 @@ const generateCombinedCSVBackground = async () => {
           setImmediate(async () => {
             try {
               await saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
-              console.log(`✅ Background: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recent events and kept records from ${excludedEvents} stale events`);
+              console.log(`✅ Background: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recent events. Stale events (${excludedEvents}) and their records have been removed.`);
               console.log(`📊 CSV Changes: ${newRecordsCount.preserved} preserved, ${newRecordsCount.updated} updated, ${newRecordsCount.created} created, ${newRecordsCount.removed} removed`);
-              console.log(`🚫 Excluded: ${excludedEvents} stale events (>6 min)`);
+              console.log(`🚫 Excluded: ${excludedEvents} stale events (>6 min) - records removed from CSV`);
               resolve();
             } catch (error) {
               console.error(`Error in background CSV generation: ${error.message}`);
@@ -454,6 +468,28 @@ class InventoryController {
 
       // Update in-memory storage (instant)
       allEventsData.set(eventId, newRecords);
+
+      // Add or update _meta property for CSV flagging
+      const eventRecordsArray = allEventsData.get(eventId); // Get the array we just set
+      if (eventRecordsArray && Array.isArray(eventRecordsArray)) {
+        // Ensure _meta object exists on the array itself (as a non-enumerable property)
+        if (!Object.prototype.hasOwnProperty.call(eventRecordsArray, '_meta') || typeof eventRecordsArray._meta !== 'object' || eventRecordsArray._meta === null) {
+          Object.defineProperty(eventRecordsArray, '_meta', {
+            value: { readyForNextCsv: true, csvInclusionTimestamp: Date.now() },
+            writable: true,
+            enumerable: false, // Crucial: _meta should not be part of records data when iterating array elements
+            configurable: true
+          });
+        } else {
+          // If _meta already exists (e.g. from a previous quick update), update its properties
+          eventRecordsArray._meta.readyForNextCsv = true;
+          eventRecordsArray._meta.csvInclusionTimestamp = Date.now();
+        }
+      } else if (eventRecordsArray) {
+        console.warn(`Event ${eventId} data in allEventsData is not an array. _meta property not set.`);
+      }
+      // If eventRecordsArray is undefined (should not happen if set above), do nothing or log error.
+
       this.lastUpdate.set(eventId, Date.now());
 
       // Mark for background processing
@@ -704,4 +740,4 @@ export const markEventScraped = () => {
   return { success: true, message: 'Event marking not needed in optimized mode' };
 };
 
-export default inventoryController; 
+export default inventoryController;
