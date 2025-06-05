@@ -89,25 +89,24 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
 
   const server = app.listen(currentPort, "0.0.0.0");
 
-  server.on('listening', () => {
-    serverInstance = server; // Assign to the higher-scoped variable
-    global.serverInstance = server; // Make it globally accessible for restart logic
-    console.log(`Server running on port ${currentPort}`);
-
-    // Check for --start-scraper argument
-    if (process.argv.includes('--start-scraper')) {
-      console.log('Command-line argument --start-scraper detected. Attempting to start scraper...');
-      if (scraperManager && scraperManager.isRunning) {
-        console.log("Scraper is already running.");
-      } else if (scraperManager && typeof scraperManager.startContinuousScraping === 'function') {
-        scraperManager.startContinuousScraping().catch((error) => {
-          console.error("Error starting scraper from command line:", error);
-          if (scraperManager) scraperManager.isRunning = false;
-        });
-        console.log("Scraper initiated via command line.");
-      } else {
-        console.error("Scraper manager or startContinuousScraping method is not available.");
+  // Add this after server starts listening
+  server.on('listening', async () => {
+    try {
+      if (process.argv.includes('--start-scraper')) {
+        console.log('Initializing scraper with 5-second delay...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        if (!scraperManager.isRunning) {
+          console.log('Force-starting scraper...');
+          // Start scraper automatically on server start
+          await scraperManager.startContinuousScraping();
+          console.log('Scraper auto-started with server');
+          scraperManager.autoRestartMonitor.startMonitoring(); // Explicitly start monitoring
+        }
       }
+    } catch (error) {
+      console.error('Scraper initialization failed:', error);
+      scraperManager.autoRestartMonitor.recordFailure(); // Trigger auto-restart logic
     }
   });
 

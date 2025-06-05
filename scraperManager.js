@@ -13,6 +13,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
+import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
 
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_PROCESSING = true; // Set to false to disable all CSV generation
@@ -169,6 +170,10 @@ export class ScraperManager {
     this.csvProcessingActive = false;
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.processingLocks = new Map(); // Track event locks
+    
+    // Initialize AutoRestartMonitor for failure monitoring and auto-restart
+    this.autoRestartMonitor = new AutoRestartMonitor(this);
+    this.autoRestartEnabled = true; // Can be disabled if needed
   }
 
   logWithTime(message, type = "info") {
@@ -1652,6 +1657,16 @@ export class ScraperManager {
 
       // Track failure count
       this.incrementFailureCount(eventId);
+      
+      // Record failure in auto-restart monitor if enabled
+      if (this.autoRestartEnabled && this.autoRestartMonitor) {
+        try {
+          // The AutoRestartMonitor will get failure stats from the database
+          // No need to pass individual failures, it analyzes overall patterns
+        } catch (monitorError) {
+          this.logWithTime(`Error recording failure in auto-restart monitor: ${monitorError.message}`, "error");
+        }
+      }
 
       // Add to failed events
       this.failedEvents.add(eventId);
@@ -1920,6 +1935,16 @@ export class ScraperManager {
     
     // Release any active proxies
     this.proxyManager.releaseAllProxies();
+    
+    // Stop auto-restart monitoring if enabled
+    if (this.autoRestartEnabled && this.autoRestartMonitor) {
+      try {
+        this.autoRestartMonitor.stopMonitoring();
+        this.logWithTime("🔄 Auto-restart monitoring stopped", "info");
+      } catch (error) {
+        this.logWithTime(`Error stopping auto-restart monitor: ${error.message}`, "error");
+      }
+    }
     
     // Clear all processing queues
     this.eventProcessingQueue = [];
@@ -2708,7 +2733,9 @@ export class ScraperManager {
     if (!this.isRunning) {
       this.isRunning = true;
       this.logWithTime("Starting high-performance parallel scraping for 1000+ events...", "info");
-
+ if (!this.autoRestartMonitor.isMonitoring) {
+   this.autoRestartMonitor.startMonitoring();
+ }
       // Log Skip_Scraping status summary at startup
       try {
         const totalEvents = await Event.countDocuments({});
@@ -2732,6 +2759,16 @@ export class ScraperManager {
 
       // Ensure proxy manager is available globally for the scraper
       global.proxyManager = this.proxyManager;
+
+      // Start auto-restart monitoring if enabled
+      if (this.autoRestartEnabled && this.autoRestartMonitor) {
+        try {
+          this.autoRestartMonitor.startMonitoring();
+          this.logWithTime("🔄 Auto-restart monitoring started", "info");
+        } catch (error) {
+          this.logWithTime(`Error starting auto-restart monitor: ${error.message}`, "error");
+        }
+      }
 
       // Start performance monitoring
       this.startPerformanceMonitoring();
@@ -4217,6 +4254,79 @@ export class ScraperManager {
     } catch (error) {
       console.error("Error getting events to process:", error);
       return [];
+    }
+  }
+
+  /**
+   * Enable auto-restart monitoring
+   * @param {Object} config - Optional configuration overrides
+   */
+  enableAutoRestart(config = {}) {
+    this.autoRestartEnabled = true;
+    
+    if (config && Object.keys(config).length > 0) {
+      this.autoRestartMonitor.updateConfig(config);
+      this.logWithTime(`🔄 Auto-restart monitoring enabled with custom config`, "info");
+    } else {
+      this.logWithTime(`🔄 Auto-restart monitoring enabled with default config`, "info");
+    }
+    
+    // Start monitoring if scraping is already running
+    if (this.isRunning && this.autoRestartMonitor) {
+      this.autoRestartMonitor.startMonitoring();
+    }
+  }
+
+  /**
+   * Disable auto-restart monitoring
+   */
+  disableAutoRestart() {
+    this.autoRestartEnabled = false;
+    
+    if (this.autoRestartMonitor) {
+      this.autoRestartMonitor.stopMonitoring();
+    }
+    
+    this.logWithTime(`🔄 Auto-restart monitoring disabled`, "info");
+  }
+
+  /**
+   * Get auto-restart monitor status
+   * @returns {Object} Status information
+   */
+  getAutoRestartStatus() {
+    if (!this.autoRestartMonitor) {
+      return {
+        enabled: false,
+        monitoring: false,
+        message: "Auto-restart monitor not initialized"
+      };
+    }
+    
+    return {
+      enabled: this.autoRestartEnabled,
+      monitoring: this.autoRestartMonitor.isMonitoring,
+      status: this.autoRestartMonitor.getStatus()
+    };
+  }
+
+  /**
+   * Update auto-restart monitor configuration
+   * @param {Object} config - Configuration updates
+   */
+  updateAutoRestartConfig(config) {
+    if (!this.autoRestartMonitor) {
+      this.logWithTime(`Cannot update auto-restart config: monitor not initialized`, "error");
+      return false;
+    }
+    
+    try {
+      this.autoRestartMonitor.updateConfig(config);
+      this.logWithTime(`🔄 Auto-restart configuration updated`, "info");
+      return true;
+    } catch (error) {
+      this.logWithTime(`Error updating auto-restart config: ${error.message}`, "error");
+      return false;
     }
   }
 }
