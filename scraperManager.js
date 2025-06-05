@@ -44,7 +44,7 @@ const LOG_LEVEL = 3; // Default to warnings and errors only
 
 // Cookie expiration threshold: refresh cookies every 15 minutes
 const COOKIE_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
-const SESSION_REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes for session refresh
+const SESSION_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes for session refresh
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const generateRandomIp = () => Array.from({ length: 4 }, () => Math.floor(Math.random() * 256)).join('.');
@@ -2022,7 +2022,7 @@ export class ScraperManager {
       clearInterval(this.cookieRotationIntervalId);
     }
     
-    this.logWithTime("Starting 15-minute cookie and session rotation schedule", "info");
+    this.logWithTime("Starting 30-minute cookie and session rotation schedule", "info");
     
     // Immediately rotate on start (non-blocking)
     this.rotateAllCookiesAndSessions().catch(err => {
