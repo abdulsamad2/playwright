@@ -1,6 +1,6 @@
 import moment from "moment";
 import { ErrorLog } from "../models/index.js";
-import config from "../config/scraperConfig.js";
+import config from "../config/scraperManagerConfig.js";
 
 /**
  * ScraperLogger handles all logging for the scraper system
@@ -80,4 +80,4 @@ class ScraperLogger {
   }
 }
 
-export default ScraperLogger; 
+export default ScraperLogger;

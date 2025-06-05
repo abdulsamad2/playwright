@@ -1,6 +1,6 @@
 import { setTimeout } from "timers/promises";
 import { ScrapeEvent } from "../scraper.js";
-import config from "../config/scraperConfig.js";
+import config from "../config/scraperManagerConfig.js";
 
 /**
  * Handles the main event processing logic
@@ -180,4 +180,4 @@ class EventProcessor {
   }
 }
 
-export default EventProcessor; 
+export default EventProcessor;

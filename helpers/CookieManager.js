@@ -5,7 +5,7 @@ const path = require("path");
 import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { refreshHeaders } from "../scraper.js";
-import config from "../config/scraperConfig.js";
+import config from "../config/scraperManagerConfig.js";
 import { BrowserFingerprint } from '../browserFingerprint.js';
 import { ScraperManager } from '../scraperManager.js';
 import SessionManager from './SessionManager.js';
@@ -511,4 +511,4 @@ export class CookieManager {
       console.error('Error in periodic cookie refresh:', error);
     }
   }
-} 
+}

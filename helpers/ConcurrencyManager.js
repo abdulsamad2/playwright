@@ -1,6 +1,6 @@
 import { setTimeout } from "timers/promises";
 import moment from "moment";
-import config from "../config/scraperConfig.js";
+import config from "../config/scraperManagerConfig.js";
 
 /**
  * Manages concurrency limits and processing job tracking
@@ -166,4 +166,4 @@ class ConcurrencyManager {
   }
 }
 
-export default ConcurrencyManager; 
+export default ConcurrencyManager;

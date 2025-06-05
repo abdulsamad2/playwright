@@ -1,5 +1,5 @@
 import moment from "moment";
-import config from "../config/scraperConfig.js";
+import config from "../config/scraperManagerConfig.js";
 
 /**
  * Tracks failures and manages error retry policies
@@ -195,4 +195,4 @@ class ErrorTracker {
   }
 }
 
-export default ErrorTracker; 
+export default ErrorTracker;

@@ -1,6 +1,6 @@
 import moment from "moment";
 import { Event } from "../models/index.js";
-import config from "../config/scraperConfig.js";
+import config from "../config/scraperManagerConfig.js";
 
 /**
  * Manages event scheduling and prioritization
@@ -178,4 +178,4 @@ class EventScheduler {
   }
 }
 
-export default EventScheduler; 
+export default EventScheduler;
