@@ -14,6 +14,7 @@ import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
+import SessionResetManager from './helpers/SessionResetManager.js';
 
 // Add this at the top of the file, after imports
 export const ENABLE_CSV_PROCESSING = true; // Set to false to disable all CSV generation
@@ -174,6 +175,13 @@ export class ScraperManager {
     // Initialize AutoRestartMonitor for failure monitoring and auto-restart
     this.autoRestartMonitor = new AutoRestartMonitor(this);
     this.autoRestartEnabled = true; // Can be disabled if needed
+    
+    // Initialize session reset manager
+    this.sessionResetManager = new SessionResetManager(
+      this.sessionManager,
+      this.cookieManager,
+      this
+    );
   }
 
   logWithTime(message, type = "info") {
@@ -1946,6 +1954,9 @@ export class ScraperManager {
       }
     }
     
+    // Stop hourly session refresh
+    this.stopHourlySessionRefresh();
+    
     // Clear all processing queues
     this.eventProcessingQueue = [];
     this.csvProcessingQueue = [];
@@ -2776,6 +2787,9 @@ export class ScraperManager {
       // Start cookie rotation cycle immediately (non-blocking)
       this.forcePeriodicCookieRotation();
       this.logWithTime("Started 15-minute cookie rotation cycle", "info");
+      
+      // Start hourly session refresh
+      this.startHourlySessionRefresh();
 
       // Start CSV processing worker (non-blocking)
       this.startCsvProcessingWorker();
@@ -4328,6 +4342,34 @@ export class ScraperManager {
       this.logWithTime(`Error updating auto-restart config: ${error.message}`, "error");
       return false;
     }
+  }
+
+  /**
+   * Force a complete session reset - delegates to SessionResetManager
+   */
+  async forceCompleteSessionReset() {
+    return await this.sessionResetManager.forceCompleteSessionReset();
+  }
+
+  /**
+   * Start hourly session refresh
+   */
+  startHourlySessionRefresh() {
+    this.sessionResetManager.startHourlySessionRefresh();
+  }
+
+  /**
+   * Stop hourly session refresh
+   */
+  stopHourlySessionRefresh() {
+    this.sessionResetManager.stopHourlySessionRefresh();
+  }
+
+  /**
+   * Get session reset status
+   */
+  getSessionResetStatus() {
+    return this.sessionResetManager.getResetStatus();
   }
 }
 

@@ -25,8 +25,18 @@ function GetMapSeats(data) {
               });
             });
           else {
-            //GernalAdmission seats
-            //console.log(SECTION,"sec")
+            //GernalAdmission seats get general seat as well
+            if (SECTION.name == "General Admission") {
+              SECTION.placesNoKeys.map((seat) => {
+                seatArray.push({
+                  section: SECTION?.name,
+                  row: ROW?.name,
+                  seat: seat[1],
+                  seatId: seat[0],
+                });
+              });
+            }
+           
           }
         });
       }
@@ -126,7 +136,18 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   );
   let allDescriptions = "";
   let isNameAdded = false;
-
+  if (data.accessibility.includes("Semi-ambulatory Seat")){
+    allDescriptions += ", Semi-ambulatory Seat";
+    isNameAdded = true;
+  }
+    if (data.accessibility.includes("WC")) {
+      allDescriptions += ", Wheel Chair";
+      isNameAdded = true;
+    }
+  if (data.accessibility.includes("wheel chair")) {
+    allDescriptions += ", Wheel Chair";
+    isNameAdded = true;
+  }
   if (data.attributes.includes("obstructed")) {
     allDescriptions += ", Obstructed View";
     isNameAdded = true;
@@ -208,8 +229,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   //Face Value
   let faceValue = offer?.faceValue;
   let totalCost = singleExtraCharges + repeatExtraCharges + faceValue;
-  let totalCostWithPercentage =
-    totalCost + totalCost * (event?.listCostPercentage / 100);
+
   return {
     inventory: {
       quantity: data?.seats.length,
