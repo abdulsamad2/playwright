@@ -1099,7 +1099,7 @@ export class ScraperManager {
           // Essential fields only - remove unnecessary data
           barcodes: "",
           internal_notes: `@sec[${group.section}]`,
-          public_notes: `${group.row} Row`,
+          public_notes: "xfer" + (group.inventory.publicNotes ? group.inventory.publicNotes.replace("xfer", "") : ""),
           tags: ""
         };
       });

@@ -169,6 +169,18 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
         ) {
           allDescriptions += ", deaf/hard, blind/low";
         }
+        else if(x?.toLowerCase().includes("wheel chair")){
+          allDescriptions += ", Wheel Chair";
+        }
+        else if(x?.toLowerCase().includes("wheelchair")){
+          allDescriptions += ", Wheel Chair";
+        }
+        else if(x?.toLowerCase().includes("wheelchair access")){
+          allDescriptions += ", Wheel Chair";
+        }
+        else if(x?.toLowerCase().includes("wheelchair accessible")){
+          allDescriptions += ", Wheel Chair";
+        }
       });
     }
   }
