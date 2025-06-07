@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_TYPE=api
+      - automatiq_api=${automatiq_api}
+    volumes:
+       - ./data:/app/data  
+    depends_on:
+      - mongodb
+      - rabbitmq
+      - redis
+    restart: unless-stopped
+
+  # Worker Service (can be scaled)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_TYPE=worker
+      - automatiq_api=${automatiq_api}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mongodb
+      - rabbitmq
+      - redis
+    deploy:
+      replicas: 10  # Start with 10 workers, adjust based on performance
+    restart: unless-stopped
+
+  # MongoDB
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+  # RabbitMQ
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"   # AMQP protocol port
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    restart: unless-stopped
+
+  # Redis for distributed locking and shared state
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
+  rabbitmq_data:
+  redis_data:

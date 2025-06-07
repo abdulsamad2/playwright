@@ -123,8 +123,9 @@ export class ScraperManager {
     this.headerRefreshTimestamps = new Map(); // Track when headers were last refreshed
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
     this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
-    this.eventFailureCounts = new Map(); // Track consecutive failures per event
-    this.eventFailureTimes = new Map(); // Track when failures happened
+    this.eventFailureCounts = new Map(); // Track consecutive failures for the current attempt cycle
+    this.eventFailureTimestamps = new Map(); // Track timestamps of these consecutive failures
+    this.eventTotalRetries = new Map(); // Track total retries for an event if it goes into cooldown cycles
     this.globalConsecutiveErrors = 0; // Track consecutive errors across all events
     this.lastCookieReset = null; // Track when cookies were last reset
     this.cookiesPath = path.join(process.cwd(), "cookies.json"); // Path to cookies file
@@ -1985,12 +1986,8 @@ export class ScraperManager {
    * @returns {number} Number of recent failures
    */
   getRecentFailureCount(eventId) {
-    const failures = this.eventFailureCounts.get(eventId) || [];
-    const now = Date.now();
-    const recentFailures = failures.filter(failure => 
-      now - failure.timestamp < 10 * 60 * 1000 // Last 10 minutes
-    );
-    return recentFailures.length;
+    const failures = this.eventFailureCounts.get(eventId) || 0;
+    return failures;
   }
 
   /**
@@ -1998,20 +1995,19 @@ export class ScraperManager {
    * @param {string} eventId - The event ID
    */
   incrementFailureCount(eventId) {
-    if (!this.eventFailureCounts.has(eventId)) {
-      this.eventFailureCounts.set(eventId, []);
+    const currentCount = (this.eventFailureCounts.get(eventId) || 0) + 1;
+    this.eventFailureCounts.set(eventId, currentCount);
+
+    if (!this.eventFailureTimestamps.has(eventId)) {
+      this.eventFailureTimestamps.set(eventId, []);
     }
+    this.eventFailureTimestamps.get(eventId).push(Date.now());
     
-    const failures = this.eventFailureCounts.get(eventId);
-    failures.push({
-      timestamp: Date.now(),
-      count: failures.length + 1
-    });
-    
-    // Keep only recent failures (last 20)
-    if (failures.length > 20) {
-      failures.shift();
-    }
+    // Optional: Keep only the last N failure timestamps if needed, e.g., last 20
+    // const timestamps = this.eventFailureTimestamps.get(eventId);
+    // if (timestamps.length > 20) {
+    //   timestamps.shift();
+    // }
   }
 
   /**
@@ -2020,7 +2016,16 @@ export class ScraperManager {
    */
   clearFailureCount(eventId) {
     this.eventFailureCounts.delete(eventId);
-    this.eventFailureTimes.delete(eventId);
+    this.eventFailureTimestamps.delete(eventId);
+    // Do not clear eventTotalRetries here, only when event is successful or fully stopped.
+  }
+
+  recordEventSuccess(eventId) {
+    this.clearFailureCount(eventId);
+    this.eventTotalRetries.delete(eventId); // Reset total retries on success
+    this.eventUpdateTimestamps.set(eventId, moment()); // Record successful update
+    this.cooldownEvents.delete(eventId);
+    // ... other success logic
   }
 
   /**
