@@ -1,10 +1,11 @@
-FROM mcr.microsoft.com/playwright:v1.50.0-jammy
+FROM mcr.microsoft.com/playwright:v1.49.1-jammy
 
 WORKDIR /app
 
 # Copy package files and install dependencies
 COPY package*.json ./
 RUN npm install
+RUN npx playwright install
 
 # Copy application code
 COPY . .
