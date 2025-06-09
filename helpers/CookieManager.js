@@ -46,7 +46,13 @@ export class CookieManager {
       ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
       LAST_ROTATION: Date.now()
     },
-    PERIODIC_REFRESH_INTERVAL: 15 * 60 * 1000 // 15 minutes
+    PERIODIC_REFRESH_INTERVAL: () => {
+      // Random interval between 20-30 minutes
+      const minMinutes = 20;
+      const maxMinutes = 30;
+      const randomMinutes = Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) + minMinutes;
+      return randomMinutes * 60 * 1000;
+    } // Random 20-30 minutes
   };
 
   // Essential cookies that must be present
@@ -428,9 +434,24 @@ export class CookieManager {
     console.log('Starting periodic cookie refresh service...');
     await this.refreshCookiesPeriodically();
     
-    setInterval(async () => {
-      await this.refreshCookiesPeriodically();
-    }, CookieManager.CONFIG.PERIODIC_REFRESH_INTERVAL);
+    // Set up dynamic interval for periodic refresh with random timing
+    const scheduleNextRefresh = () => {
+      const nextInterval = CookieManager.CONFIG.PERIODIC_REFRESH_INTERVAL();
+      console.log(`Next cookie refresh scheduled in ${Math.round(nextInterval / 60000)} minutes`);
+      
+      setTimeout(async () => {
+        try {
+          await this.refreshCookiesPeriodically();
+        } catch (error) {
+          console.error('Error in periodic cookie refresh:', error);
+        }
+        // Schedule the next refresh with a new random interval
+        scheduleNextRefresh();
+      }, nextInterval);
+    };
+    
+    // Start the refresh cycle
+    scheduleNextRefresh();
   }
 
   async refreshCookiesPeriodically() {
@@ -511,4 +532,4 @@ export class CookieManager {
       console.error('Error in periodic cookie refresh:', error);
     }
   }
-} 
+}

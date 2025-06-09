@@ -131,6 +131,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     allDescriptions += ", Obstructed View";
     isNameAdded = true;
   }
+  
 
   if (
     data?.accessibility.includes("sight") ||
@@ -139,6 +140,27 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     allDescriptions += ", deaf/hard, blind/low";
     isNameAdded = true;
   }
+  if (data?.accessibility.includes("mobility")) {
+    allDescriptions += ", Mobility Accessible";
+    isNameAdded = true;
+  }
+  if (data?.accessibility.includes("Companion Seats")) {
+    allDescriptions += ", Companion Seats";
+    isNameAdded = true;
+    
+  }
+  // Add the rest of the accessibility descriptions
+
+  if (data?.accessibility.includes("Wheelchair Accessible")) {
+    allDescriptions += ", Wheelchair Accessible";
+    isNameAdded = true;
+  }
+  if (data?.accessibility.includes("Semi-ambulatory Seats") || data?.accessibility.includes("Semi-ambulatory") ) {
+    allDescriptions += ", Semi-ambulatory Seats";
+    isNameAdded = true;
+  }
+    
+  
 
   if (offer?.name?.toLowerCase().includes("limited/obstructed")) {
     allDescriptions += ", Limted/Obstructed View";
@@ -147,40 +169,145 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     allDescriptions += ", Limited View";
     isNameAdded = true;
   }
+  // whelchair
+  if (
+    offer?.name?.toLowerCase().includes("wheelchair") ||
+    offer?.name?.toLowerCase().includes("wheel chair") ||
+    offer?.name?.toLowerCase().includes("accessible") ||
+    offer?.name?.toLowerCase().includes("ada")
+  ){
+    allDescriptions += ", Wheel Chair";
+    isNameAdded = true;
+  }
 
   if (isNameAdded == false) {
     if (_descriptions) {
       _descriptions.descriptions.map((x) => {
-        if (x?.toLowerCase().includes("side")) {
-          allDescriptions += ", Side View";
-        } else if (x?.toLowerCase().includes("behind")) {
-          allDescriptions += ", Behind The Stage";
-        } else if (x?.toLowerCase().includes("rear")) {
-          allDescriptions += ", Rear View Seating";
-        } else if (x?.toLowerCase().includes("partial")) {
-          allDescriptions += ", Partial View";
-        } else if (x?.toLowerCase().includes("limited")) {
-          allDescriptions += ", Limited View";
-        } else if (x?.toLowerCase().includes("obstructed")) {
-          allDescriptions += ", obstructed View";
-        } else if (
-          x?.toLowerCase().includes("deaf") ||
-          x?.toLowerCase().includes("blind")
-        ) {
+        const desc = x?.toLowerCase() || '';
+        let hasMatched = false;
+        
+        // Accessibility descriptions (check first to ensure they're always captured)
+        if (desc.includes("wheelchair") || desc.includes("wheel chair") || desc.includes("accessible") || desc.includes("ada")) {
+          allDescriptions += ", Wheel Chair";
+          hasMatched = true;
+        }
+        if (desc.includes("deaf") || desc.includes("blind") || desc.includes("hearing") || desc.includes("sight")) {
           allDescriptions += ", deaf/hard, blind/low";
+          hasMatched = true;
         }
-        else if(x?.toLowerCase().includes("wheel chair")){
-          allDescriptions += ", Wheel Chair";
+        if (desc.includes("mobility")) {
+          allDescriptions += ", Mobility Accessible";
+          hasMatched = true;
         }
-        else if(x?.toLowerCase().includes("wheelchair")){
-          allDescriptions += ", Wheel Chair";
+        
+        // View-related descriptions
+        if (desc.includes("side")) {
+          allDescriptions += ", Side View";
+          hasMatched = true;
         }
-        else if(x?.toLowerCase().includes("wheelchair access")){
-          allDescriptions += ", Wheel Chair";
+        if (desc.includes("behind")) {
+          allDescriptions += ", Behind The Stage";
+          hasMatched = true;
         }
-        else if(x?.toLowerCase().includes("wheelchair accessible")){
-          allDescriptions += ", Wheel Chair";
+        if (desc.includes("rear")) {
+          allDescriptions += ", Rear View Seating";
+          hasMatched = true;
         }
+        if (desc.includes("partial")) {
+          allDescriptions += ", Partial View";
+          hasMatched = true;
+        }
+        if (desc.includes("limited")) {
+          allDescriptions += ", Limited View";
+          hasMatched = true;
+        }
+        if (desc.includes("obstructed") || desc.includes("obstruct")) {
+          allDescriptions += ", Obstructed View";
+          hasMatched = true;
+        }
+        if (desc.includes("restricted")) {
+          allDescriptions += ", Restricted View";
+          hasMatched = true;
+        }
+        if (desc.includes("corner")) {
+          allDescriptions += ", Corner View";
+          hasMatched = true;
+        }
+        if (desc.includes("angle")) {
+          allDescriptions += ", Angled View";
+          hasMatched = true;
+        }
+        if (desc.includes("elevated")) {
+          allDescriptions += ", Elevated View";
+          hasMatched = true;
+        }
+        
+       
+        if (desc.includes("mezzanine")) {
+          allDescriptions += ", Mezzanine";
+          hasMatched = true;
+        }
+      
+        if (desc.includes("premium")) {
+          allDescriptions += ", Premium";
+          hasMatched = true;
+        }
+        if (desc.includes("vip")) {
+          allDescriptions += ", VIP";
+          hasMatched = true;
+        }
+        if (desc.includes("standing")) {
+          allDescriptions += ", Standing Room";
+          hasMatched = true;
+        }
+      
+    
+        if (desc.includes("court")) {
+          allDescriptions += ", Court Side";
+          hasMatched = true;
+        }
+        if (desc.includes("stage")) {
+          allDescriptions += ", Stage Area";
+          hasMatched = true;
+        }
+        
+        // Distance/proximity descriptions
+        if (desc.includes("close") || desc.includes("near")) {
+          allDescriptions += ", Close View";
+          hasMatched = true;
+        }
+        if (desc.includes("far") || desc.includes("distant")) {
+          allDescriptions += ", Distant View";
+          hasMatched = true;
+        }
+        
+        // Special conditions
+        if (desc.includes("rain") || desc.includes("weather")) {
+          allDescriptions += ", Weather Dependent";
+          hasMatched = true;
+        }
+        if (desc.includes("sun") || desc.includes("shade")) {
+          allDescriptions += ", Sun/Shade";
+          hasMatched = true;
+        }
+        if (desc.includes("covered")) {
+          allDescriptions += ", Covered";
+          hasMatched = true;
+        }
+        if (desc.includes("uncovered") || desc.includes("open air")) {
+          allDescriptions += ", Uncovered";
+          hasMatched = true;
+        }
+        
+        // // Catch-all for any other descriptive terms (only if no specific match found)
+        // if (!hasMatched && desc.length > 3 && !desc.includes("seat") && !desc.includes("section") && !desc.includes("row")) {
+        //   // Capitalize first letter and add as description if it's not a common word
+        //   const commonWords = ['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'up', 'about', 'into', 'over', 'after'];
+        //   if (!commonWords.includes(desc.trim())) {
+        //     const formatted = desc.charAt(0).toUpperCase() + desc.slice(1);
+        //     allDescriptions += `, ${formatted}`;
+        //   }
+        // }
       });
     }
   }
@@ -229,7 +356,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
       inventoryId: 0,
       offerId: data?.offerId,
       splitType: "CUSTOM",
-      publicNotes: "xfer" + allDescriptions,
+      publicNotes: `${(allDescriptions , "xfer")}`,
       listPrice: totalCost,
       customSplit: getSplitType(data?.seats, offer),
       tickets: data?.seats.map((y) => {

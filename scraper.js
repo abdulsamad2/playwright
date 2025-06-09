@@ -72,7 +72,13 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
-  COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes
+  COOKIE_REFRESH_INTERVAL: () => {
+    // Random interval between 20-30 minutes
+    const minMinutes = 20;
+    const maxMinutes = 30;
+    const randomMinutes = Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) + minMinutes;
+    return randomMinutes * 60 * 1000;
+  }, // Random 20-30 minutes
   MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
   COOKIE_ROTATION: {
     ENABLED: true,
@@ -1649,18 +1655,29 @@ async function startPeriodicCookieRefresh() {
   // Initial refresh
   await refreshCookiesPeriodically();
   
-  // Set up interval for periodic refresh with proper error handling
-  const refreshInterval = setInterval(async () => {
-    try {
-      await refreshCookiesPeriodically();
-    } catch (error) {
-      console.error('Error in periodic cookie refresh:', error);
-      // Don't retry immediately on error, let the interval handle the next attempt
-    }
-  }, COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL);
+  // Set up dynamic interval for periodic refresh with random timing
+  let refreshTimeout;
   
-  // Store the interval ID so we can clear it if needed
-  return refreshInterval;
+  const scheduleNextRefresh = () => {
+    const nextInterval = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL();
+    console.log(`Next cookie refresh scheduled in ${Math.round(nextInterval / 60000)} minutes`);
+    
+    refreshTimeout = setTimeout(async () => {
+      try {
+        await refreshCookiesPeriodically();
+      } catch (error) {
+        console.error('Error in periodic cookie refresh:', error);
+      }
+      // Schedule the next refresh with a new random interval
+      scheduleNextRefresh();
+    }, nextInterval);
+  };
+  
+  // Start the first refresh cycle
+  scheduleNextRefresh();
+  
+  // Store the timeout ID so we can clear it if needed
+  return refreshTimeout;
 }
 
 async function refreshCookiesPeriodically() {

@@ -23,16 +23,20 @@ export class SessionManager {
     
     // Session configuration
     this.SESSION_CONFIG = {
-      ROTATION_INTERVAL: 30 * 60 * 1000, // 30 minutes
-      MAX_SESSION_AGE: 2 * 60 * 60 * 1000, // 2 hours maximum
-      MAX_SESSIONS: 10, // Maximum number of concurrent sessions
+      ROTATION_INTERVAL: 15 * 60 * 1000, // 15 minutes
+      MAX_SESSION_AGE: 1 * 60 * 60 * 1000, // 1 hour maximum
+      MAX_SESSIONS: 100, // Maximum number of concurrent sessions
       SESSION_WARMUP_TIME: 5000, // 5 seconds to warm up new sessions
-      SESSION_VALIDATION_INTERVAL: 5 * 60 * 1000, // Validate sessions every 5 minutes
+      SESSION_VALIDATION_INTERVAL: 3 * 60 * 1000, // Validate sessions every 3 minutes
       SESSION_HEALTH_CHECK_TIMEOUT: 30000, // 30 seconds timeout for health checks
+      PERIODIC_RESET_INTERVAL: 60 * 60 * 1000, // Reset all sessions every 1 hour
     };
 
     // Start session validation interval
     this.startSessionValidation();
+    
+    // Start periodic session reset
+    this.startPeriodicSessionReset();
     
     // Load existing sessions from file
     this.loadSessionsFromFile();
@@ -331,6 +335,15 @@ export class SessionManager {
   }
 
   /**
+   * Force reset of all sessions (for manual triggering)
+   * @returns {Promise<object>} Reset statistics
+   */
+  async forceSessionReset() {
+    this.logger?.logWithTime("Force resetting all sessions", "info");
+    return await this.resetAllSessions();
+  }
+
+  /**
    * Start automatic session validation and cleanup
    */
   startSessionValidation() {
@@ -341,6 +354,58 @@ export class SessionManager {
         this.logger?.logWithTime(`Error in session validation cycle: ${error.message}`, "error");
       }
     }, this.SESSION_CONFIG.SESSION_VALIDATION_INTERVAL);
+  }
+
+  /**
+   * Start periodic session reset every 1 hour
+   */
+  startPeriodicSessionReset() {
+    setInterval(async () => {
+      try {
+        this.logger?.logWithTime("Starting periodic session reset (1 hour interval)", "info");
+        await this.resetAllSessions();
+      } catch (error) {
+        this.logger?.logWithTime(`Error in periodic session reset: ${error.message}`, "error");
+      }
+    }, this.SESSION_CONFIG.PERIODIC_RESET_INTERVAL);
+    
+    this.logger?.logWithTime(`Periodic session reset scheduled every ${this.SESSION_CONFIG.PERIODIC_RESET_INTERVAL / 60000} minutes`, "info");
+  }
+
+  /**
+   * Reset all sessions - clear everything and start fresh
+   * Similar to server startup behavior
+   */
+  async resetAllSessions() {
+    try {
+      const sessionCount = this.sessions.size;
+      const activeSessionCount = this.activeSessions.size;
+      
+      this.logger?.logWithTime(`Resetting all sessions - clearing ${sessionCount} sessions and ${activeSessionCount} active mappings`, "info");
+      
+      // Clear all session data
+      this.sessions.clear();
+      this.activeSessions.clear();
+      this.sessionRotationTimestamps.clear();
+      
+      // Clear session queue if any
+      this.sessionRotationQueue = [];
+      this.isRotatingSession = false;
+      
+      // Save empty state to file
+      await this.saveSessionsToFile();
+      
+      this.logger?.logWithTime(`Session reset complete - all sessions cleared and ready for fresh start`, "success");
+      
+      return {
+        clearedSessions: sessionCount,
+        clearedActiveSessions: activeSessionCount,
+        timestamp: Date.now()
+      };
+    } catch (error) {
+      this.logger?.logWithTime(`Error during session reset: ${error.message}`, "error");
+      throw error;
+    }
   }
 
   /**
@@ -465,6 +530,9 @@ export class SessionManager {
       validSessions,
       averageAge: Math.floor(avgAge / 60000), // in minutes
       oldestSession: sessionAges.length > 0 ? Math.floor(Math.max(...sessionAges) / 60000) : 0,
+      periodicResetInterval: Math.floor(this.SESSION_CONFIG.PERIODIC_RESET_INTERVAL / 60000), // in minutes
+      maxSessionAge: Math.floor(this.SESSION_CONFIG.MAX_SESSION_AGE / 60000), // in minutes
+      rotationInterval: Math.floor(this.SESSION_CONFIG.ROTATION_INTERVAL / 60000), // in minutes
     };
   }
 
@@ -486,4 +554,4 @@ export class SessionManager {
   }
 }
 
-export default SessionManager; 
+export default SessionManager;
