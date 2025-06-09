@@ -45,8 +45,10 @@ const generateCompositeKey = (record) => {
 };
 
 // Helper function to check if two records are identical (excluding inventory_id)
-const areRecordsIdentical = (record1, record2) => {
-  // Only compare important fields that should trigger a change in inventory_id
+// AGGRESSIVE UPDATE STRATEGY: Any change triggers complete row replacement
+const areRecordsIdentical = (record1, record2, changeTracker = null) => {
+  // Compare ALL important fields that should trigger a change in inventory_id
+  // This implements the user's requirement for aggressive updates
   const importantFields = [
     'section', 
     'row', 
@@ -55,19 +57,37 @@ const areRecordsIdentical = (record1, record2) => {
     'list_price',
     'face_price',
     'cost',
-    'in_hand_date'
+    'taxed_cost',
+    'in_hand_date',
+    'in_hand',
+    'instant_transfer',
+    'stock_type',
+    'hide_seats',
+    'internal_notes',
+    'public_notes',
+    'tags'
   ];
   
   for (const field of importantFields) {
-    // Only compare if both records have the field
-    if (record1[field] !== undefined || record2[field] !== undefined) {
-      // Convert to string for consistent comparison
-      const val1 = record1[field] !== undefined ? String(record1[field]) : '';
-      const val2 = record2[field] !== undefined ? String(record2[field]) : '';
-      
-      if (val1 !== val2) {
-        return false;
+    // Convert to string for consistent comparison, handle undefined/null
+    const val1 = (record1[field] !== undefined && record1[field] !== null) ? String(record1[field]).trim() : '';
+    const val2 = (record2[field] !== undefined && record2[field] !== null) ? String(record2[field]).trim() : '';
+    
+    if (val1 !== val2) {
+      // Track change instead of logging immediately
+      if (changeTracker) {
+        changeTracker.changes++;
+        if (changeTracker.changes <= 3) { // Only track first 3 examples
+          changeTracker.examples.push({
+            field,
+            section: record1.section,
+            row: record1.row,
+            oldValue: val1,
+            newValue: val2
+          });
+        }
       }
+      return false;
     }
   }
   
@@ -205,17 +225,24 @@ const generateCombinedCSVBackground = async () => {
         
         console.log(`CSV Filter: Found ${recentEventIds.size} events updated in last 6 minutes (out of ${allEventsData.size} total events)`);
         
-        // Create a set to track which existing records to keep
+        // AGGRESSIVE CLEANUP: Remove ALL records from events not updated in last 6 minutes
+        // This implements the user's requirement to exclude stale events completely
         const existingRecordsToKeep = new Set();
         
-        // Identify existing records from events that haven't been updated
+        // DO NOT keep any records from events that haven't been updated in 6 minutes
+        // This ensures complete removal of stale event inventory as requested
+        console.log(`🗑️  AGGRESSIVE CLEANUP: Removing ALL inventory from events not updated in last 6 minutes`);
+        
+        // Count how many records we're removing for logging
+        let removedRecordsCount = 0;
         for (const [compositeKey, record] of existingCsvData) {
           const sourceEventId = record.source_event_id;
-          // Keep record if its event wasn't updated recently
           if (sourceEventId && !recentEventIds.has(sourceEventId)) {
-            existingRecordsToKeep.add(compositeKey);
+            removedRecordsCount++;
           }
         }
+        
+        console.log(`🗑️  Removing ${removedRecordsCount} records from stale events (>6 minutes old)`);
         
         // Collect only records from events updated in the last 6 minutes
         const allRecords = [];
@@ -250,21 +277,19 @@ const generateCombinedCSVBackground = async () => {
           return;
         }
 
-        // Process records according to behavior rules
+        // Process records according to AGGRESSIVE UPDATE behavior rules
         const finalRecords = new Map(); // composite_key -> record
-        const newRecordsCount = { preserved: 0, updated: 0, created: 0, removed: 0 };
+        const newRecordsCount = { preserved: 0, updated: 0, created: 0, removed: removedRecordsCount };
         
-        // First, add all existing records that should be kept (from non-updated events)
-        for (const compositeKey of existingRecordsToKeep) {
-          const existingRecord = existingCsvData.get(compositeKey);
-          if (existingRecord) {
-            finalRecords.set(compositeKey, existingRecord);
-            newRecordsCount.preserved++;
-          }
-        }
+        // AGGRESSIVE STRATEGY: Only include records from recently updated events
+        // No existing records are preserved from stale events (>6 minutes)
+        console.log(`🔄 AGGRESSIVE UPDATE: Processing only records from ${recentEventIds.size} recently updated events`);
         
         // Process in chunks to avoid blocking
         const CHUNK_SIZE = 100; // Smaller chunks for better performance
+        
+        // Track changes for summary
+        const changeTracker = { changes: 0, examples: [] };
         
         for (let i = 0; i < allRecords.length; i += CHUNK_SIZE) {
           const chunk = allRecords.slice(i, i + CHUNK_SIZE);
@@ -288,7 +313,7 @@ const generateCombinedCSVBackground = async () => {
             
             if (existingRecord) {
               // Record exists - check if it's identical
-              if (areRecordsIdentical(record, existingRecord)) {
+              if (areRecordsIdentical(record, existingRecord, changeTracker)) {
                 // Identical record - preserve existing inventory_id
                 record.inventory_id = existingRecord.inventory_id;
                 newRecordsCount.preserved++;
@@ -352,9 +377,25 @@ const generateCombinedCSVBackground = async () => {
           setImmediate(async () => {
             try {
               await saveInventoryToCSV(formattedData, COMBINED_EVENTS_FILE);
-              console.log(`✅ Background: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recent events and kept records from ${excludedEvents} stale events`);
-              console.log(`📊 CSV Changes: ${newRecordsCount.preserved} preserved, ${newRecordsCount.updated} updated, ${newRecordsCount.created} created, ${newRecordsCount.removed} removed`);
-              console.log(`🚫 Excluded: ${excludedEvents} stale events (>6 min)`);
+              console.log(`✅ AGGRESSIVE UPDATE: Generated combined CSV with ${formattedData.length} records from ${includedEvents} recently updated events ONLY`);
+              console.log(`📊 CSV Changes: ${newRecordsCount.preserved} preserved, ${newRecordsCount.updated} updated, ${newRecordsCount.created} created, ${newRecordsCount.removed} removed from stale events`);
+              console.log(`🗑️  AGGRESSIVE CLEANUP: Completely removed ${excludedEvents} stale events (>6 min) and all their inventory`);
+              
+              // Show change summary instead of individual logs
+              if (changeTracker.changes > 0) {
+                console.log(`🔄 CHANGE SUMMARY: ${changeTracker.changes} field changes detected`);
+                if (changeTracker.examples.length > 0) {
+                  console.log(`📝 Examples (first ${changeTracker.examples.length}):`);
+                  changeTracker.examples.forEach((example, index) => {
+                    console.log(`   ${index + 1}. ${example.field} change in ${example.section}/${example.row}: "${example.oldValue}" → "${example.newValue}"`);
+                  });
+                  if (changeTracker.changes > changeTracker.examples.length) {
+                    console.log(`   ... and ${changeTracker.changes - changeTracker.examples.length} more changes`);
+                  }
+                }
+              } else {
+                console.log(`🔄 No field changes detected - all records identical`);
+              }
               resolve();
             } catch (error) {
               console.error(`Error in background CSV generation: ${error.message}`);
@@ -511,16 +552,18 @@ class InventoryController {
     
     return {
       success: true,
-      message: `CSV generation forced in background with behavior rules (6-minute cycle, UUID inventory_ids, composite key matching)`,
+      message: `CSV generation forced in background with AGGRESSIVE UPDATE strategy (6-minute cycle, complete stale event removal)`,
       filePath: COMBINED_EVENTS_FILE,
       recordCount: this.getTotalRecords(),
       eventCount: allEventsData.size,
       behaviorRules: {
         cycleInterval: "6 minutes",
-        inventoryIdGeneration: "uuid.v4() for new/changed records",
+        inventoryIdGeneration: "New numeric ID for ANY change in quantity, price, or attributes",
         compositeKeyMatching: "event_title + venue + datetime + event_code + section + row",
-        changeDetection: "Row-level updates with delete/insert logic",
-        duplicatePrevention: "Ensured via composite keys"
+        changeDetection: "AGGRESSIVE: Any field change triggers complete row replacement",
+        staleEventHandling: "COMPLETE REMOVAL: Events >6min old are entirely excluded from CSV",
+        duplicatePrevention: "Ensured via composite keys",
+        aggressiveUpdates: "Quantity, price, seat changes = delete old + insert new with new ID"
       }
     };
   }
@@ -571,10 +614,12 @@ class InventoryController {
       },
       behaviorRules: {
         generationInterval: "Every 6 minutes",
-        inventoryIdStrategy: "UUID v4 for new/changed records, preserve for identical",
+        inventoryIdStrategy: "AGGRESSIVE: New numeric ID for ANY change, preserve only for identical records",
         compositeKeyFields: ["event_name", "venue_name", "event_date", "event_id", "section", "row"],
-        changeDetectionLogic: "Delete existing + Insert new with new UUID",
-        duplicatePrevention: "Composite key uniqueness"
+        changeDetectionLogic: "AGGRESSIVE: Delete existing + Insert new with new ID on ANY field change",
+        staleEventHandling: "COMPLETE REMOVAL: Events >6min old entirely excluded from CSV",
+        duplicatePrevention: "Composite key uniqueness",
+        sensitiveFields: "quantity, price, seats, cost, notes, dates - ANY change triggers replacement"
       },
       eventStats: eventStats.sort((a, b) => (b.lastUpdate || 0) - (a.lastUpdate || 0))
     };
@@ -704,4 +749,4 @@ export const markEventScraped = () => {
   return { success: true, message: 'Event marking not needed in optimized mode' };
 };
 
-export default inventoryController; 
+export default inventoryController;
