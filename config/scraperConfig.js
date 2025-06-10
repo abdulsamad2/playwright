@@ -13,8 +13,8 @@ export default {
   BATCH_SIZE: Math.max(Math.floor(cpus().length * 0.9) * 2, 10), // Dynamic batch size based on CPU
   
   // Retry settings
-  MAX_RETRIES: 5, // Increased from 3
-  RETRY_BACKOFF_MS: 5000, // Base backoff time for retries
+  MAX_RETRIES: 20,
+  RETRY_BACKOFF_MS: 15000,
   
   // Batch processing
   CHUNK_SIZE: 100, // Chunk size for batch DB operations
@@ -31,4 +31,4 @@ export default {
   
   // Failure cleanup
   FAILURE_HISTORY_EXPIRY: 60 * 60 * 1000, // 1 hour
-}; 
+};
