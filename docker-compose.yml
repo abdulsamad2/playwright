@@ -1,0 +1,179 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: scraper-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: scraper
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d
+    networks:
+      - scraper-network
+
+  # Primary Instance - Handles coordination, cookies, CSV upload, and scraping
+  scraper-primary:
+    build: .
+    container_name: scraper-primary
+    restart: unless-stopped
+    environment:
+      - INSTANCE_TYPE=primary
+      - PORT=3000
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+      - NODE_ENV=production
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./cookies.json:/app/cookies.json
+      - ./sessions.json:/app/sessions.json
+    depends_on:
+      - mongodb
+    networks:
+      - scraper-network
+    command: ["node", "app.js", "--start-scraper"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Secondary Instance 1 - Scraping only
+  scraper-secondary-1:
+    build: .
+    container_name: scraper-secondary-1
+    restart: unless-stopped
+    environment:
+      - INSTANCE_TYPE=secondary
+      - PORT=3001
+      - PRIMARY_URL=http://scraper-primary:3000
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+      - NODE_ENV=production
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mongodb
+      - scraper-primary
+    networks:
+      - scraper-network
+    command: ["node", "app.js", "--start-scraper"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # Secondary Instance 2 - Scraping only
+  scraper-secondary-2:
+    build: .
+    container_name: scraper-secondary-2
+    restart: unless-stopped
+    environment:
+      - INSTANCE_TYPE=secondary
+      - PORT=3002
+      - PRIMARY_URL=http://scraper-primary:3000
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+    ports:
+      - "3002:3002"
+    depends_on:
+      - mongodb
+      - scraper-primary
+    networks:
+      - scraper-network
+    command: ["node", "app.js", "--start-scraper"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # Secondary Instance 3 - Scraping only
+  scraper-secondary-3:
+    build: .
+    container_name: scraper-secondary-3
+    restart: unless-stopped
+    environment:
+      - INSTANCE_TYPE=secondary
+      - PORT=3003
+      - PRIMARY_URL=http://scraper-primary:3000
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+      - NODE_ENV=production
+    ports:
+      - "3003:3003"
+    depends_on:
+      - mongodb
+      - scraper-primary
+    networks:
+      - scraper-network
+    command: ["node", "app.js", "--start-scraper"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # Secondary Instance 4 - Scraping only
+  scraper-secondary-4:
+    build: .
+    container_name: scraper-secondary-4
+    restart: unless-stopped
+    environment:
+      - INSTANCE_TYPE=secondary
+      - PORT=3004
+      - PRIMARY_URL=http://scraper-primary:3000
+      - DATABASE_URL=mongodb+srv://abdulsamadlaghari1:baAx0cXLpZCVmFhN@learning-with-mongoose.hrwr1gx.mongodb.net/scraper?retryWrites=true&w=majority&appName=Learning-with-mongoose
+      - NODE_ENV=production
+    ports:
+      - "3004:3004"
+    depends_on:
+      - mongodb
+      - scraper-primary
+    networks:
+      - scraper-network
+    command: ["node", "app.js", "--start-scraper"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # Nginx Load Balancer (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: scraper-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - scraper-primary
+      - scraper-secondary-1
+      - scraper-secondary-2
+      - scraper-secondary-3
+      - scraper-secondary-4
+    networks:
+      - scraper-network
+
+volumes:
+  mongodb_data:
+    driver: local
+
+networks:
+  scraper-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

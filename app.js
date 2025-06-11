@@ -13,10 +13,13 @@ import healthRoutes from "./routes/healthRoutes.js";
 import inventoryRoutes from "./routes/inventoryRoutes.js";
 import cookieRefreshRoutes from "./routes/cookieRefreshRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import coordinationRoutes from "./routes/coordinationRoutes.js";
 
 // Import global setup
 import setupGlobals from "./setup.js";
 import scraperManager from "./scraperManager.js"; // Added for command-line start and graceful shutdown
+import { ScaledScraperManager } from "./helpers/ScaledScraperManager.js";
+import { getCurrentInstanceConfig } from "./config/instanceConfig.js";
 
 dotenv.config();
 
@@ -68,6 +71,7 @@ app.use("/api/stats", statsRoutes);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/cookies", cookieRefreshRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/coordination", coordinationRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -91,22 +95,31 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
 
   // Add this after server starts listening
   server.on('listening', async () => {
+    let scaledScraperManager;
     try {
+      const instanceConfig = getCurrentInstanceConfig();
+      console.log(`Server started as ${instanceConfig.type} instance on port ${currentPort}`);
+      
       if (process.argv.includes('--start-scraper')) {
-        console.log('Initializing scraper with 5-second delay...');
+        console.log('Initializing scaled scraper with 5-second delay...');
         await new Promise(resolve => setTimeout(resolve, 5000));
         
-        if (!scraperManager.isRunning) {
-          console.log('Force-starting scraper...');
-          // Start scraper automatically on server start
-          await scraperManager.startContinuousScraping();
+        // Use ScaledScraperManager for horizontal scaling
+         scaledScraperManager = new ScaledScraperManager();
+         
+         if (!scaledScraperManager.isRunning) {
+           console.log(`Force-starting ${instanceConfig.type} scraper...`);
+           // Start scraper automatically on server start
+           await scaledScraperManager.startContinuousScraping();
           console.log('Scraper auto-started with server');
-          scraperManager.autoRestartMonitor.startMonitoring(); // Explicitly start monitoring
+          scaledScraperManager.autoRestartMonitor.startMonitoring(); // Explicitly start monitoring
         }
       }
     } catch (error) {
       console.error('Scraper initialization failed:', error);
-      scraperManager.autoRestartMonitor.recordFailure(); // Trigger auto-restart logic
+      if (scaledScraperManager && scaledScraperManager.autoRestartMonitor) {
+        scaledScraperManager.autoRestartMonitor.recordFailure(); // Trigger auto-restart logic
+      }
     }
   });
 

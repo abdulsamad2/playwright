@@ -452,15 +452,8 @@ return returnData.map(x=>{
   }
   else
   {
-    // Include seats even without offers by creating a default offer
-    const defaultOffer = {
-      offerId: x.offerId,
-      name: "General Admission",
-      faceValue: 0,
-      charges: [],
-      protected: false
-    };
-    return CreateInventoryAndLine(x, defaultOffer, event, descriptions);
+    // Don't add seats without offers
+    return undefined;
   }
 
  }).filter(x=>x!=undefined).filter((obj, index, self) => {
