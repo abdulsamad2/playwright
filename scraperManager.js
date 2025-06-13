@@ -2,34 +2,29 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
-import { cpus } from "os";
 import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
 import { v4 as uuidv4 } from 'uuid';
-import SyncService from './services/syncService.js';
-import nodeFs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
-import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
 
 // Add this at the top of the file, after imports
-export const ENABLE_CSV_PROCESSING = true; // Set to false to disable all CSV generation
+export const ENABLE_CSV_PROCESSING = false; // Set to false to disable all CSV generation
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
 const MAX_RETRIES = 25; // Increased from 20 for better recovery
 const SCRAPE_TIMEOUT = 45000; // Increased from 20 seconds to 45 seconds for better success rate
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 30000; // Reduced to 30 seconds for faster cycles
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 15000; // Reduced to 30 seconds for faster cycles
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 const EVENT_FAILURE_THRESHOLD = 120000; // Reduced to 2 minutes for faster recovery
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
 // Enhanced recovery settings for 1000+ events
-const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
 const MAX_RECOVERY_BATCHES = 20; // Increased from 10 for parallel processing
 const PARALLEL_BATCH_SIZE = 150; // Increased from 100 for better batching
 const MAX_PARALLEL_BATCHES = 25; // Increased from 20 for 1000+ events
