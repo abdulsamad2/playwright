@@ -257,7 +257,7 @@ const generateCombinedCSVBackground = async () => {
               ...record,
               event_name: record.event_name || eventDetails?.Event_Name || `Event ${eventId}`,
               venue_name: record.venue_name || eventDetails?.Venue || "Unknown Venue",
-              event_date: record.event_date || eventDetails?.Event_DateTime?.toISOString() || new Date().toISOString(),
+              event_date: record.event_date || (eventDetails?.Event_DateTime instanceof Date ? eventDetails.Event_DateTime.toISOString() : new Date().toISOString()),
               event_id: record.event_id || record.mapping_id || eventId,
               source_event_id: eventId,
               seats: record.seats // Removed fixSeatFormatting call

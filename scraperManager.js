@@ -2,21 +2,17 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
-import { cpus } from "os";
 import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
 import { v4 as uuidv4 } from 'uuid';
-import SyncService from './services/syncService.js';
-import nodeFs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
-import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
 import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
 
 // Add this at the top of the file, after imports
-export const ENABLE_CSV_PROCESSING = true; // Set to false to disable all CSV generation
+export const ENABLE_CSV_PROCESSING = false; // Set to false to disable all CSV generation
 export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
@@ -29,16 +25,10 @@ const EVENT_FAILURE_THRESHOLD = 120000; // Reduced to 2 minutes for faster recov
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
 // Enhanced recovery settings for 1000+ events
-const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
-const MAX_RECOVERY_BATCHES = 20; // Increased from 10 for parallel processing
 const PARALLEL_BATCH_SIZE = 150; // Increased from 100 for better batching
 const MAX_PARALLEL_BATCHES = 25; // Increased from 20 for 1000+ events
 
 // Multi-tier recovery intervals for aggressive processing
-const CRITICAL_RECOVERY_INTERVAL = 10000; // Check critical events every 10 seconds
-const AGGRESSIVE_RECOVERY_INTERVAL = 20000; // Check stale events every 20 seconds
-const STANDARD_RECOVERY_INTERVAL = 30000; // Check standard events every 30 seconds
-const AUTO_STOP_CHECK_INTERVAL = 60000; // Check auto-stop events every minute
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 3; // Default to warnings and errors only
@@ -99,9 +89,6 @@ const COOKIE_MANAGEMENT = {
 // CSV Upload Constants
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const DATA_DIR = path.join(__dirname, 'data');
-const COMPANY_ID = '702';
-const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q9eKV_Jt';
 const CSV_UPLOAD_INTERVAL = 6 * 60 * 1000; // 6 minutes in milliseconds
 
 
@@ -225,7 +212,7 @@ export class ScraperManager {
         .lean();
 
       // Fix for missing eventUrl - provide a fallback
-      const eventUrl = event?.url || `unknown-url-for-event-${eventId}`;
+      const eventUrl = event?.URL || `unknown-url-for-event-${eventId}`;
       const eventObjectId = event?._id || null;
 
       // Log to console first in case DB logging fails
@@ -495,7 +482,7 @@ export class ScraperManager {
       const eventDoc = await Event.findOne({ Event_ID: eventToUse })
         .select("url")
         .lean();
-      const refererUrl = eventDoc?.url || "https://www.ticketmaster.com/";
+      const refererUrl = eventDoc?.URL || "https://www.ticketmaster.com/";
       
       // More unique request ID format with microsecond precision
       const requestId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
@@ -819,16 +806,19 @@ export class ScraperManager {
     try {
       // Get event data upfront
       const event = await Event.findOne({ Event_ID: eventId })
-        .select("priceIncreasePercentage inHandDate mapping_id Available_Seats metadata")
+        .select("priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime",) // Added Event_Name, Venue, Event_DateTime
         .lean();
         
       if (!event) {
         throw new Error(`Event ${eventId} not found in database`);
       }
 
-      const priceIncreasePercentage = event.priceIncreasePercentage || 25;
-      const inHandDate = event.inHandDate || new Date();
+      const priceIncreasePercentage = event.priceIncreasePercentage 
+      const inHandDate = event.inHandDate // This is for seat level inHandDate
       const mapping_id = event.mapping_id;
+      const event_name = event.Event_Name;
+      const venue_name = event.Venue;
+      const event_date = event.Event_DateTime;
 
       if (!mapping_id) {
         throw new Error(`Event ${eventId} is missing required mapping_id`);
@@ -861,119 +851,173 @@ export class ScraperManager {
       const LOG_LEVEL = (global.config && typeof global.config.LOG_LEVEL !== 'undefined') ? global.config.LOG_LEVEL : (process.env.LOG_LEVEL || 2);
 
       if (validScrapeResult?.length > 0) {
-        // Fetch existing groups for comparison
+        // Fetch existing groups for efficient row-level comparison
         const existingGroups = await ConsecutiveGroup.find(
           { eventId }, 
-          { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 } // Assuming inventory.listPrice is comparable or seats have their own price
+          { section: 1, row: 1, seats: 1, seatCount: 1, "inventory.listPrice": 1, "inventory.inventoryId": 1, "inventory.quantity": 1 }
         ).lean();
 
-        const existingSeats = new Set(
-          existingGroups.flatMap((g) =>
-            g.seats.map((s) => `${g.section}-${g.row}-${s.number}-${s.price || g.inventory?.listPrice}`) // Use seat price, fallback to group price
-          )
-        );
-
-        const newSeats = new Set(
-          validScrapeResult.flatMap((g) =>
-            g.seats.map(
-              (s) => `${g.section}-${g.row}-${s}-${g.inventory.listPrice}` // Assuming g.inventory.listPrice is the comparable price for new seats
-            )
-          )
-        );
-
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(`[Debug SM ${eventId}] Existing Seats Count: ${existingSeats.size}`, "debug");
-          if (existingSeats.size > 0) this.logWithTime(`[Debug SM ${eventId}] Sample Existing Seats: ${Array.from(existingSeats).slice(0, 3).join(', ')}`, "debug");
-          this.logWithTime(`[Debug SM ${eventId}] New Seats Count: ${newSeats.size}`, "debug");
-          if (newSeats.size > 0) this.logWithTime(`[Debug SM ${eventId}] Sample New Seats: ${Array.from(newSeats).slice(0, 3).join(', ')}`, "debug");
-        }
-
-        const hasChanges =
-          existingSeats.size !== newSeats.size ||
-          [...existingSeats].some((s) => !newSeats.has(s)) ||
-          [...newSeats].some((s) => !existingSeats.has(s));
-
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(`[Debug SM ${eventId}] Change Detected for ConsecutiveGroup: ${hasChanges}`, "debug");
-        }
-
-        if (!hasChanges) {
-          if (LOG_LEVEL >= 3) {
-              this.logWithTime(`[Debug SM ${eventId}] No seat changes detected. Skipping ConsecutiveGroup update.`, "debug");
-          }
-        } else {
-          // First delete all existing groups for this event
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(`[Info SM ${eventId}] Deleting existing consecutive groups before inserting new ones.`, "info");
-          }
-          await ConsecutiveGroup.deleteMany({ eventId });
-          
-          // Prepare groups to insert
-          const groupsToInsert = validScrapeResult.map((group) => {
-            const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
-            const increasedPrice = basePrice * (1 + priceIncreasePercentage / 100);
-            const formattedInHandDate = inHandDate instanceof Date ? inHandDate : new Date();
-
-            return {
-              eventId,
-              mapping_id,
-              section: group.section,
-              row: group.row,
-              seatCount: group.inventory.quantity,
-              seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
-              seats: group.seats.map((seatNumber) => ({
-                number: seatNumber.toString(),
-                inHandDate: formattedInHandDate,
-                price: increasedPrice,
-                mapping_id,
-              })),
-              inventory: {
-                quantity: group.inventory.quantity,
-                section: group.section,
-                hideSeatNumbers: group.inventory.hideSeatNumbers || true,
-                row: group.row,
-                cost: group.inventory.cost,
-                stockType: group.inventory.stockType || "MOBILE_TRANSFER",
-                lineType: group.inventory.lineType,
-                seatType: group.inventory.seatType,
-                inHandDate: formattedInHandDate,
-                notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
-                tags: group.inventory.tags || "john drew don",
-                inventoryId: group.inventory.inventoryId,
-                offerId: group.inventory.offerId,
-                splitType: group.inventory.splitType || "CUSTOM",
-                publicNotes: group.inventory.publicNotes || `These are ${group.row} Row`,
-                listPrice: increasedPrice,
-                customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
-                mapping_id,
-                tickets: group.inventory.tickets.map((ticket) => ({
-                  id: ticket.id,
-                  seatNumber: ticket.seatNumber,
-                  notes: ticket.notes,
-                  cost: ticket.cost,
-                  faceValue: ticket.faceValue,
-                  taxedCost: ticket.taxedCost,
-                  sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice)
-                    ? ticket.sellPrice
-                    : parseFloat(ticket?.cost || ticket?.faceValue || 0),
-                  stockType: ticket.stockType,
-                  eventId: ticket.eventId,
-                  accountId: ticket.accountId,
-                  status: ticket.status,
-                  auditNote: ticket.auditNote,
-                  mapping_id: mapping_id,
-                })),
-              },
-            };
+        // Create maps for efficient lookups
+        const existingRowMap = new Map();
+        existingGroups.forEach(group => {
+          const rowKey = `${group.section}-${group.row}`;
+          existingRowMap.set(rowKey, {
+            seatCount: group.seatCount,
+            seats: group.seats.map(s => s.number).sort(),
+            price: group.inventory?.listPrice,
+            quantity: group.inventory?.quantity,
+            inventoryId: group.inventory?.inventoryId
           });
+        });
 
-          // Insert new groups in batches for better performance
-          if (groupsToInsert.length > 0) {
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(`[Info SM ${eventId}] Inserting ${groupsToInsert.length} consecutive groups.`, "info");
-            }
+        const newRowMap = new Map();
+        validScrapeResult.forEach(group => {
+          const rowKey = `${group.section}-${group.row}`;
+          const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
+          const increasedPrice = basePrice * (1 + priceIncreasePercentage / 100);
+          
+          newRowMap.set(rowKey, {
+            seatCount: group.inventory.quantity,
+            seats: group.seats.sort(),
+            price: increasedPrice,
+            quantity: group.inventory.quantity,
+            groupData: group
+          });
+        });
+
+        // Identify rows to delete, update, and insert
+        const rowsToDelete = [];
+        const rowsToInsert = [];
+        let unchangedRows = 0;
+
+        // Check for rows that need updates or deletions
+        for (const [rowKey, existingData] of existingRowMap) {
+          const newData = newRowMap.get(rowKey);
+          
+          if (!newData) {
+            // Row no longer exists in new data - mark for deletion
+            rowsToDelete.push(rowKey);
+          } else {
+            // Check if row data has changed
+            const seatsChanged = JSON.stringify(existingData.seats) !== JSON.stringify(newData.seats);
+            const priceChanged = Math.abs(existingData.price - newData.price) > 0.01;
+            const quantityChanged = existingData.quantity !== newData.quantity;
             
-            // Use insertMany with ordered:false for better performance
+            if (seatsChanged || priceChanged || quantityChanged) {
+              rowsToDelete.push(rowKey);
+              rowsToInsert.push({ rowKey, data: newData });
+            } else {
+              unchangedRows++;
+            }
+          }
+        }
+
+        // Check for new rows that don't exist in existing data
+        for (const [rowKey, newData] of newRowMap) {
+          if (!existingRowMap.has(rowKey)) {
+            rowsToInsert.push({ rowKey, data: newData });
+          }
+        }
+
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(`[Debug SM ${eventId}] Row Analysis - Unchanged: ${unchangedRows}, To Delete: ${rowsToDelete.length}, To Insert: ${rowsToInsert.length}`, "debug");
+        }
+
+        // Perform efficient updates only if there are changes
+        if (rowsToDelete.length > 0 || rowsToInsert.length > 0) {
+          // Delete changed/removed rows
+          if (rowsToDelete.length > 0) {
+            const deleteConditions = rowsToDelete.map(rowKey => {
+              const [section, row] = rowKey.split('-');
+              return { eventId, section, row };
+            });
+            
+            await ConsecutiveGroup.deleteMany({
+              $or: deleteConditions
+            });
+            
+            if (LOG_LEVEL >= 2) {
+              this.logWithTime(`[Info SM ${eventId}] Deleted ${rowsToDelete.length} changed/removed rows.`, "info");
+            }
+          }
+
+          // Insert new/updated rows with new inventory IDs
+          if (rowsToInsert.length > 0) {
+            const groupsToInsert = rowsToInsert.map(({ data }) => {
+              const group = data.groupData;
+              const formattedInHandDate = inHandDate instanceof Date ? inHandDate.toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
+              const increasedPrice = data.price;
+              return {
+                eventId,
+                mapping_id,
+                event_name,
+                venue_name,
+                event_date,
+                section: group.section,
+                row: group.row,
+                seatCount: group.inventory.quantity,
+                seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
+                seats: group.seats.map((seatNumber) => ({
+                  number: seatNumber.toString(),
+                  inHandDate: formattedInHandDate,
+                  price: increasedPrice,
+                  mapping_id,
+                })),
+                inventory: {
+                  inventoryId: group.inventory.inventoryId, // This will be the new unique ID from seatBatch.js
+                  quantity: group.inventory.quantity,
+                  section: group.section,
+                  hideSeatNumbers: group.inventory.hideSeatNumbers || true,
+                  row: group.row,
+                  cost: group.inventory.cost,
+                  stockType: group.inventory.stockType || "MOBILE_TRANSFER",
+                  lineType: group.inventory.lineType,
+                  seatType: group.inventory.seatType,
+                  inHandDate: formattedInHandDate,
+                  notes: group.inventory.notes,
+                  tags: group.inventory.tags,
+                  offerId: group.inventory.offerId,
+                  splitType: group.inventory.splitType || "CUSTOM",
+                  publicNotes: group.inventory.publicNotes,
+                  listPrice: increasedPrice,
+                  face_price: group.inventory.faceValue,
+                  taxed_cost: group.inventory.taxedCost,
+                  cost: group.inventory.cost,
+                  hide_seats: group.inventory.hideSeatNumbers || true,
+                  in_hand: typeof group.inventory.inHand === "boolean" ? group.inventory.inHand : true,
+                  in_hand_date: formattedInHandDate,
+                  instant_transfer: typeof group.inventory.instantTransfer === "boolean" ? group.inventory.instantTransfer : false,
+                  files_available: typeof group.inventory.filesAvailable === "boolean" ? group.inventory.filesAvailable : false,
+                  customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
+                  stock_type: group.inventory.stockType || "MOBILE_TRANSFER",
+                  zone: group.inventory.zone,
+                  shown_quantity: group.inventory.shownQuantity,
+                  passthrough: group.inventory.passthrough,
+                  mapping_id,
+                  event_name: event_name,
+                  venue_name: venue_name,
+                  event_date: event_date,
+                  eventId: eventId,
+                  tickets: group.inventory.tickets.map((ticket) => ({
+                    id: ticket.id,
+                    seatNumber: ticket.seatNumber,
+                    notes: ticket.notes,
+                    cost: ticket.cost,
+                    faceValue: ticket.faceValue,
+                    taxedCost: ticket.taxedCost,
+                    sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice) ? ticket.sellPrice : parseFloat(ticket?.cost || ticket?.faceValue || 0),
+                    stockType: ticket.stockType,
+                    eventId: ticket.eventId,
+                    accountId: ticket.accountId,
+                    status: ticket.status,
+                    auditNote: ticket.auditNote,
+                    mapping_id: mapping_id,
+                  })),
+                },
+              };
+            });
+
+            // Insert in batches for performance
             const BATCH_SIZE = 100;
             for (let i = 0; i < groupsToInsert.length; i += BATCH_SIZE) {
               const batch = groupsToInsert.slice(i, i + BATCH_SIZE);
@@ -981,10 +1025,14 @@ export class ScraperManager {
             }
             
             if (LOG_LEVEL >= 2) {
-              this.logWithTime(`[Info SM ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`, "info");
+              this.logWithTime(`[Info SM ${eventId}] Inserted ${groupsToInsert.length} new/updated rows with new inventory IDs.`, "info");
             }
           }
-        } // This closes the 'else' from 'if (!hasChanges)'
+        } else {
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(`[Debug SM ${eventId}] No row-level changes detected. Skipping database updates.`, "debug");
+          }
+        }
       } else if (validScrapeResult?.length === 0) {
           // Handle case where scrape result is empty: delete all existing groups for this eventId
           const existingGroupCount = await ConsecutiveGroup.countDocuments({ eventId });
@@ -1066,14 +1114,14 @@ export class ScraperManager {
       const inventoryRecords = validGroups.map((group) => {
         const basePrice = parseFloat(group.inventory.listPrice) || 0;
         const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
-        const formattedInHandDate = event?.inHandDate?.toISOString().split("T")[0];
+        const formattedInHandDate = event?.inHandDate instanceof Date ? event.inHandDate.toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
 
         // Minimal record structure for speed
         return {
           inventory_id: `${eventId}-${group.section}-${group.row}-${Date.now()}`, // Fast ID generation
           event_name: event?.Event_Name || `Event ${eventId}`,
           venue_name: event?.Venue || "Unknown Venue",
-          event_date: event?.Event_DateTime?.toISOString(),
+          event_date: event?.Event_DateTime instanceof Date ? event.Event_DateTime.toISOString() : new Date().toISOString(),
           event_id: mapping_id,
           quantity: group.inventory.quantity,
           section: group.section,
@@ -2087,10 +2135,6 @@ export class ScraperManager {
         // Rotate sessions via session manager with timeout
         try {
           const sessionPromise = this.sessionManager.forceSessionRotation();
-          const sessionResult = await Promise.race([
-            sessionPromise,
-            setTimeout(30000).then(() => { throw new Error("Session rotation timed out after 30 seconds"); })
-          ]);
           this.logWithTime("Successfully rotated all sessions", "success");
         } catch (sessionError) {
           this.logWithTime(`Error rotating sessions: ${sessionError.message}`, "error");
@@ -2100,10 +2144,6 @@ export class ScraperManager {
         // Force cookie reset with timeout
         try {
           const cookiePromise = this.resetCookiesAndHeaders();
-          const cookieResult = await Promise.race([
-            cookiePromise,
-            setTimeout(30000).then(() => { throw new Error("Cookie reset timed out after 30 seconds"); })
-          ]);
           this.logWithTime("Successfully reset all cookies and headers", "success");
         } catch (cookieError) {
           this.logWithTime(`Error resetting cookies: ${cookieError.message}`, "error");
@@ -2812,7 +2852,6 @@ export class ScraperManager {
       }
 
       // Track metrics to detect stuck loops
-      let lastEventsCount = 0;
       let sameEventsCounter = 0;
       let lastEventIds = [];
 
@@ -3774,7 +3813,6 @@ export class ScraperManager {
   startPerformanceMonitoring() {
     let monitoringCycleCount = 0;
     const processedEvents = new Set(); // Track processed events
-    let lastSuccessfulScrapeTime = Date.now(); // Track last successful scrape time
     
     setInterval(async () => {
       monitoringCycleCount++;
@@ -3838,12 +3876,12 @@ export class ScraperManager {
       // CSV processing status
       if (stats.csvProcessingActive) {
         this.logWithTime(
-          `CSV Processing: Active (${stats.csvQueueLength} in queue)`,
+          `CSV Processing: Active (${stats.queueLength} in queue)`,
           "info"
         );
-      } else if (stats.csvQueueLength > 0) {
+      } else if (stats.queueLength > 0) {
         this.logWithTime(
-          `CSV Processing: Idle with ${stats.csvQueueLength} pending`,
+          `CSV Processing: Idle with ${stats.queueLength} pending`,
           "warning"
         );
       }
@@ -4135,7 +4173,7 @@ export class ScraperManager {
       // Log to error log for audit trail
       await this.logError(
         eventId,
-        "EVENT_STOPPED",
+        "SCRAPE_ERROR",
         new Error(`Event scraping stopped: ${reason}`),
         {
           reason,
