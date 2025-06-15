@@ -65,6 +65,10 @@ const ticketSchema = new mongoose.Schema({
 // Consecutive Group Schema
 const consecutiveGroupSchema = new mongoose.Schema(
   {
+    inHandDate: {
+      type: Date,
+      required: true,
+    },
     eventId: {
       type: String,
       required: true,

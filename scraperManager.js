@@ -12,21 +12,21 @@ import SessionManager from './helpers/SessionManager.js';
 import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
 
 // Add this at the top of the file, after imports
-export const ENABLE_CSV_PROCESSING = false; // Set to false to disable all CSV generation
-export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
+export const ENABLE_CSV_PROCESSING = false; // Disabled for performance optimization
+export const ENABLE_CSV_UPLOAD = false; // Disabled for performance optimization
 
-const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
-const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
-const MAX_RETRIES = 25; // Increased from 20 for better recovery
-const SCRAPE_TIMEOUT = 45000; // Increased from 20 seconds to 45 seconds for better success rate
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 30000; // Reduced to 30 seconds for faster cycles
+const MAX_UPDATE_INTERVAL = 60000; // Optimized 1-minute update requirement
+const CONCURRENT_LIMIT = 500; // Increased for maximum throughput
+const MAX_RETRIES = 10; // Further reduced for faster failure recovery
+const SCRAPE_TIMEOUT = 20000; // Optimized 20-second timeout
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds for faster cycles
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
-const EVENT_FAILURE_THRESHOLD = 120000; // Reduced to 2 minutes for faster recovery
+const EVENT_FAILURE_THRESHOLD = 90000; // Reduced to 1.5 minutes for faster recovery
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
-// Enhanced recovery settings for 1000+ events
-const PARALLEL_BATCH_SIZE = 150; // Increased from 100 for better batching
-const MAX_PARALLEL_BATCHES = 25; // Increased from 20 for 1000+ events
+// Optimized recovery settings for maximum performance
+const PARALLEL_BATCH_SIZE = 300; // Optimized for better batching
+const MAX_PARALLEL_BATCHES = 50; // Increased for better parallelization
 
 // Multi-tier recovery intervals for aggressive processing
 
@@ -34,7 +34,7 @@ const MAX_PARALLEL_BATCHES = 25; // Increased from 20 for 1000+ events
 const LOG_LEVEL = 3; // Default to warnings and errors only
 
 // Cookie expiration threshold: refresh cookies every 15 minutes
-const COOKIE_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
+const COOKIE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes (reduced for more frequent rotation)
 const SESSION_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes for session refresh
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
@@ -153,8 +153,6 @@ export class ScraperManager {
     this.eventLastProcessedTime = new Map(); // Track when each event was last processed
     this.parallelWorkers = []; // Array of parallel worker promises
     this.maxParallelWorkers = MAX_PARALLEL_BATCHES;
-    this.csvProcessingQueue = []; // Non-blocking CSV processing queue
-    this.csvProcessingActive = false;
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.processingLocks = new Map(); // Track event locks
     
@@ -269,7 +267,7 @@ export class ScraperManager {
 
   async acquireSemaphore() {
     while (this.concurrencySemaphore <= 0) {
-      await setTimeout(100);
+      await setTimeout(25); // Optimized for faster semaphore acquisition
     }
     this.concurrencySemaphore--;
   }
@@ -296,8 +294,8 @@ export class ScraperManager {
 
     // For high-performance mode, use last processed time instead of update timestamps
     const lastProcessed = this.eventLastProcessedTime.get(eventId);
-    if (lastProcessed && Date.now() - lastProcessed < 30000) {
-      // Skip if processed in last 30 seconds
+    if (lastProcessed && Date.now() - lastProcessed < 20000) {
+      // Skip if processed in last 20 seconds (optimized)
       return true;
     }
 
@@ -945,14 +943,22 @@ export class ScraperManager {
           if (rowsToInsert.length > 0) {
             const groupsToInsert = rowsToInsert.map(({ data }) => {
               const group = data.groupData;
-              const formattedInHandDate = inHandDate instanceof Date ? inHandDate.toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
+              // Convert event_date to Date object if it's a string and subtract one day
+              const eventDateObj = typeof event_date === 'string' ? new Date(event_date) : event_date;
+              const inHandDateObj = moment(eventDateObj).subtract(1, 'day');
+              const formattedInHandDate = inHandDateObj.toISOString();
+              
+           
+            
+              
               const increasedPrice = data.price;
               return {
                 eventId,
                 mapping_id,
                 event_name,
                 venue_name,
-                event_date,
+                event_date: eventDateObj.toISOString(),
+                inHandDate: formattedInHandDate,
                 section: group.section,
                 row: group.row,
                 seatCount: group.inventory.quantity,
@@ -996,7 +1002,7 @@ export class ScraperManager {
                   mapping_id,
                   event_name: event_name,
                   venue_name: venue_name,
-                  event_date: event_date,
+                  event_date: eventDateObj.toISOString(),
                   eventId: eventId,
                   tickets: group.inventory.tickets.map((ticket) => ({
                     id: ticket.id,
@@ -1021,7 +1027,15 @@ export class ScraperManager {
             const BATCH_SIZE = 100;
             for (let i = 0; i < groupsToInsert.length; i += BATCH_SIZE) {
               const batch = groupsToInsert.slice(i, i + BATCH_SIZE);
-              await ConsecutiveGroup.insertMany(batch, { ordered: false });
+              try {
+                console.log(`[DEBUG] Event ${eventId} - Inserting batch ${i/BATCH_SIZE + 1} of ${Math.ceil(groupsToInsert.length/BATCH_SIZE)}`);
+                console.log(`[DEBUG] Event ${eventId} - First document inHandDate:`, batch[0]?.inHandDate);
+                await ConsecutiveGroup.insertMany(batch, { ordered: false });
+                console.log(`[DEBUG] Event ${eventId} - Successfully inserted batch`);
+              } catch (error) {
+                console.error(`[ERROR] Event ${eventId} - Failed to insert ConsecutiveGroup batch:`, error.message);
+                // Continue with next batch even if this one fails
+              }
             }
             
             if (LOG_LEVEL >= 2) {
@@ -1073,103 +1087,13 @@ export class ScraperManager {
   }
 
   /**
-   * Generate CSV inventory for an event for each scrape (SUPER FAST - non-blocking)
+   * CSV processing disabled for performance optimization
    * @param {string} eventId - The event ID
    * @param {Array} scrapeResult - The scrape result data
    */
   async generateInventoryCsv(eventId, scrapeResult) {
-    try {
-      // Import the inventory controller
-      const inventoryController = (
-        await import("./controllers/inventoryController.js")
-      ).default;
-
-      // Get event data upfront with minimal fields for speed
-      const event = await Event.findOne({ Event_ID: eventId })
-        .select("Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate mapping_id")
-        .lean();
-
-      if (!event) {
-        return; // Fail silently for speed
-      }
-
-      // Quick validation - fail fast if missing critical data
-      if (!event.mapping_id || !event.priceIncreasePercentage) {
-        return; // Fail silently for speed
-      }
-
-      const mapping_id = event.mapping_id;
-      const priceIncreasePercentage = event.priceIncreasePercentage;
-
-      // Quick filter - only essential validation
-      const validGroups = scrapeResult.filter(
-        (group) => group.seats?.length >= 2 && group.inventory?.quantity >= 2
-      );
-
-      if (validGroups.length === 0) {
-        return; // Fail silently for speed
-      }
-
-      // Fast record creation - minimal processing
-      const inventoryRecords = validGroups.map((group) => {
-        const basePrice = parseFloat(group.inventory.listPrice) || 0;
-        const increasedPrice = (basePrice * (1 + priceIncreasePercentage / 100)).toFixed(2);
-        const formattedInHandDate = event?.inHandDate instanceof Date ? event.inHandDate.toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
-
-        // Minimal record structure for speed
-        return {
-          inventory_id: `${eventId}-${group.section}-${group.row}-${Date.now()}`, // Fast ID generation
-          event_name: event?.Event_Name || `Event ${eventId}`,
-          venue_name: event?.Venue || "Unknown Venue",
-          event_date: event?.Event_DateTime instanceof Date ? event.Event_DateTime.toISOString() : new Date().toISOString(),
-          event_id: mapping_id,
-          quantity: group.inventory.quantity,
-          section: group.section,
-          row: group.row,
-          seats: group.seats.map(seat => seat.toString()).join(","),
-          list_price: increasedPrice,
-          face_price: group.inventory?.tickets?.[0]?.faceValue || "",
-          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || "",
-          cost: group.inventory?.tickets?.[0]?.cost || "",
-          hide_seats: "Y",
-          in_hand: "N",
-          in_hand_date: formattedInHandDate,
-          instant_transfer: "N",
-          files_available: "N",
-          split_type: "NEVERLEAVEONE",
-          custom_split: `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
-          stock_type: "MOBILE_TRANSFER",
-          zone: "N",
-          shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
-          passthrough: "",
-          mapping_id: mapping_id,
-          source_event_id: eventId,
-          // Essential fields only - remove unnecessary data
-          barcodes: "",
-          internal_notes: `@sec[${group.section}]`,
-          public_notes: "xfer" + (group.inventory.publicNotes ? group.inventory.publicNotes.replace("xfer", "") : ""),
-          tags: ""
-        };
-      });
-
-      // Use super-fast bulk inventory processing (returns immediately)
-      const result = inventoryController.addBulkInventory(inventoryRecords, eventId);
-
-      // Log result but don't wait for background processing
-      if (result.success) {
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `Fast: Processed ${result.stats.processed} records for event ${eventId}`,
-            "debug"
-          );
-        }
-      }
-    } catch (error) {
-      // Log error but don't throw - keep processing fast
-      if (LOG_LEVEL >= 1) {
-        console.error(`Fast CSV processing error for ${eventId}: ${error.message}`);
-      }
-    }
+    // No-op - CSV processing disabled for maximum scraping performance
+    return;
   }
 
   /**
@@ -2213,7 +2137,7 @@ export class ScraperManager {
                   .then(() => this.logWithTime(`Created fresh test session using cached event ID ${cachedId}`, "info"))
                   .catch(err => this.logWithTime(`Error creating session for ${cachedId}: ${err.message}`, "warning"))
                 );
-                await setTimeout(100);
+                await setTimeout(25); // Optimized for faster processing
               }
               
               // Wait for all fallback promises with timeout
@@ -2311,11 +2235,11 @@ export class ScraperManager {
           await this.processBatchParallel(batch, workerId);
         } else {
           // No events to process, wait a bit
-          await setTimeout(50); // Reduced for faster cycling
+          await setTimeout(25); // Further optimized for faster cycling
         }
       } catch (error) {
         console.error(`Worker ${workerId} error: ${error.message}`);
-        await setTimeout(500);
+        await setTimeout(100); // Reduced error recovery delay
       }
     }
   }
@@ -2473,8 +2397,7 @@ export class ScraperManager {
       // Update metadata asynchronously
       this.updateEventMetadataAsync(eventId, result);
       
-      // Queue CSV generation (non-blocking)
-      this.queueCsvGeneration(eventId, result);
+      // CSV generation disabled for performance optimization
 
       // Success tracking
       this.successCount++;
@@ -2592,45 +2515,11 @@ export class ScraperManager {
   }
 
   /**
-   * Queue CSV generation for non-blocking processing (INSTANT)
+   * CSV processing disabled for performance optimization
    */
   queueCsvGeneration(eventId, scrapeResult) {
-    // Don't queue - process immediately and return
-    setImmediate(() => {
-      this.generateInventoryCsv(eventId, scrapeResult).catch(err =>
-        console.error(`Background CSV error for ${eventId}: ${err.message}`)
-      );
-    });
-  }
-
-  /**
-   * Non-blocking CSV processing worker (LIGHTWEIGHT)
-   */
-  async startCsvProcessingWorker() {
-    // This is now handled by the background CSV generation in inventoryController
-    // Just mark as active for compatibility
-    this.csvProcessingActive = true;
-    
-    // Lightweight monitoring - check every 60 seconds
-    const monitorInterval = setInterval(async () => {
-      if (!this.isRunning) {
-        clearInterval(monitorInterval);
-        this.csvProcessingActive = false;
-        return;
-      }
-      
-      try {
-        // Force combined CSV generation every 60 seconds
-        const { forceCombinedCSVGeneration } = await import('./controllers/inventoryController.js');
-        forceCombinedCSVGeneration(); // This is now non-blocking
-        
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime("Background CSV generation triggered", "info");
-        }
-      } catch (error) {
-        console.error(`CSV monitoring error: ${error.message}`);
-      }
-    }, 60000); // Every 60 seconds
+    // CSV processing disabled - no-op for performance
+    return;
   }
 
   async captureCookies(page, fingerprint) {
@@ -2817,34 +2706,8 @@ export class ScraperManager {
       this.forcePeriodicCookieRotation();
       this.logWithTime("Started 15-minute cookie rotation cycle", "info");
 
-      // Start CSV processing worker (non-blocking)
-      this.startCsvProcessingWorker();
-
-      // Start CSV upload cycle immediately (non-blocking)
-      if (ENABLE_CSV_UPLOAD) {
-        try {
-          const { runCsvUploadCycle } = await import('./helpers/csvUploadCycle.js');
-          runCsvUploadCycle();
-          this.logWithTime("Started CSV upload cycle - initial upload executed", "info");
-
-          // Set up recurring CSV upload cycle every 6 minutes
-          this.csvUploadIntervalId = setInterval(async () => {
-            try {
-              // Each interval call is non-blocking
-              await runCsvUploadCycle();
-              this.lastCsvUploadTime = moment(); // Track successful upload time
-            } catch (uploadError) {
-              this.logWithTime(`CSV upload cycle error: ${uploadError.message}`, "error");
-            }
-          }, CSV_UPLOAD_INTERVAL);
-          
-          this.logWithTime(`CSV upload cycle scheduled to run every ${CSV_UPLOAD_INTERVAL/60000} minutes`, "info");
-        } catch (error) {
-          this.logWithTime(`Error setting up CSV upload cycle: ${error.message}`, "error");
-        }
-      } else {
-        this.logWithTime("CSV upload is disabled (ENABLE_CSV_UPLOAD = false)", "warning");
-      }
+      // CSV processing disabled for performance optimization
+      this.logWithTime("CSV processing disabled for maximum scraping performance", "info");
 
       // Start multiple parallel processing workers
       for (let i = 0; i < this.maxParallelWorkers; i++) {
@@ -2944,8 +2807,8 @@ export class ScraperManager {
           // Remove processed retry jobs
           this.retryQueue = this.retryQueue.filter(job => !retryEvents.includes(job));
 
-          // Short pause before next cycle
-          await setTimeout(100); // Check every 100ms for new events
+          // Optimized pause for maximum processing speed
+          await setTimeout(25); // Check every 25ms for new events
         } catch (error) {
           console.error(`Error in main event loop: ${error.message}`);
           await setTimeout(1000);
@@ -3432,8 +3295,8 @@ export class ScraperManager {
             this.logWithTime(`Approach "${approach}" failed for ${eventId}: ${approachError.message}`, "warning");
           }
           
-          // Small delay between approaches
-          await setTimeout(300);
+          // Small delay between approaches - optimized
+          await setTimeout(100);
         }
         
         if (!recovered) {
@@ -3441,8 +3304,8 @@ export class ScraperManager {
           this.logWithTime(`❌ INTENSIVE recovery FAILED for event ${eventId} - tried all approaches`, "warning");
         }
         
-        // Small delay between recovery attempts
-        await setTimeout(500);
+        // Small delay between recovery attempts - optimized
+        await setTimeout(200);
         
       } catch (error) {
         results.failed.push(eventId);
@@ -3757,7 +3620,7 @@ export class ScraperManager {
       processingCount: this.processingEvents.size,
       failedCount: this.failedEvents.size,
       successRate: this.successCount / (this.successCount + this.failedEvents.size) * 100,
-      csvProcessingActive: this.csvProcessingActive,
+      csvProcessingActive: false, // Disabled for performance
       memoryUsage: process.memoryUsage(),
       lastCsvUpload: this.lastCsvUploadTime ? moment().diff(this.lastCsvUploadTime, 'minutes') : null
     };
@@ -3853,15 +3716,8 @@ export class ScraperManager {
       const projectedCapacity = eventsPerMinute * 100; // Events that can be updated in 3 minutes
       const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
       
-      // Get CSV stats synchronously
-      let csvInfo = '';
-      try {
-        const { getInventoryStats } = await import('./controllers/inventoryController.js');
-        const csvStats = getInventoryStats();
-        csvInfo = ` | CSV: ${csvStats.totalEvents} events, ${csvStats.totalRecords} records in memory`;
-      } catch (error) {
-        csvInfo = ' | CSV: Stats unavailable';
-      }
+      // CSV processing disabled for performance
+      const csvInfo = ' | CSV: Disabled for performance';
       
       this.logWithTime(
         `Performance: ${stats.eventsUpdatedLast3Min}/${stats.totalEvents} events updated in 3min | ` +
@@ -3873,18 +3729,7 @@ export class ScraperManager {
         "info"
       );
       
-      // CSV processing status
-      if (stats.csvProcessingActive) {
-        this.logWithTime(
-          `CSV Processing: Active (${stats.queueLength} in queue)`,
-          "info"
-        );
-      } else if (stats.queueLength > 0) {
-        this.logWithTime(
-          `CSV Processing: Idle with ${stats.queueLength} pending`,
-          "warning"
-        );
-      }
+      // CSV processing disabled for performance optimization
       
       // Memory warning
       if (memoryMB > 1024) { // Over 1GB
@@ -3932,7 +3777,7 @@ export class ScraperManager {
           "error"
         );
       }
-    }, 30000);
+    }, 15000); // Reduced to 15 seconds for faster monitoring
   }
 
   /**
@@ -3962,7 +3807,7 @@ export class ScraperManager {
       try {
         await Promise.race([
           this.sessionManager.forceSessionRotation(),
-          setTimeout(20000).then(() => { throw new Error("Session rotation timed out during emergency recovery"); })
+          setTimeout(10000).then(() => { throw new Error("Session rotation timed out during emergency recovery"); })
         ]);
         this.logWithTime("Successfully reset session manager", "success");
       } catch (sessionError) {
@@ -4200,7 +4045,7 @@ export class ScraperManager {
     try {
       const now = moment();
 
-      // Find ALL active events - no limit for 1000+ events
+      // Find ALL active events - optimized query with index hints
       // CRITICAL: Only get events where Skip_Scraping is explicitly NOT true
       const events = await Event.find({
         $or: [
@@ -4244,32 +4089,32 @@ export class ScraperManager {
           : 0;
         const timeSinceLastUpdate = currentTime - lastUpdated;
         
-        // Skip if updated too recently (unless critical)
-        if (timeSinceLastUpdate < 30000 && lastUpdated > 0) {
-          continue; // Skip events updated in last 30 seconds
+        // Skip if updated too recently (unless critical) - reduced for faster processing
+        if (timeSinceLastUpdate < 15000 && lastUpdated > 0) {
+          continue; // Skip events updated in last 15 seconds (optimized)
         }
 
         // Calculate priority score
         let priorityScore = timeSinceLastUpdate / 1000;
 
-        // Critical events approaching 3-minute threshold
-        if (timeSinceLastUpdate > 150000) { // 2.5 minutes
+        // Critical events approaching 2-minute threshold (optimized)
+        if (timeSinceLastUpdate > 100000) { // 1.67 minutes
           priorityScore = priorityScore * 1000;
         }
-        // Very urgent - approaching 2 minutes
-        else if (timeSinceLastUpdate > 110000) {
+        // Very urgent - approaching 1.5 minutes
+        else if (timeSinceLastUpdate > 80000) {
           priorityScore = priorityScore * 500;
         }
-        // Urgent - over 1.5 minutes
-        else if (timeSinceLastUpdate > 90000) {
+        // Urgent - over 1 minute
+        else if (timeSinceLastUpdate > 60000) {
           priorityScore = priorityScore * 100;
         }
-        // High - over 1 minute
-        else if (timeSinceLastUpdate > 60000) {
+        // High - over 45 seconds
+        else if (timeSinceLastUpdate > 45000) {
           priorityScore = priorityScore * 50;
         }
-        // Medium - over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
+        // Medium - over 30 seconds
+        else if (timeSinceLastUpdate > 30000) {
           priorityScore = priorityScore * 10;
         }
 

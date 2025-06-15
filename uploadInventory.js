@@ -14,7 +14,7 @@ const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q
 
 // Directory for CSV files
 const DATA_DIR = path.join(__dirname, 'data');
-const BLANK_CSV_PATH = path.join(DATA_DIR, 'blank.csv');
+const BLANK_CSV_PATH = path.join(DATA_DIR, "all_events_combined.csv");
 
 // Ensure blank CSV exists
 export function ensureBlankCsvExists(headersArray) {
