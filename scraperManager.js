@@ -897,8 +897,9 @@ export class ScraperManager {
             const seatsChanged = JSON.stringify(existingData.seats) !== JSON.stringify(newData.seats);
             const priceChanged = Math.abs(existingData.price - newData.price) > 0.01;
             const quantityChanged = existingData.quantity !== newData.quantity;
+            const inventoryIdChanged = existingData.inventoryId !== newData.groupData.inventory.inventoryId;
             
-            if (seatsChanged || priceChanged || quantityChanged) {
+            if (seatsChanged || priceChanged || quantityChanged || inventoryIdChanged) {
               rowsToDelete.push(rowKey);
               rowsToInsert.push({ rowKey, data: newData });
             } else {
