@@ -86,10 +86,9 @@ const COOKIE_MANAGEMENT = {
   },
 };
 
-// CSV Upload Constants
+// CSV Upload Constants removed
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const CSV_UPLOAD_INTERVAL = 6 * 60 * 1000; // 6 minutes in milliseconds
 
 
 export class ScraperManager {
@@ -143,9 +142,7 @@ export class ScraperManager {
     this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
     
-    // CSV upload tracking
-    this.lastCsvUploadTime = null; // Track last successful CSV upload
-    this.csvUploadIntervalId = null; // Track the interval ID for clean shutdown
+    // CSV upload tracking removed
     
     // New: High-performance event processing
     this.eventProcessingQueue = []; // Queue of events to process
@@ -1557,8 +1554,7 @@ export class ScraperManager {
 
       await this.updateEventMetadata(eventId, result);
 
-      // Generate fresh CSV inventory for each scrape (non-blocking)
-      this.queueCsvGeneration(eventId, result);
+      // CSV generation removed
 
       // Success! If this event was previously failing, update its status in DB
       const recentFailures = this.getRecentFailureCount(eventId);
@@ -1886,24 +1882,7 @@ export class ScraperManager {
       this.logWithTime("Cookie rotation cycle stopped", "info");
     }
     
-    // Clear the CSV upload interval if it exists
-    if (this.csvUploadIntervalId) {
-      clearInterval(this.csvUploadIntervalId);
-      this.csvUploadIntervalId = null;
-      this.logWithTime("CSV upload cycle stopped", "info");
-    }
-    
-    // Run one final CSV upload to ensure latest data is uploaded
-    if (ENABLE_CSV_UPLOAD) {
-      try {
-        this.logWithTime("Running final CSV upload before shutdown", "info");
-        const { runCsvUploadCycle } = await import('./helpers/csvUploadCycle.js');
-        await runCsvUploadCycle();
-        this.logWithTime("Final CSV upload completed", "success");
-      } catch (error) {
-        this.logWithTime(`Error in final CSV upload: ${error.message}`, "error");
-      }
-    }
+    // CSV upload functionality removed
     
     // Release any active proxies
     this.proxyManager.releaseAllProxies();
@@ -3367,8 +3346,12 @@ export class ScraperManager {
         "error"
       );
 
-      // Clean up tracking for auto-stopped events
+      // Clean up consecutive seats and tracking for auto-stopped events
       for (const eventId of confirmedStaleEvents) {
+        // Clean up consecutive seats for stopped event
+        if (this.databaseManager) {
+          await this.databaseManager.cleanupConsecutiveSeats(eventId);
+        }
         // Complete cleanup of all tracking data
         this.cleanupEventTracking(eventId);
         
@@ -3400,17 +3383,7 @@ export class ScraperManager {
         );
       }
 
-      // Force a CSV regeneration to exclude stopped events
-      try {
-        const { forceCombinedCSVGeneration } = await import('./controllers/inventoryController.js');
-        forceCombinedCSVGeneration();
-        this.logWithTime(
-          `📊 Forced CSV regeneration to exclude ${confirmedStaleEvents.length} auto-stopped events`,
-          "info"
-        );
-      } catch (csvError) {
-        this.logWithTime(`Error forcing CSV regeneration: ${csvError.message}`, "warning");
-      }
+      // CSV regeneration removed
 
     } catch (error) {
       this.logWithTime(`Error auto-stopping stale events: ${error.message}`, "error");
@@ -3622,7 +3595,7 @@ export class ScraperManager {
       successRate: this.successCount / (this.successCount + this.failedEvents.size) * 100,
       csvProcessingActive: false, // Disabled for performance
       memoryUsage: process.memoryUsage(),
-      lastCsvUpload: this.lastCsvUploadTime ? moment().diff(this.lastCsvUploadTime, 'minutes') : null
+      // CSV upload tracking removed
     };
 
     // Get currently active events from database to filter tracking
@@ -4011,6 +3984,11 @@ export class ScraperManager {
         `🚫 STOPPED event ${eventId}: Skip_Scraping = true (Reason: ${reason}, Retries: ${retryCount}/${retryLimit}, Time since update: ${Math.floor(timeSinceUpdate/1000)}s) - excluded from future scraping`,
         "warning"
       );
+      
+      // Clean up consecutive seats for stopped event
+      if (this.databaseManager) {
+        await this.databaseManager.cleanupConsecutiveSeats(eventId);
+      }
       
       // Clean up all tracking data for this event
       this.cleanupEventTracking(eventId);

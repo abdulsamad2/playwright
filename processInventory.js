@@ -4,12 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { 
-  processInventoryCSV, 
-  validateConsecutiveSeats, 
-  readInventoryFromCSV, 
-  saveInventoryToCSV 
-} from './helpers/csvInventoryHelper.js';
+// CSV helper imports removed - functionality disabled
 import {
   startScrapeCycle,
   markEventScraped,
@@ -30,16 +25,9 @@ program
   .description('Check if a seat string has consecutive seats')
   .argument('<seats>', 'Comma separated seat numbers to check')
   .action((seats) => {
-    console.log(chalk.blue('Checking seat sequence:'), seats);
-    
-    const result = validateConsecutiveSeats(seats);
-    
-    if (result.valid) {
-      console.log(chalk.green('✓ Seats are consecutive'));
-    } else {
-      console.log(chalk.red('✗ Seats are not consecutive'));
-      console.log(chalk.yellow('Suggested fix:'), result.fixedSeats);
-    }
+    // CSV validation disabled - helper functions removed
+    console.error(chalk.red('Error: CSV validation functionality has been disabled'));
+    process.exit(1);
   });
 
 // Command to process a full CSV file
@@ -62,24 +50,9 @@ program
         `${path.basename(input, path.extname(input))}-fixed${path.extname(input)}`
       );
     
-    console.log(chalk.blue('Processing inventory file:'), input);
-    console.log(chalk.blue('Output will be saved to:'), outputFile);
-    
-    // Process the file
-    const stats = await processInventoryCSV(input, outputFile);
-    
-    // Report results
-    console.log('\nProcessing complete:');
-    console.log(chalk.blue(`Total records: ${stats.total}`));
-    console.log(chalk.yellow(`Records fixed: ${stats.fixed}`));
-    console.log(chalk.red(`Errors: ${stats.errors}`));
-    console.log(chalk.yellow(`Records skipped (single seats): ${stats.skipped}`));
-    
-    if (stats.fixed > 0) {
-      console.log(chalk.green(`\nFixed file saved to: ${outputFile}`));
-    } else if (stats.total > 0 && stats.errors === 0) {
-      console.log(chalk.green('\nAll records were already valid!'));
-    }
+    // CSV processing disabled - helper functions removed
+    console.error(chalk.red('Error: CSV processing functionality has been disabled'));
+    process.exit(1);
   });
 
 // Command to extract a single record for examination
@@ -100,26 +73,9 @@ program
       process.exit(1);
     }
     
-    // Read the inventory data
-    const records = await readInventoryFromCSV(input);
-    
-    // Find the record with the matching ID
-    const record = records.find(r => r.inventory_id === options.id);
-    
-    if (!record) {
-      console.error(chalk.red(`Error: No record found with inventory_id: ${options.id}`));
-      process.exit(1);
-    }
-    
-    // Display the record
-    console.log(chalk.green('Record found:'));
-    console.table(record);
-    
-    // Save to file if output option provided
-    if (options.output) {
-      await saveInventoryToCSV([record], options.output);
-      console.log(chalk.green(`Record saved to: ${options.output}`));
-    }
+    // CSV processing disabled - helper functions removed
+    console.error(chalk.red('Error: CSV processing functionality has been disabled'));
+    process.exit(1);
   });
 
 // Command to start a new scrape cycle
@@ -190,4 +146,4 @@ program
   });
 
 // Execute the program
-program.parse(process.argv); 
+program.parse(process.argv);

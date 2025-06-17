@@ -27,9 +27,8 @@ const GLOBAL_FILTERS = {
     "Standard Admission",
   ], // e.g., ['obstructed view', 'aisle'] - empty means no filter, strings to check for (case-insensitive)
   accessibility: [
-    "GA Lawn",
-    "General Admission Standing",
-    "Standard Admission",
+  
+
   ], // e.g., ['wheelchair', 'hearing'] - empty means no filter, strings to check for (case-insensitive)
   excludeWheelchair: true, // Set to true to exclude wheelchair accessible seats (sections containing 'WC')
 };

@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import moment from "moment";
 import { Event, ConsecutiveGroup } from "../models/index.js";
 import config from "../config/scraperConfig.js";
@@ -21,6 +22,32 @@ class DatabaseManager {
     } catch (error) {
       this.logger.logWithTime(`Error fetching event ${eventId}: ${error.message}`, "error");
       return null;
+    }
+  }
+
+  /**
+   * Clean up consecutive seats for a stopped event
+   * @param {string} eventId - The event ID
+   * @returns {Promise<number>} Number of deleted consecutive seat groups
+   */
+  async cleanupConsecutiveSeats(eventId) {
+    try {
+      const deleteResult = await ConsecutiveGroup.deleteMany({ eventId });
+      
+      if (deleteResult.deletedCount > 0) {
+        this.logger?.logWithTime(
+          `🧹 Cleaned up ${deleteResult.deletedCount} consecutive seat groups for stopped event ${eventId}`,
+          "info"
+        );
+      }
+      
+      return deleteResult.deletedCount;
+    } catch (error) {
+      this.logger?.logWithTime(
+        `Error cleaning up consecutive seats for event ${eventId}: ${error.message}`,
+        "error"
+      );
+      return 0;
     }
   }
 
@@ -128,58 +155,57 @@ class DatabaseManager {
               })),
               inventory: {
                 ...group.inventory,
-                tickets: group.inventory.tickets.map((ticket) => ({
-                  ...ticket,
-                  sellPrice: typeof ticket.sellPrice === 'number' && !isNaN(ticket.sellPrice) 
-                    ? ticket.sellPrice * 1.25 // Apply 1.25 markup as in original
-                    : parseFloat(ticket.cost || ticket.faceValue || 0) * 1.25, // Fallback to cost or faceValue if sellPrice is invalid
-                })),
+                inHandDate: event.inHandDate,
+                eventId,
+                mapping_id: event.mapping_id,
+                event_name: event.Event_Name,
+                venue_name: event.Venue,
+                event_date: event.Event_DateTime,
               },
+              inHandDate: event.inHandDate,
+              mapping_id: event.mapping_id,
+              event_name: event.Event_Name,
+              venue_name: event.Venue,
+              event_date: event.Event_DateTime,
             }));
 
-            // Use fewer documents in a single batch insert
-            if (LOG_LEVEL >= 2 && groupsToInsert.length > 0) { // Assuming 2 is info level
-              this.logger.logWithTime(`[Info ${eventId}] Inserting ${groupsToInsert.length} groups in chunks. First group sample: ${JSON.stringify(groupsToInsert[0], null, 2)}`, "info");
-            }
-            for (let i = 0; i < groupsToInsert.length; i += CHUNK_SIZE) { // Using CHUNK_SIZE defined at the top
+            // Insert in chunks to avoid memory issues
+            for (let i = 0; i < groupsToInsert.length; i += CHUNK_SIZE) {
               const chunk = groupsToInsert.slice(i, i + CHUNK_SIZE);
               await ConsecutiveGroup.insertMany(chunk, { session });
             }
-            if (LOG_LEVEL >= 2) { // Assuming 2 is info level
-              this.logger.logWithTime(`[Info ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`, "info");
-            }
+
+            this.logger.logWithTime(
+              `Updated ${groupsToInsert.length} consecutive groups for event ${eventId}`,
+              "info"
+            );
           } else {
-            if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
-              this.logger.logWithTime(`[Debug ${eventId}] No change detected for ConsecutiveGroup. Skipping update.`, "debug");
-            }
+            this.logger.logWithTime(
+              `No changes detected for event ${eventId} - skipping ConsecutiveGroup update`,
+              "debug"
+            );
+          }
+        } else {
+          // No scrape results - clean up existing groups
+          const deleteResult = await ConsecutiveGroup.deleteMany({ eventId }).session(session);
+          if (deleteResult.deletedCount > 0) {
+            this.logger.logWithTime(
+              `Removed ${deleteResult.deletedCount} consecutive groups for event ${eventId} (no scrape results)`,
+              "info"
+            );
           }
         }
-
-        // Final metadata update
-        await Event.updateOne(
-          { Event_ID: eventId },
-          { $set: { "metadata.full": metadata } }
-        ).session(session);
       });
-
-      // Schedule next update time
-      const nextUpdate = scheduler.scheduleNextUpdate(eventId);
-      
-      this.logger.logWithTime(
-        `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
-          2
-        )}ms, next update by ${nextUpdate.format('HH:mm:ss')}`,
-        "success"
-      );
-      
-      return true;
     } catch (error) {
-      this.logger.logError(eventId, "DATABASE_ERROR", error);
+      this.logger.logWithTime(
+        `Error updating event metadata for ${eventId}: ${error.message}`,
+        "error"
+      );
       throw error;
     } finally {
-      session.endSession();
+      await session.endSession();
     }
   }
 }
 
-export default DatabaseManager; 
+export default DatabaseManager;

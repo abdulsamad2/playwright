@@ -208,6 +208,11 @@ export const stopEventScraping = async (req, res) => {
       { new: true }
     );
 
+    // Clean up consecutive seats for stopped event
+    if (scraperManager.databaseManager) {
+      await scraperManager.databaseManager.cleanupConsecutiveSeats(event.Event_ID);
+    }
+
     // Clean up all tracking data for this event
     scraperManager.cleanupEventTracking(event.Event_ID);
 
@@ -368,11 +373,8 @@ export const testSeatFormatting = async (req, res) => {
       });
     }
     
-    // Import the validation function
-    const { validateConsecutiveSeats } = await import('../helpers/csvInventoryHelper.js');
-    
-    // Test the seat formatting
-    const result = validateConsecutiveSeats(seats);
+    // CSV validation function removed - helper file deleted
+    const result = { isValid: false, message: 'CSV validation disabled' }; // seats;
     
     res.json({
       status: "success",
