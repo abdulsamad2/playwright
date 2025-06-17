@@ -104,7 +104,7 @@ async function simulateMobileInteractions(page) {
     ];
     
     // Pick 2-3 random scroll actions
-    const scrollCount = 2 + Math.floor(Math.random() * 2);
+    const scrollCount = 4 + Math.floor(Math.random() * 2);
     for (let i = 0; i < scrollCount; i++) {
       const option = scrollOptions[Math.floor(Math.random() * scrollOptions.length)];
       
@@ -118,7 +118,7 @@ async function simulateMobileInteractions(page) {
       }, scrollY);
       
       // Random pause between scrolls (500-2000ms)
-      await page.waitForTimeout(500 + Math.floor(Math.random() * 1500));
+      await page.waitForTimeout(200 + Math.floor(Math.random() * 1500));
     }
     
     // Simulate random taps/clicks (1-2 times)
@@ -150,7 +150,7 @@ async function initBrowser(proxy) {
     if (!browser || !browser.isConnected()) {
       // Launch options
       const launchOptions = {
-        headless: false,
+        headless: true,
         args: [
           '--disable-blink-features=AutomationControlled',
           '--disable-features=IsolateOrigins,site-per-process',
@@ -634,7 +634,7 @@ async function refreshCookies(eventId, proxy = null) {
     await simulateMobileInteractions(page);
     
     // Wait for cookies to be set
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
     
     // Capture cookies
     const fingerprint = BrowserFingerprint.generate();
