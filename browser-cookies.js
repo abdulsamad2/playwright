@@ -182,7 +182,7 @@ async function simulateMobileInteractions(page) {
 }
 
 /**
- * Initialize the browser with enhanced fingerprinting
+ * Initialize the browser with enhanced fingerprinting and network throttling
  */
 async function initBrowser(proxy) {
   let context = null;
@@ -291,6 +291,23 @@ async function initBrowser(proxy) {
 
     // Create a new page and simulate human behavior
     const page = await context.newPage();
+    
+    // Apply network throttling to limit speed to 60 Mbps (60,000 Kbps)
+    // Download speed: 60 Mbps = 7500 KB/s (60,000 Kbps / 8 bits per byte)
+    // Upload speed: 60 Mbps = 7500 KB/s
+    // Latency: 20ms (realistic latency for broadband connection)
+    await page.route('**/*', async (route) => {
+      await route.continue({
+        throttling: {
+          downloadThroughput: 7500 * 1024, // 60 Mbps in bytes/second
+          uploadThroughput: 7500 * 1024,  // 60 Mbps in bytes/second
+          latency: 20 // 20ms latency
+        }
+      });
+    });
+    
+    console.log('Network throttling applied: 60 Mbps download/upload speed with 20ms latency');
+    
     await page.waitForTimeout(1000 + Math.random() * 2000);
     await simulateMobileInteractions(page);
 

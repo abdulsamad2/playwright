@@ -849,7 +849,7 @@ export class ScraperManager {
         // Fetch existing groups for efficient row-level comparison
         const existingGroups = await ConsecutiveGroup.find(
           { eventId }, 
-          { section: 1, row: 1, seats: 1, seatCount: 1, "inventory.listPrice": 1, "inventory.inventoryId": 1, "inventory.quantity": 1 }
+          { _id: 1, section: 1, row: 1, seats: 1, seatCount: 1, "inventory.listPrice": 1, "inventory.quantity": 1 }
         ).lean();
 
         // Create maps for efficient lookups
@@ -857,18 +857,18 @@ export class ScraperManager {
         existingGroups.forEach(group => {
           const rowKey = `${group.section}-${group.row}`;
           existingRowMap.set(rowKey, {
+            _id: group._id,
             seatCount: group.seatCount,
             seats: group.seats.map(s => s.number).sort(),
             price: group.inventory?.listPrice,
             quantity: group.inventory?.quantity,
-            inventoryId: group.inventory?.inventoryId
           });
         });
 
         const newRowMap = new Map();
         validScrapeResult.forEach(group => {
           const rowKey = `${group.section}-${group.row}`;
-          const basePrice = parseFloat(group.inventory.listPrice) || 500.0;
+          const basePrice = parseFloat(group.inventory.listPrice);
           const increasedPrice = basePrice * (1 + priceIncreasePercentage / 100);
           
           newRowMap.set(rowKey, {
@@ -883,15 +883,16 @@ export class ScraperManager {
         // Identify rows to delete, update, and insert
         const rowsToDelete = [];
         const rowsToInsert = [];
+        const rowsToUpdate = [];
         let unchangedRows = 0;
 
-        // Check for rows that need updates or deletions
+        // Identify rows to delete or update
         for (const [rowKey, existingData] of existingRowMap) {
           const newData = newRowMap.get(rowKey);
           
           if (!newData) {
             // Row no longer exists in new data - mark for deletion
-            rowsToDelete.push(rowKey);
+            rowsToDelete.push(existingData._id);
           } else {
             // Check if row data has changed (excluding inventory ID)
             const seatsChanged = JSON.stringify(existingData.seats) !== JSON.stringify(newData.seats);
@@ -899,8 +900,7 @@ export class ScraperManager {
             const quantityChanged = existingData.quantity !== newData.quantity;
             
             if (seatsChanged || priceChanged || quantityChanged) {
-              rowsToDelete.push(rowKey);
-              rowsToInsert.push({ rowKey, data: newData });
+              rowsToUpdate.push({ _id: existingData._id, data: newData });
             } else {
               // No changes detected - preserve existing inventory ID
               newData.groupData.inventory.inventoryId = existingData.inventoryId;
@@ -909,7 +909,7 @@ export class ScraperManager {
           }
         }
 
-        // Check for new rows that don't exist in existing data
+        // Identify new rows to insert
         for (const [rowKey, newData] of newRowMap) {
           if (!existingRowMap.has(rowKey)) {
             rowsToInsert.push({ rowKey, data: newData });
@@ -917,24 +917,110 @@ export class ScraperManager {
         }
 
         if (LOG_LEVEL >= 3) {
-          this.logWithTime(`[Debug SM ${eventId}] Row Analysis - Unchanged: ${unchangedRows}, To Delete: ${rowsToDelete.length}, To Insert: ${rowsToInsert.length}`, "debug");
+          this.logWithTime(`[Debug SM ${eventId}] Row Analysis - Unchanged: ${unchangedRows}, To Delete: ${rowsToDelete.length}, To Insert: ${rowsToInsert.length}, To Update: ${rowsToUpdate.length}`, "debug");
         }
 
         // Perform efficient updates only if there are changes
-        if (rowsToDelete.length > 0 || rowsToInsert.length > 0) {
-          // Delete changed/removed rows
+        if (rowsToDelete.length > 0 || rowsToInsert.length > 0 || rowsToUpdate.length > 0) {
+          // Delete removed rows
           if (rowsToDelete.length > 0) {
-            const deleteConditions = rowsToDelete.map(rowKey => {
-              const [section, row] = rowKey.split('-');
-              return { eventId, section, row };
-            });
-            
             await ConsecutiveGroup.deleteMany({
-              $or: deleteConditions
+              _id: { $in: rowsToDelete }
             });
             
             if (LOG_LEVEL >= 2) {
-              this.logWithTime(`[Info SM ${eventId}] Deleted ${rowsToDelete.length} changed/removed rows.`, "info");
+              this.logWithTime(`[Info SM ${eventId}] Deleted ${rowsToDelete.length} removed rows.`, "info");
+            }
+          }
+
+          // Update changed rows
+          if (rowsToUpdate.length > 0) {
+            const bulkOperations = rowsToUpdate.map(({ _id, data }) => {
+              const group = data.groupData;
+              const eventDateObj = typeof event_date === 'string' ? new Date(event_date) : event_date;
+              const inHandDateObj = moment(eventDateObj).subtract(1, 'day');
+              const formattedInHandDate = inHandDateObj.toISOString();
+              const increasedPrice = data.price;
+
+              return {
+                updateOne: {
+                  filter: { _id: _id },
+                  update: {
+                    $set: {
+                      section: group.section,
+                      row: group.row,
+                      seatCount: group.inventory.quantity,
+                      seatRange: `${Math.min(...group.seats)}-${Math.max(...group.seats)}`,
+                      seats: group.seats.map((seatNumber) => ({
+                        number: seatNumber.toString(),
+                        inHandDate: formattedInHandDate,
+                        price: increasedPrice,
+                        mapping_id,
+                      })),
+                      inventory: {
+                        inventoryId: group.inventory.inventoryId, // This will be the new unique ID from seatBatch.js
+                        quantity: group.inventory.quantity,
+                        section: group.section,
+                        hideSeatNumbers: group.inventory.hideSeatNumbers || true,
+                        row: group.row,
+                        cost: group.inventory.cost,
+                        stockType: group.inventory.stockType || "MOBILE_TRANSFER",
+                        lineType: group.inventory.lineType,
+                        seatType: group.inventory.seatType,
+                        inHandDate: formattedInHandDate,
+                        notes: group.inventory.notes,
+                        tags: group.inventory.tags,
+                        offerId: group.inventory.offerId,
+                        splitType: group.inventory.splitType || "CUSTOM",
+                        publicNotes: group.inventory.publicNotes,
+                        listPrice: increasedPrice,
+                        face_price: group.inventory.faceValue,
+                        taxed_cost: group.inventory.taxedCost,
+                        cost: group.inventory.cost,
+                        hide_seats: group.inventory.hideSeatNumbers || true,
+                        in_hand: typeof group.inventory.inHand === "boolean" ? group.inventory.inHand : true,
+                        in_hand_date: formattedInHandDate,
+                        instant_transfer: typeof group.inventory.instantTransfer === "boolean" ? group.inventory.instantTransfer : false,
+                        files_available: typeof group.inventory.filesAvailable === "boolean" ? group.inventory.filesAvailable : false,
+                        customSplit: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity / 2)},${group.inventory.quantity}`,
+                        stock_type: group.inventory.stockType || "MOBILE_TRANSFER",
+                        zone: group.inventory.zone,
+                        shown_quantity: group.inventory.shownQuantity,
+                        passthrough: group.inventory.passthrough,
+                        mapping_id,
+                        event_name: event_name,
+                        venue_name: venue_name,
+                        event_date: eventDateObj.toISOString(),
+                        eventId: eventId,
+                        tickets: group.inventory.tickets.map((ticket) => ({
+                          id: ticket.id,
+                          seatNumber: ticket.seatNumber,
+                          notes: ticket.notes,
+                          cost: ticket.cost,
+                          faceValue: ticket.faceValue,
+                          taxedCost: ticket.taxedCost,
+                          sellPrice: typeof ticket?.sellPrice === "number" && !isNaN(ticket?.sellPrice) ? ticket.sellPrice : parseFloat(ticket?.cost || ticket?.faceValue || 0),
+                          stockType: ticket.stockType,
+                          eventId: ticket.eventId,
+                          accountId: ticket.accountId,
+                          status: ticket.status,
+                          auditNote: ticket.auditNote,
+                          mapping_id: mapping_id,
+                        })),
+                      },
+                    },
+                  },
+                },
+              };
+            });
+
+            try {
+              const result = await ConsecutiveGroup.bulkWrite(bulkOperations, { ordered: false });
+              if (LOG_LEVEL >= 2) {
+                this.logWithTime(`[Info SM ${eventId}] Updated ${result.modifiedCount} changed rows.`, "info");
+              }
+            } catch (error) {
+              console.error(`[ERROR] Event ${eventId} - Failed to bulk update ConsecutiveGroup:`, error.message);
             }
           }
 
@@ -946,9 +1032,6 @@ export class ScraperManager {
               const eventDateObj = typeof event_date === 'string' ? new Date(event_date) : event_date;
               const inHandDateObj = moment(eventDateObj).subtract(1, 'day');
               const formattedInHandDate = inHandDateObj.toISOString();
-              
-           
-            
               
               const increasedPrice = data.price;
               return {
