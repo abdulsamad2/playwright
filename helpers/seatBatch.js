@@ -19,7 +19,10 @@ function generateUniqueInventoryId() {
 
 // Global Filters
 const GLOBAL_FILTERS = {
-  inventoryType: ["Primary", "Official Platinum", "Aisle Seating"], // e.g., ['primary', 'resale'] - empty means no filter
+  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket"], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+  inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
+
+
   description: [
     "Standard Ticket",
     "GA Lawn",
@@ -27,9 +30,9 @@ const GLOBAL_FILTERS = {
     "Standard Admission",
   ], // e.g., ['obstructed view', 'aisle'] - empty means no filter, strings to check for (case-insensitive)
   accessibility: [
-  
-
+    // Empty array means exclude ALL accessibility seats
   ], // e.g., ['wheelchair', 'hearing'] - empty means no filter, strings to check for (case-insensitive)
+  excludeAccessibility: true, // Set to true to exclude ALL accessibility seats
   excludeWheelchair: true, // Set to true to exclude wheelchair accessible seats (sections containing 'WC')
 };
 //it will break map into seats
@@ -418,7 +421,45 @@ export const AttachRowSection = (
       .map((x) => {
         let offerGet = offers.find((e) => e.offerId == x.offerId);
 
-        // Check wheelchair exclusion filter first
+        // Check accessibility exclusion filters first
+        if (GLOBAL_FILTERS.excludeAccessibility) {
+          // Check for any accessibility indicators in various fields
+          const hasAccessibilityIndicators = (
+            // Check section name for wheelchair/accessibility indicators
+            (x.section && (
+              x.section.toUpperCase().includes('WC') ||
+              x.section.toUpperCase().includes('WHEELCHAIR') ||
+              x.section.toUpperCase().includes('ACCESSIBLE') ||
+              x.section.toUpperCase().includes('ADA') ||
+              x.section.toUpperCase().includes('HANDICAP')
+            )) ||
+            // Check accessibility field
+            (x.accessibility && x.accessibility.length > 0) ||
+            // Check attributes for accessibility terms
+            (x.attributes && x.attributes.some(attr => 
+              attr.toLowerCase().includes('wheelchair') ||
+              attr.toLowerCase().includes('accessible') ||
+              attr.toLowerCase().includes('ada') ||
+              attr.toLowerCase().includes('handicap') ||
+              attr.toLowerCase().includes('sight') ||
+              attr.toLowerCase().includes('hearing')
+            )) ||
+            // Check offer name for accessibility terms
+            (offerGet && offerGet.name && (
+              offerGet.name.toLowerCase().includes('wheelchair') ||
+              offerGet.name.toLowerCase().includes('accessible') ||
+              offerGet.name.toLowerCase().includes('ada') ||
+              offerGet.name.toLowerCase().includes('handicap')
+            ))
+          );
+          
+          if (hasAccessibilityIndicators) {
+            // console.log(`Filtering out accessibility seat. Section: ${x.section}, Accessibility: ${x.accessibility}`);
+            return undefined;
+          }
+        }
+
+        // Legacy wheelchair exclusion filter (kept for backward compatibility)
         if (GLOBAL_FILTERS.excludeWheelchair && x.section && x.section.toUpperCase().includes('WC')) {
           // console.log(`Filtering out wheelchair seat. Section: ${x.section}`);
           return undefined;
@@ -437,7 +478,9 @@ export const AttachRowSection = (
         } else {
             // Check Inventory Type Filter
             if (inventoryFilterActive) {
-                if (offerGet && GLOBAL_FILTERS.inventoryType.includes(offerGet.inventoryType?.toLowerCase())) {
+                if (offerGet && GLOBAL_FILTERS.inventoryType.some(filterType => 
+                    offerGet.inventoryType?.toLowerCase().includes(filterType.toLowerCase())
+                )) {
                     keepItemBasedOnGlobalFilters = true;
                 }
             }
