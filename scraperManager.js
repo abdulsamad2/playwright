@@ -849,7 +849,7 @@ export class ScraperManager {
         // Fetch existing groups for efficient row-level comparison
         const existingGroups = await ConsecutiveGroup.find(
           { eventId }, 
-          { _id: 1, section: 1, row: 1, seats: 1, seatCount: 1, "inventory.listPrice": 1, "inventory.quantity": 1 }
+          { _id: 1, section: 1, row: 1, seats: 1, seatCount: 1, "inventory.listPrice": 1, "inventory.quantity": 1, "inventory.inventoryId": 1 }
         ).lean();
 
         // Create maps for efficient lookups
@@ -862,6 +862,7 @@ export class ScraperManager {
             seats: group.seats.map(s => s.number).sort(),
             price: group.inventory?.listPrice,
             quantity: group.inventory?.quantity,
+            inventoryId: group.inventory?.inventoryId,
           });
         });
 

@@ -136,48 +136,208 @@ async function simulateMobileInteractions(page) {
     // Get viewport size
     const viewportSize = page.viewportSize();
     if (!viewportSize) return;
-
-    // Random scroll amounts
+    
+    // Helper function for human-like random delays with normal distribution
+    const humanDelay = (min, max, skew = 1) => {
+      // Use Box-Muller transform for normal distribution
+      let u = 0, v = 0;
+      while(u === 0) u = Math.random(); // Converting [0,1) to (0,1)
+      while(v === 0) v = Math.random();
+      let num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+      
+      // Transform to desired range and skew
+      num = num / 10.0 + 0.5; // Normalize to ~(0,1)
+      num = Math.pow(num, skew); // Skew
+      num = num * (max - min) + min; // Transform to desired range
+      
+      return Math.max(Math.min(Math.round(num), max), min); // Clamp to range
+    };
+    
+    // Helper function for human-like mouse movement
+    const moveMouseHumanLike = async (startX, startY, endX, endY) => {
+      // Calculate distance and number of steps
+      const distance = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
+      const steps = Math.max(5, Math.min(25, Math.floor(distance / 10)));
+      
+      // Set initial position
+      await page.mouse.move(startX, startY);
+      
+      // Generate control points for Bezier curve (slight curve to movement)
+      const cp1x = startX + (endX - startX) / 3 + (Math.random() * 40 - 20);
+      const cp1y = startY + (endY - startY) / 3 + (Math.random() * 40 - 20);
+      const cp2x = startX + 2 * (endX - startX) / 3 + (Math.random() * 40 - 20);
+      const cp2y = startY + 2 * (endY - startY) / 3 + (Math.random() * 40 - 20);
+      
+      // Move along the curve with variable speed
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const tReverse = 1 - t;
+        
+        // Cubic Bezier curve formula
+        const x = Math.round(
+          tReverse * tReverse * tReverse * startX +
+          3 * tReverse * tReverse * t * cp1x +
+          3 * tReverse * t * t * cp2x +
+          t * t * t * endX
+        );
+        
+        const y = Math.round(
+          tReverse * tReverse * tReverse * startY +
+          3 * tReverse * tReverse * t * cp1y +
+          3 * tReverse * t * t * cp2y +
+          t * t * t * endY
+        );
+        
+        // Add slight jitter to simulate human hand movement
+        const jitterX = Math.random() * 2 - 1;
+        const jitterY = Math.random() * 2 - 1;
+        
+        await page.mouse.move(x + jitterX, y + jitterY);
+        
+        // Variable speed - slower at start and end, faster in middle
+        const speedFactor = 0.5 + Math.sin(t * Math.PI) * 0.5;
+        await page.waitForTimeout(humanDelay(5, 15) * speedFactor);
+      }
+    };
+    
+    // Determine if we should interact first or scroll first (randomize behavior pattern)
+    const interactFirst = Math.random() > 0.5;
+    
+    if (interactFirst) {
+      // Simulate examining the page - move mouse around without clicking
+      const examPoints = 1 + Math.floor(Math.random() * 2);
+      let lastX = viewportSize.width / 2;
+      let lastY = viewportSize.height / 3;
+      
+      for (let i = 0; i < examPoints; i++) {
+        // Pick points that might be interesting (avoid edges)
+        const newX = 50 + Math.floor(Math.random() * (viewportSize.width - 100));
+        const newY = 100 + Math.floor(Math.random() * (viewportSize.height - 200));
+        
+        await moveMouseHumanLike(lastX, lastY, newX, newY);
+        lastX = newX;
+        lastY = newY;
+        
+        // Pause as if reading content
+        await page.waitForTimeout(humanDelay(300, 2000, 0.7));
+      }
+    }
+    
+    // Enhanced scroll behavior with variable patterns
     const scrollOptions = [
-      { direction: "down", amount: 300 },
-      { direction: "down", amount: 500 },
-      { direction: "down", amount: 800 },
-      { direction: "up", amount: 200 },
-      { direction: "up", amount: 400 },
+      // More natural scroll amounts with slight variations
+      { direction: "down", amount: 250 + Math.floor(Math.random() * 100) },
+      { direction: "down", amount: 400 + Math.floor(Math.random() * 150) },
+      { direction: "down", amount: 600 + Math.floor(Math.random() * 250) },
+      { direction: "up", amount: 150 + Math.floor(Math.random() * 100) },
+      { direction: "up", amount: 300 + Math.floor(Math.random() * 150) },
     ];
 
-    // Pick 2-3 random scroll actions
-    const scrollCount = 2 + Math.floor(Math.random() * 2);
+    // Variable scroll count based on page content
+    const scrollCount = 1 + Math.floor(Math.random() * 3);
+    
     for (let i = 0; i < scrollCount; i++) {
-      const option =
-        scrollOptions[Math.floor(Math.random() * scrollOptions.length)];
+      // Pick a scroll option with weighted probability (more likely to scroll down)
+      const optionIndex = Math.floor(Math.pow(Math.random(), 1.5) * scrollOptions.length);
+      const option = scrollOptions[optionIndex];
 
-      // Scroll with a dynamic speed
-      const scrollY =
-        option.direction === "down" ? option.amount : -option.amount;
-      await page.evaluate((y) => {
-        window.scrollBy({
-          top: y,
-          behavior: "smooth",
+      // Calculate scroll amount with slight randomization
+      const baseAmount = option.amount;
+      const jitter = Math.floor(Math.random() * (baseAmount * 0.1)) - (baseAmount * 0.05);
+      const scrollY = option.direction === "down" ? baseAmount + jitter : -(baseAmount + jitter);
+      
+      // Implement multi-step scrolling with acceleration and deceleration
+      await page.evaluate((scrollData) => {
+        return new Promise(resolve => {
+          const { y, steps, easingFactor } = scrollData;
+          const totalY = y;
+          const stepSize = totalY / steps;
+          let currentStep = 0;
+          
+          const scroll = () => {
+            if (currentStep >= steps) {
+              resolve();
+              return;
+            }
+            
+            // Apply easing function for acceleration/deceleration
+            const progress = currentStep / steps;
+            const easing = progress < 0.5 
+              ? 2 * progress * progress // Accelerate
+              : -1 + (4 - 2 * progress) * progress; // Decelerate
+            
+            const amount = Math.round(stepSize * easing * easingFactor);
+            window.scrollBy(0, amount);
+            currentStep++;
+            
+            // Variable timing between scroll steps
+            const delay = 5 + Math.random() * 15;
+            setTimeout(scroll, delay);
+          };
+          
+          scroll();
         });
-      }, scrollY);
+      }, { 
+        y: scrollY, 
+        steps: 15 + Math.floor(Math.random() * 10),
+        easingFactor: 1 + (Math.random() * 0.5)
+      });
 
-      // Random pause between scrolls (500-2000ms)
-      await page.waitForTimeout(500 + Math.floor(Math.random() * 1500));
+      // Natural pause between scrolls with variable timing
+      await page.waitForTimeout(humanDelay(700, 2500, 0.8));
+      
+      // Occasionally pause longer as if reading content (20% chance)
+      if (Math.random() < 0.2) {
+        await page.waitForTimeout(humanDelay(1500, 4000, 0.6));
+      }
     }
 
-    // Simulate random taps/clicks (1-2 times)
-    const tapCount = 1 + Math.floor(Math.random() * 2);
-    for (let i = 0; i < tapCount; i++) {
-      // Random position within viewport
-      const x = 50 + Math.floor(Math.random() * (viewportSize.width - 100));
-      const y = 150 + Math.floor(Math.random() * (viewportSize.height - 300));
-
-      await page.mouse.click(x, y);
-      await page.waitForTimeout(500 + Math.floor(Math.random() * 1000));
+    // Simulate more realistic interaction patterns
+    if (!interactFirst) {
+      // Determine number of interactions based on a Poisson-like distribution
+      const lambda = 1.5; // Average number of interactions
+      let tapCount = 0;
+      let p = Math.exp(-lambda);
+      let sum = p;
+      const u = Math.random();
+      
+      for (let i = 1; sum < u; i++) {
+        p = p * lambda / i;
+        sum += p;
+        tapCount = i;
+      }
+      
+      tapCount = Math.min(tapCount, 3); // Cap at 3 interactions
+      
+      // Current mouse position (start from a reasonable position)
+      let currentX = viewportSize.width / 2;
+      let currentY = viewportSize.height / 3;
+      
+      for (let i = 0; i < tapCount; i++) {
+        // Find a plausible target to click (avoid edges and prefer content areas)
+        const targetX = 50 + Math.floor(Math.random() * (viewportSize.width - 100));
+        const targetY = 100 + Math.floor(Math.random() * (viewportSize.height - 200));
+        
+        // Move mouse in a human-like way
+        await moveMouseHumanLike(currentX, currentY, targetX, targetY);
+        currentX = targetX;
+        currentY = targetY;
+        
+        // Small pause before clicking as if deciding
+        await page.waitForTimeout(humanDelay(50, 350));
+        
+        // Click with variable pressure duration
+        await page.mouse.down();
+        await page.waitForTimeout(humanDelay(40, 150));
+        await page.mouse.up();
+        
+        // Variable pause between interactions
+        await page.waitForTimeout(humanDelay(800, 2500, 0.7));
+      }
     }
   } catch (error) {
-    console.warn("Error during mobile interaction simulation:", error.message);
+    // Use more discreet error logging
+    console.warn("Interaction simulation encountered an issue:", error.message);
   }
 }
 
@@ -260,9 +420,9 @@ async function initBrowser(proxy) {
       geolocation: {
         latitude: location.latitude,
         longitude: location.longitude,
-        accuracy: 100 * Math.random() + 50,
+        accuracy: 50 * Math.random() + 50,
       },
-      permissions: ["geolocation", "notifications", "microphone", "camera"],
+      permissions: ["geolocation", "notifications"],
       deviceScaleFactor: 2 + Math.random() * 0.5,
       hasTouch: true,
       isMobile: true,
@@ -299,9 +459,9 @@ async function initBrowser(proxy) {
     await page.route('**/*', async (route) => {
       await route.continue({
         throttling: {
-          downloadThroughput: 7500 * 1024, // 60 Mbps in bytes/second
-          uploadThroughput: 7500 * 1024,  // 60 Mbps in bytes/second
-          latency: 20 // 20ms latency
+          downloadThroughput: 9000 * 1024, // 60 Mbps in bytes/second
+          uploadThroughput: 9000 * 1024,  // 60 Mbps in bytes/second
+          latency: 10 // 20ms latency
         }
       });
     });

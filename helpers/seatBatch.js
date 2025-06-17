@@ -19,11 +19,14 @@ function generateUniqueInventoryId() {
 
 // Global Filters
 const GLOBAL_FILTERS = {
-  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket"], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket","resale","verified resale","verified resale ticket"], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+
+
   inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
 
 
   description: [
+    "verified resale ticket",
     "Standard Ticket",
     "GA Lawn",
     "General Admission Standing",
