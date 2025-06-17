@@ -18,15 +18,15 @@ export const ENABLE_CSV_UPLOAD = false; // Disabled for performance optimization
 const MAX_UPDATE_INTERVAL = 60000; // Optimized 1-minute update requirement
 const CONCURRENT_LIMIT = 500; // Increased for maximum throughput
 const MAX_RETRIES = 10; // Further reduced for faster failure recovery
-const SCRAPE_TIMEOUT = 20000; // Optimized 20-second timeout
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds for faster cycles
+const SCRAPE_TIMEOUT = 30000; // Optimized 20-second timeout
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 5000; // Reduced to 10 seconds for faster cycles
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 const EVENT_FAILURE_THRESHOLD = 90000; // Reduced to 1.5 minutes for faster recovery
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
 // Optimized recovery settings for maximum performance
 const PARALLEL_BATCH_SIZE = 300; // Optimized for better batching
-const MAX_PARALLEL_BATCHES = 50; // Increased for better parallelization
+const MAX_PARALLEL_BATCHES = 25; // Increased for better parallelization
 
 // Multi-tier recovery intervals for aggressive processing
 
@@ -893,16 +893,17 @@ export class ScraperManager {
             // Row no longer exists in new data - mark for deletion
             rowsToDelete.push(rowKey);
           } else {
-            // Check if row data has changed
+            // Check if row data has changed (excluding inventory ID)
             const seatsChanged = JSON.stringify(existingData.seats) !== JSON.stringify(newData.seats);
             const priceChanged = Math.abs(existingData.price - newData.price) > 0.01;
             const quantityChanged = existingData.quantity !== newData.quantity;
-            const inventoryIdChanged = existingData.inventoryId !== newData.groupData.inventory.inventoryId;
             
-            if (seatsChanged || priceChanged || quantityChanged || inventoryIdChanged) {
+            if (seatsChanged || priceChanged || quantityChanged) {
               rowsToDelete.push(rowKey);
               rowsToInsert.push({ rowKey, data: newData });
             } else {
+              // No changes detected - preserve existing inventory ID
+              newData.groupData.inventory.inventoryId = existingData.inventoryId;
               unchangedRows++;
             }
           }
@@ -2642,6 +2643,15 @@ export class ScraperManager {
     if (!this.isRunning) {
       this.isRunning = true;
       this.logWithTime("Starting high-performance parallel scraping for 1000+ events...", "info");
+      
+      // Clean up all consecutive seats before starting scraper
+      try {
+        const deletedCount = await ConsecutiveGroup.deleteMany({});
+        this.logWithTime(`🧹 Cleaned up ${deletedCount.deletedCount} consecutive seat records before starting scraper`, "info");
+      } catch (error) {
+        this.logWithTime(`Error cleaning up consecutive seats: ${error.message}`, "warning");
+      }
+      
  if (!this.autoRestartMonitor.isMonitoring) {
    this.autoRestartMonitor.startMonitoring();
  }

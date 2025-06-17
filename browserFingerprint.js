@@ -145,33 +145,33 @@ export class BrowserFingerprint {
 
   static generateUserAgent(fingerprint) {
     if (!fingerprint) {
-      console.warn('No fingerprint provided, using default user agent');
-      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      console.warn("No fingerprint provided, using default user agent");
+      return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     }
 
     try {
       // Handle platform object or string
       let platformString;
-      if (typeof fingerprint.platform === 'object') {
+      if (typeof fingerprint.platform === "object") {
         // If platform is an object, construct the string from its properties
         const { name, version, arch } = fingerprint.platform;
-        platformString = `${name} ${version}${arch ? `; ${arch}` : ''}`;
+        platformString = `${name} ${version}${arch ? `; ${arch}` : ""}`;
       } else {
         // If platform is a string, use it directly
-        platformString = fingerprint.platform || 'Windows NT 10.0';
+        platformString = fingerprint.platform || "Windows NT 10.0";
       }
 
-      const webkitVersion = '537.36';
-      const chromeVersion = '120.0.0.0';
-      const safariVersion = '537.36';
+      const webkitVersion = "537.36";
+      const chromeVersion = "120.0.0.0";
+      const safariVersion = "537.36";
 
       // Ensure platform string is properly formatted
-      const formattedPlatform = platformString.replace(/\s+/g, ' ').trim();
-      
+      const formattedPlatform = platformString.replace(/\s+/g, " ").trim();
+
       return `Mozilla/5.0 (${formattedPlatform}) AppleWebKit/${webkitVersion} (KHTML, like Gecko) Chrome/${chromeVersion} Safari/${safariVersion}`;
     } catch (error) {
-      console.error('Error generating user agent:', error);
-      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      console.error("Error generating user agent:", error);
+      return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     }
   }
 }
