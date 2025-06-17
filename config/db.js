@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const mongoUri =
-  process.env.DATABASE_URL || "mongodb://localhost:27017/ticketScraper";
+  process.env.DATABASE_URL;
 
 const connectDB = async () => {
   try {
