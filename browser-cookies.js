@@ -150,7 +150,7 @@ async function initBrowser(proxy) {
     if (!browser || !browser.isConnected()) {
       // Launch options
       const launchOptions = {
-        headless: true,
+        headless: false,
         args: [
           '--disable-blink-features=AutomationControlled',
           '--disable-features=IsolateOrigins,site-per-process',
