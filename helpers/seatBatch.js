@@ -31,6 +31,7 @@ const GLOBAL_FILTERS = {
     "General Admission Standing",
     "Standard Admission",
   ], // e.g., ['wheelchair', 'hearing'] - empty means no filter, strings to check for (case-insensitive)
+  excludeWheelchair: true, // Set to true to exclude wheelchair accessible seats (sections containing 'WC')
 };
 //it will break map into seats
 function GetMapSeats(data) {
@@ -417,6 +418,12 @@ export const AttachRowSection = (
     returnData
       .map((x) => {
         let offerGet = offers.find((e) => e.offerId == x.offerId);
+
+        // Check wheelchair exclusion filter first
+        if (GLOBAL_FILTERS.excludeWheelchair && x.section && x.section.toUpperCase().includes('WC')) {
+          // console.log(`Filtering out wheelchair seat. Section: ${x.section}`);
+          return undefined;
+        }
 
         // New Global Filtering Logic: Item must match at least one active global filter category.
         let keepItemBasedOnGlobalFilters = false;
