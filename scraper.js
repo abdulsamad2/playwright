@@ -2,7 +2,6 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
-const fs = require("fs");
 import { devices } from "playwright";
 import proxyArray from "./helpers/proxy.js";
 import { AttachRowSection } from "./helpers/seatBatch.js";
@@ -27,7 +26,7 @@ const cookieManager = new CookieManager();
 cookieManager.persistedPage = null;
 cookieManager.persistedContext = null;
 
-const iphone13 = devices["iPhone 13"];
+const iphone13 = devices["iPhone 15 landscape"];
 
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {

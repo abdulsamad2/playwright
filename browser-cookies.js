@@ -316,6 +316,12 @@ async function handleTicketmasterChallenge(page) {
       .evaluate(() => {
         return document.body.textContent.includes(
           "Your Browsing Activity Has Been Paused"
+        ) || document.body.textContent.includes(
+          "Are you a robot"
+        ) || document.body.textContent.includes(
+          "Verify you are human"
+        ) || document.body.textContent.includes(
+          "I'm not a robot"
         );
       })
       .catch(() => false); // Catch any navigation errors
@@ -340,6 +346,73 @@ async function handleTicketmasterChallenge(page) {
         );
       }
 
+      // Check for checkbox challenges first
+      try {
+        const checkboxSelectors = [
+          'input[type="checkbox"]',
+          '.cf-turnstile',
+          '.g-recaptcha',
+          '.h-captcha',
+          '[data-callback]',
+          '.captcha-checkbox',
+          '.verification-checkbox'
+        ];
+        
+        let checkboxFound = false;
+        for (const selector of checkboxSelectors) {
+          const checkbox = await page.$(selector).catch(() => null);
+          if (checkbox) {
+            console.log(`Found checkbox challenge with selector: ${selector}`);
+            
+            // Add human-like delay before clicking
+            await page.waitForTimeout(1500 + Math.random() * 1000);
+            
+            // Move mouse to checkbox area first
+            const box = await checkbox.boundingBox();
+            if (box) {
+              await page.mouse.move(
+                box.x + box.width / 2 + (Math.random() * 10 - 5),
+                box.y + box.height / 2 + (Math.random() * 10 - 5),
+                { steps: 3 + Math.floor(Math.random() * 5) }
+              );
+              await page.waitForTimeout(200 + Math.random() * 300);
+            }
+            
+            await checkbox.click();
+            checkboxFound = true;
+            console.log("Clicked checkbox challenge");
+            
+            // Wait for potential verification
+            await page.waitForTimeout(3000 + Math.random() * 2000);
+            break;
+          }
+        }
+        
+        if (checkboxFound) {
+          // Check if challenge is resolved
+          await page.waitForTimeout(2000);
+          const stillChallenged = await page
+            .evaluate(() => {
+              return document.body.textContent.includes(
+                "Your Browsing Activity Has Been Paused"
+              ) || document.body.textContent.includes(
+                "Are you a robot"
+              ) || document.body.textContent.includes(
+                "Verify you are human"
+              );
+            })
+            .catch(() => false);
+            
+          if (!stillChallenged) {
+            console.log("Checkbox challenge resolved successfully");
+            return true;
+          }
+        }
+      } catch (checkboxError) {
+        console.warn("Checkbox handling error:", checkboxError.message);
+      }
+
+      // Fallback to button-based challenge handling
       const buttons = await page.$$("button").catch(() => []);
       let buttonClicked = false;
 
@@ -353,10 +426,14 @@ async function handleTicketmasterChallenge(page) {
           const text = await button.textContent();
           if (
             text?.toLowerCase().includes("continue") ||
-            text?.toLowerCase().includes("verify")
+            text?.toLowerCase().includes("verify") ||
+            text?.toLowerCase().includes("proceed") ||
+            text?.toLowerCase().includes("submit")
           ) {
+            await page.waitForTimeout(500 + Math.random() * 500);
             await button.click();
             buttonClicked = true;
+            console.log(`Clicked challenge button: ${text}`);
             break;
           }
         } catch (buttonError) {
@@ -377,6 +454,10 @@ async function handleTicketmasterChallenge(page) {
         .evaluate(() => {
           return document.body.textContent.includes(
             "Your Browsing Activity Has Been Paused"
+          ) || document.body.textContent.includes(
+            "Are you a robot"
+          ) || document.body.textContent.includes(
+            "Verify you are human"
           );
         })
         .catch(() => false);
@@ -398,20 +479,40 @@ async function handleTicketmasterChallenge(page) {
  */
 async function checkForTicketmasterChallenge(page) {
   try {
-    // Check for CAPTCHA or other blocking mechanisms
-    const challengeSelector = "#challenge-running"; // Example selector for CAPTCHA
-    const isChallengePresent = (await page.$(challengeSelector)) !== null;
-
-    if (isChallengePresent) {
-      console.warn("Ticketmaster challenge detected");
-      return true;
+    // Check for various challenge selectors
+    const challengeSelectors = [
+      "#challenge-running",
+      ".cf-turnstile",
+      ".g-recaptcha",
+      ".h-captcha",
+      '[data-callback]',
+      '.captcha-checkbox',
+      '.verification-checkbox',
+      'input[type="checkbox"]'
+    ];
+    
+    for (const selector of challengeSelectors) {
+      const isChallengePresent = (await page.$(selector).catch(() => null)) !== null;
+      if (isChallengePresent) {
+        console.warn(`Challenge detected with selector: ${selector}`);
+        return true;
+      }
     }
 
-    // Also check via text content
     const challengePresent = await page
       .evaluate(() => {
         return document.body.textContent.includes(
           "Your Browsing Activity Has Been Paused"
+        ) || document.body.textContent.includes(
+          "Are you a robot"
+        ) || document.body.textContent.includes(
+          "Verify you are human"
+        ) || document.body.textContent.includes(
+          "I'm not a robot"
+        ) || document.body.textContent.includes(
+          "Please verify"
+        ) || document.body.textContent.includes(
+          "Security check"
         );
       })
       .catch(() => false);

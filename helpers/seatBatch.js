@@ -1,21 +1,6 @@
 import moment from "moment";
 
 // Function to generate unique 10-digit inventory ID
-let inventoryIdCounter = 0;
-function generateUniqueInventoryId() {
-  // Use timestamp (last 6 digits) + counter (4 digits) for uniqueness
-  const timestamp = Date.now();
-  const timestampPart = parseInt(timestamp.toString().slice(-6)); // Last 6 digits of timestamp
-  
-  // Increment counter and reset if it exceeds 4 digits
-  inventoryIdCounter = (inventoryIdCounter + 1) % 10000;
-  
-  // Combine timestamp part (6 digits) + counter (4 digits) = 10 digits
-  const uniqueId = timestampPart * 10000 + inventoryIdCounter;
-  
-  // Ensure it's always 10 digits by padding if necessary
-  return parseInt(uniqueId.toString().padStart(10, '1'));
-}
 
 // Global Filters
 const GLOBAL_FILTERS = {
@@ -257,7 +242,6 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
 
   return {
     inventory: {
-      inventoryId: generateUniqueInventoryId(),
       quantity: data?.seats.length,
       section: data?.section,
       hideSeatNumbers: true,

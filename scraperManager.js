@@ -2,6 +2,7 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
+import { handleTicketmasterChallenge } from "./browser-cookies.js";
 import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
@@ -19,14 +20,14 @@ const MAX_UPDATE_INTERVAL = 60000; // Optimized 1-minute update requirement
 const CONCURRENT_LIMIT = 500; // Increased for maximum throughput
 const MAX_RETRIES = 10; // Further reduced for faster failure recovery
 const SCRAPE_TIMEOUT = 30000; // Optimized 20-second timeout
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 5000; // Reduced to 10 seconds for faster cycles
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds for faster cycles
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 const EVENT_FAILURE_THRESHOLD = 90000; // Reduced to 1.5 minutes for faster recovery
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
 // Optimized recovery settings for maximum performance
-const PARALLEL_BATCH_SIZE = 300; // Optimized for better batching
-const MAX_PARALLEL_BATCHES = 25; // Increased for better parallelization
+const PARALLEL_BATCH_SIZE = 200; // Optimized for better batching
+const MAX_PARALLEL_BATCHES = 30; // Increased for better parallelization
 
 // Multi-tier recovery intervals for aggressive processing
 
@@ -43,9 +44,6 @@ const generateRandomIp = () =>
 // Number of proxy rotation attempts when fetching fresh cookies/headers
 
 // Only accept cookie sets with at least this many cookies to avoid challenge pages
-const MIN_VALID_COOKIES = 3;
-
-// Realistic fingerprint options to mimic human browsers (language, timezone, plugins, screen size, etc.)
 const FINGERPRINT_POOL = [
   {
     language: "en-US",
@@ -142,6 +140,22 @@ const COOKIE_MANAGEMENT = {
   },
 };
 
+let inventoryIdCounter = 0;
+
+function generateUniqueInventoryId() {
+  // Use timestamp (last 6 digits) + counter (4 digits) for uniqueness
+  const timestamp = Date.now();
+  const timestampPart = parseInt(timestamp.toString().slice(-6)); // Last 6 digits of timestamp
+
+  // Increment counter and reset if it exceeds 4 digits
+  inventoryIdCounter = (inventoryIdCounter + 1) % 10000;
+
+  // Combine timestamp part (6 digits) + counter (4 digits) = 10 digits
+  const uniqueId = timestampPart * 10000 + inventoryIdCounter;
+
+  // Ensure it's always 10 digits by padding if necessary
+  return parseInt(uniqueId.toString().padStart(10, "1"));
+}
 
 export class ScraperManager {
   constructor() {
@@ -964,7 +978,7 @@ export class ScraperManager {
           existingRowMap.set(rowKey, {
             _id: group._id,
             seatCount: group.seatCount,
-            seats: group.seats.map((s) => s.number).sort(),
+            seats: group.seats.map(s => typeof s === 'object' && s !== null && 'number' in s ? s.number : s).sort((a, b) => a - b), // Ensure numeric sort
             price: group.inventory?.listPrice,
             quantity: group.inventory?.quantity,
             inventoryId: group.inventory?.inventoryId,
@@ -978,9 +992,14 @@ export class ScraperManager {
           const increasedPrice =
             basePrice * (1 + priceIncreasePercentage / 100);
 
+          // Ensure seats are numbers and sorted numerically
+          const sortedNewSeats = group.seats
+            .map(s => typeof s === 'object' && s !== null && 'number' in s ? s.number : s) // Handle both number and object {number: X} formats
+            .sort((a, b) => a - b);
+
           newRowMap.set(rowKey, {
             seatCount: group.inventory.quantity,
-            seats: group.seats.sort(),
+            seats: sortedNewSeats, // Use the normalized and sorted array
             price: increasedPrice,
             quantity: group.inventory.quantity,
             groupData: group,
@@ -1001,20 +1020,38 @@ export class ScraperManager {
             // Row no longer exists in new data - mark for deletion
             rowsToDelete.push(existingData._id);
           } else {
-            // Check if row data has changed (excluding inventory ID)
-            const seatsChanged =
-              JSON.stringify(existingData.seats) !==
-              JSON.stringify(newData.seats);
-            const priceChanged =
-              Math.abs(existingData.price - newData.price) > 0.01;
-            const quantityChanged = existingData.quantity !== newData.quantity;
+            // Helper to compare two sorted arrays of numbers
+            const areArraysEqual = (arr1, arr2) => {
+              if (arr1.length !== arr2.length) return false;
+              for (let i = 0; i < arr1.length; i++) {
+                if (arr1[i] !== arr2[i]) return false;
+              }
+              return true;
+            };
 
+            // Check if row data has changed (excluding inventory ID)
+            const seatsChanged = !areArraysEqual(existingData.seats, newData.seats);
+
+            const existingPrice = parseFloat(existingData.price);
+            const newPrice = parseFloat(newData.price);
+            const priceChanged = Math.abs(existingPrice - newPrice) > 0.01;
+            const quantityChanged = Number(existingData.quantity) !== Number(newData.quantity);
+
+            // Preserve inventoryId if seats and price haven't changed
+            if (!seatsChanged && !priceChanged) {
+              newData.groupData.inventory.inventoryId = existingData.inventoryId;
+            }
+            // If seats or price DID change, inventoryId is NOT preserved here,
+            // and a new one will be generated for the item when it's processed/saved.
+
+            // Now, decide if the DB record needs an update for any of these fields
             if (seatsChanged || priceChanged || quantityChanged) {
               rowsToUpdate.push({ _id: existingData._id, data: newData });
             } else {
-              // No changes detected - preserve existing inventory ID
-              newData.groupData.inventory.inventoryId =
-                existingData.inventoryId;
+              // This 'else' implies:
+              // 1. !seatsChanged && !priceChanged (so inventoryId was preserved)
+              // 2. AND !quantityChanged (so no other tracked change)
+              // Therefore, truly no changes to the row data itself.
               unchangedRows++;
             }
           }
@@ -1084,7 +1121,7 @@ export class ScraperManager {
                         mapping_id,
                       })),
                       inventory: {
-                        inventoryId: group.inventory.inventoryId, // This will be the new unique ID from seatBatch.js
+                        inventoryId: generateUniqueInventoryId(), // This will be the new unique ID from seatBatch.js
                         quantity: group.inventory.quantity,
                         section: group.section,
                         hideSeatNumbers:
@@ -1213,7 +1250,7 @@ export class ScraperManager {
                   mapping_id,
                 })),
                 inventory: {
-                  inventoryId: group.inventory.inventoryId, // This will be the new unique ID from seatBatch.js
+                  inventoryId: generateUniqueInventoryId(), // This will be the new unique ID from seatBatch.js
                   quantity: group.inventory.quantity,
                   section: group.section,
                   hideSeatNumbers: group.inventory.hideSeatNumbers || true,
@@ -3052,6 +3089,16 @@ export class ScraperManager {
           .evaluate(() => {
             return document.body.textContent.includes(
               "Your Browsing Activity Has Been Paused"
+            ) || document.body.textContent.includes(
+              "Are you a robot"
+            ) || document.body.textContent.includes(
+              "Verify you are human"
+            ) || document.body.textContent.includes(
+              "I'm not a robot"
+            ) || document.body.textContent.includes(
+              "Please verify"
+            ) || document.body.textContent.includes(
+              "Security check"
             );
           })
           .catch(() => false);
@@ -3172,6 +3219,15 @@ export class ScraperManager {
         retryCount++;
       }
     }
+  }
+
+  /**
+   * Handle Ticketmaster challenge by delegating to the imported function
+   * @param {Object} page - Playwright page object
+   * @returns {Promise<boolean>} - Whether the challenge was resolved
+   */
+  async handleTicketmasterChallenge(page) {
+    return await handleTicketmasterChallenge(page);
   }
 
   /**

@@ -98,7 +98,7 @@ class DatabaseManager {
         ).session(session);
 
         if (scrapeResult?.length > 0) {
-          // Optimized seat comparison
+          // Optimized seat comparison with consistent property access
           const existingGroups = await ConsecutiveGroup.find(
             { eventId },
             { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 }
@@ -106,14 +106,14 @@ class DatabaseManager {
 
           const existingSeats = new Set(
             existingGroups.flatMap((g) =>
-              g.seats.map((s) => `${g.section}-${g.row}-${s.number}-${s.price}`)
+              g.seats.map((s) => `${g.section}-${g.row}-${s.number.toString()}-${g.inventory.listPrice}`)
             )
           );
 
           const newSeats = new Set(
             scrapeResult.flatMap((g) =>
               g.seats.map(
-                (s) => `${g.section}-${g.row}-${s}-${g.inventory.listPrice}`
+                (s) => `${g.section}-${g.row}-${s.toString()}-${g.inventory.listPrice}`
               )
             )
           );
