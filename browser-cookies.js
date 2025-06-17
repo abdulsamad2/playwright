@@ -244,7 +244,7 @@ async function initBrowser(proxy) {
     
     // Create a new page and simulate human behavior
     const page = await context.newPage();
-    await page.waitForTimeout(1000 + Math.random() * 2000);
+    await page.waitForTimeout(5000 + Math.random() * 2000);
     await simulateMobileInteractions(page);
     
     return { context, fingerprint: enhancedFingerprint(), page, browser };
