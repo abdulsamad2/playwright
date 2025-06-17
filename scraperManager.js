@@ -1121,7 +1121,7 @@ export class ScraperManager {
                         mapping_id,
                       })),
                       inventory: {
-                        inventoryId: generateUniqueInventoryId(), // This will be the new unique ID from seatBatch.js
+                        inventoryId: group.inventory.inventoryId || generateUniqueInventoryId(), // Use preserved ID if available, otherwise generate new one
                         quantity: group.inventory.quantity,
                         section: group.section,
                         hideSeatNumbers:
@@ -1250,7 +1250,7 @@ export class ScraperManager {
                   mapping_id,
                 })),
                 inventory: {
-                  inventoryId: generateUniqueInventoryId(), // This will be the new unique ID from seatBatch.js
+                  inventoryId: group.inventory.inventoryId || generateUniqueInventoryId(), // Use preserved ID if available, otherwise generate new one
                   quantity: group.inventory.quantity,
                   section: group.section,
                   hideSeatNumbers: group.inventory.hideSeatNumbers || true,
