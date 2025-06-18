@@ -12,9 +12,7 @@ import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
 
-// Add this at the top of the file, after imports
-export const ENABLE_CSV_PROCESSING = false; // Disabled for performance optimization
-export const ENABLE_CSV_UPLOAD = false; // Disabled for performance optimization
+
 
 
 const MAX_UPDATE_INTERVAL = 60000; // Optimized 1-minute update requirement
@@ -997,10 +995,7 @@ export class ScraperManager {
             quantity: group.inventory?.quantity,
             inventoryId: group.inventory?.inventoryId,
           });
-          
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(`[Debug SM ${eventId}] Existing row ${rowKey} seats: ${JSON.stringify(extractedSeats)}`, "debug");
-          }
+        
         });
 
         const newRowMap = new Map();
@@ -1023,9 +1018,7 @@ export class ScraperManager {
             return String(seatNumber);
           }).sort(); // Sort lexicographically as strings
           
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(`[Debug SM ${eventId}] New row ${rowKey} seats: ${JSON.stringify(extractedSeats)}`, "debug");
-          }
+         
 
           newRowMap.set(rowKey, {
             seatCount: group.inventory.quantity,
@@ -1052,43 +1045,28 @@ export class ScraperManager {
           } else {
             // Helper to compare two arrays of strings (already normalized and sorted)
             const areArraysEqual = (arr1, arr2) => {
-              console.log(`\n\n===== COMPARING SEAT ARRAYS =====`);
-              console.log(`Row: ${rowKey}`);
-              console.log(`Existing seats: ${JSON.stringify(arr1)}`);
-              console.log(`New seats: ${JSON.stringify(arr2)}`);
+           
               
               if (arr1.length !== arr2.length) {
-                console.log(`MISMATCH: Array length different - ${arr1.length} vs ${arr2.length}`);
-                if (LOG_LEVEL >= 3) {
-                  this.logWithTime(`[Debug SM ${eventId}] Array length mismatch: ${arr1.length} vs ${arr2.length}`, "debug");
-                }
+          
                 return false;
               }
               
               // Since we've already normalized to strings and sorted, we can do a direct comparison
               for (let i = 0; i < arr1.length; i++) {
                 if (arr1[i] !== arr2[i]) {
-                  console.log(`MISMATCH: Element at index ${i}: '${arr1[i]}' vs '${arr2[i]}'`);
-                  console.log(`Types: ${typeof arr1[i]} vs ${typeof arr2[i]}`);
-                  if (LOG_LEVEL >= 3) {
-                    this.logWithTime(`[Debug SM ${eventId}] Array element mismatch at index ${i}: '${arr1[i]}' vs '${arr2[i]}'`, "debug");
-                  }
+          
                   return false;
                 }
               }
-              console.log(`MATCH: Arrays are equal`);
-              console.log(`===== END COMPARISON =====\n\n`);
+             
               return true;
             };
 
             // Check if row data has changed (excluding inventory ID)
             const seatsChanged = !areArraysEqual(existingData.seats, newData.seats);
             
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Existing seats: ${JSON.stringify(existingData.seats)}`, "debug");
-              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - New seats: ${JSON.stringify(newData.seats)}`, "debug");
-              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Seats changed: ${seatsChanged}`, "debug");
-            }
+            
 
             const existingPrice = parseFloat(existingData.price);
             const newPrice = parseFloat(newData.price);
@@ -1097,19 +1075,13 @@ export class ScraperManager {
             
         
             
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Price comparison: ${existingPrice} vs ${newPrice}, changed: ${priceChanged}`, "debug");
-              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Quantity comparison: ${existingData.quantity} vs ${newData.quantity}, changed: ${quantityChanged}`, "debug");
-            }
+           
 
             if (!seatsChanged && !priceChanged) {
               newData.groupData.inventory.inventoryId = existingData.inventoryId;
-              console.log(`PRESERVING inventory ID: ${existingData.inventoryId}`);
             } else {
-              console.log(`NOT preserving inventory ID due to changes`);
             }
-            console.log(`Final inventory ID: ${newData.groupData.inventory.inventoryId || 'will be generated'}`);
-            console.log(`===== END INVENTORY ID LOGIC =====\n`);
+          
             // If seats or price DID change, inventoryId is NOT preserved here,
             // and a new one will be generated for the item when it's processed/saved.
 
@@ -1133,12 +1105,7 @@ export class ScraperManager {
           }
         }
 
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `[Debug SM ${eventId}] Row Analysis - Unchanged: ${unchangedRows}, To Delete: ${rowsToDelete.length}, To Insert: ${rowsToInsert.length}, To Update: ${rowsToUpdate.length}`,
-            "debug"
-          );
-        }
+       
 
         // Perform efficient updates only if there are changes
         if (

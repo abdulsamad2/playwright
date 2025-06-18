@@ -3,9 +3,7 @@ import path from 'path';
 import { customAlphabet } from 'nanoid';
 const generateNumericId10 = customAlphabet('0123456789', 10);
 // CSV helper imports removed
-import SyncService from '../services/syncService.js';
 // CSV imports removed
-import { ENABLE_CSV_PROCESSING } from '../scraperManager.js'; // Import the flag
 
 // Constants for SyncService (mirroring uploadInventory.js)
 // Ideally, these should be in environment variables

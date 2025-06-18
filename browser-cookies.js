@@ -920,16 +920,21 @@ async function refreshCookies(eventId, proxy = null, existingBrowserInstance = n
 
 /**
  * Clean up browser resources
+ * Note: This function is modified to preserve browser instances that are being reused
  */
 async function cleanup() {
-  if (browser) {
-    try {
-      await browser.close();
-      browser = null;
-    } catch (error) {
-      console.warn("Error closing browser:", error.message);
-    }
-  }
+  // Don't close the browser if it's being reused for cookie refresh
+  // The browser will be managed by the cookie refresh system
+  console.log("Cleanup called - browser instance will be preserved for reuse");
+  // Commenting out browser.close() to prevent closing reusable browser instances
+  // if (browser) {
+  //   try {
+  //     await browser.close();
+  //     browser = null;
+  //   } catch (error) {
+  //     console.warn("Error closing browser:", error.message);
+  //   }
+  // }
 }
 
 export {
