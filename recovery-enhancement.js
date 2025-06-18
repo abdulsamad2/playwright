@@ -25,8 +25,11 @@ const LONG_RECOVERY_COOLDOWN = 15000; // 15 seconds for persistent failures
  * Start recovery monitoring intervals for aggressive stale event handling
  */
 function startRecoveryMonitoring() {
-  this.logWithTime("Starting enhanced recovery monitoring for 3-minute update guarantee", "info");
-  
+  this.logWithTime(
+    "Starting enhanced recovery monitoring for 3-minute update guarantee",
+    "info"
+  );
+
   // Critical recovery check every 10 seconds
   this.criticalRecoveryIntervalId = setInterval(async () => {
     try {
@@ -61,24 +64,30 @@ function startRecoveryMonitoring() {
 async function handleCriticalStaleEvents() {
   const now = Date.now();
   const criticalThreshold = CRITICAL_THRESHOLD;
-  
+
   try {
     // Verify database connection first
     if (!this.db || !this.db.readyState) {
-      throw new Error('Database connection not ready');
+      throw new Error("Database connection not ready");
     }
 
     const criticalEvents = await Event.find({
       Skip_Scraping: { $ne: true },
-      Last_Updated: { $lt: new Date(now - criticalThreshold) }
-    }).select("Event_ID").lean().catch(err => {
-      throw new Error(`Database query failed: ${err.message}`);
-    });
+      Last_Updated: { $lt: new Date(now - criticalThreshold) },
+    })
+      .select("Event_ID")
+      .lean()
+      .catch((err) => {
+        throw new Error(`Database query failed: ${err.message}`);
+      });
 
     if (criticalEvents.length > 0) {
-      const eventIds = criticalEvents.map(e => e.Event_ID);
-      this.logWithTime(`🚨 CRITICAL: ${eventIds.length} events >2min stale - immediate recovery`, "error");
-      
+      const eventIds = criticalEvents.map((e) => e.Event_ID);
+      this.logWithTime(
+        `🚨 CRITICAL: ${eventIds.length} events >2min stale - immediate recovery`,
+        "error"
+      );
+
       // Process in parallel batches for speed
       const batches = [];
       for (let i = 0; i < eventIds.length; i += RECOVERY_BATCH_SIZE) {
@@ -86,16 +95,16 @@ async function handleCriticalStaleEvents() {
       }
 
       // Process up to MAX_RECOVERY_BATCHES in parallel
-      const batchPromises = batches.slice(0, MAX_RECOVERY_BATCHES).map(batch => 
-        this.recoverEventBatch(batch, 'critical')
-      );
-      
+      const batchPromises = batches
+        .slice(0, MAX_RECOVERY_BATCHES)
+        .map((batch) => this.recoverEventBatch(batch, "critical"));
+
       await Promise.allSettled(batchPromises);
     }
   } catch (error) {
     this.logWithTime(`Error in critical recovery: ${error.message}`, "error");
     // Clear intervals if database connection failed
-    if (error.message.includes('Database')) {
+    if (error.message.includes("Database")) {
       this.stopRecoveryMonitoring();
     }
   }
@@ -107,9 +116,10 @@ async function handleCriticalStaleEvents() {
 async function handleStandardStaleEvents(processedEvents = new Set()) {
   const CRITICAL_THRESHOLD = STALE_THRESHOLD;
   const STOP_THRESHOLD = AUTO_STOP_THRESHOLD;
-  
+
   try {
-    if (!this.db || !this.db.readyState) throw new Error('Database connection not ready');
+    if (!this.db || !this.db.readyState)
+      throw new Error("Database connection not ready");
 
     // Initialize trackers
     this.eventAttempts = this.eventAttempts || new Map();
@@ -118,27 +128,34 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
     const now = Date.now();
     const staleEvents = await Event.find({
       Skip_Scraping: { $ne: true },
-      Last_Updated: { $lt: new Date(now - CRITICAL_THRESHOLD) }
-    }).select("Event_ID Last_Updated").lean();
+      Last_Updated: { $lt: new Date(now - CRITICAL_THRESHOLD) },
+    })
+      .select("Event_ID Last_Updated")
+      .lean();
 
     for (const event of staleEvents) {
       const eventId = event.Event_ID;
       const lastUpdated = new Date(event.Last_Updated).getTime();
       const timeStale = now - lastUpdated;
-      
+
       // Auto-stop if stale for >10 minutes
       if (timeStale > STOP_THRESHOLD) {
         await Event.updateOne(
           { Event_ID: eventId },
-          { $set: { Status: "STOPPED", Stop_Reason: "stale_timeout" }}
+          { $set: { Status: "STOPPED", Stop_Reason: "stale_timeout" } }
         );
-        this.logWithTime(`⚠️ STOPPED event ${eventId} (stale for ${Math.round(timeStale/60000)} minutes)`, 'warning');
+        this.logWithTime(
+          `⚠️ STOPPED event ${eventId} (stale for ${Math.round(
+            timeStale / 60000
+          )} minutes)`,
+          "warning"
+        );
         continue;
       }
-      
+
       // Skip if in cooldown (5 seconds)
       if (this.cooldownEvents.has(eventId)) continue;
-      
+
       // Skip if already processed
       if (processedEvents.has(eventId)) continue;
 
@@ -146,31 +163,39 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
         // Track attempt (max 3 attempts in 3 minutes)
         const attempts = (this.eventAttempts.get(eventId) || 0) + 1;
         this.eventAttempts.set(eventId, attempts);
-        
+
         // Short cooldown (5 seconds) after 3 attempts
         if (attempts > 3) {
           this.cooldownEvents.add(eventId);
-          setTimeout(() => this.cooldownEvents.delete(eventId), SHORT_RECOVERY_COOLDOWN);
+          setTimeout(
+            () => this.cooldownEvents.delete(eventId),
+            SHORT_RECOVERY_COOLDOWN
+          );
           continue;
         }
-        
+
         // Immediately update timestamp and process
         await Event.updateOne(
           { Event_ID: eventId },
-          { $set: { Last_Updated: new Date() }}
+          { $set: { Last_Updated: new Date() } }
         );
-        
+
         processedEvents.add(eventId);
-        this.logWithTime(`♻️ Attempt ${attempts} on stale event ${eventId} (${Math.round(timeStale/1000)}s stale)`, 'debug');
-        
+        this.logWithTime(
+          `♻️ Attempt ${attempts} on stale event ${eventId} (${Math.round(
+            timeStale / 1000
+          )}s stale)`,
+          "debug"
+        );
+
         // Highest priority recovery
-        await this.addToRecoveryQueue([eventId], 'critical');
+        await this.addToRecoveryQueue([eventId], "critical");
       } catch (error) {
-        this.logWithTime(`❗ Failed ${eventId}: ${error.message}`, 'error');
+        this.logWithTime(`❗ Failed ${eventId}: ${error.message}`, "error");
       }
     }
   } catch (error) {
-    this.logWithTime(`‼️ Recovery system error: ${error.message}`, 'error');
+    this.logWithTime(`‼️ Recovery system error: ${error.message}`, "error");
   }
 }
 
@@ -179,29 +204,35 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
  */
 async function handleAutoStopEvents() {
   const now = Date.now();
-  
+
   try {
     // Verify database connection first
     if (!this.db || !this.db.readyState) {
-      throw new Error('Database connection not ready');
+      throw new Error("Database connection not ready");
     }
 
     const eventsToStop = await Event.find({
       Skip_Scraping: { $ne: true },
-      Last_Updated: { $lt: new Date(now - AUTO_STOP_THRESHOLD) }
-    }).select("Event_ID").lean().catch(err => {
-      throw new Error(`Database query failed: ${err.message}`);
-    });
+      Last_Updated: { $lt: new Date(now - AUTO_STOP_THRESHOLD) },
+    })
+      .select("Event_ID")
+      .lean()
+      .catch((err) => {
+        throw new Error(`Database query failed: ${err.message}`);
+      });
 
     if (eventsToStop.length > 0) {
-      const eventIds = eventsToStop.map(e => e.Event_ID);
-      this.logWithTime(`🛑 AUTO-STOP: ${eventIds.length} events >10min stale - stopping`, "error");
+      const eventIds = eventsToStop.map((e) => e.Event_ID);
+      this.logWithTime(
+        `🛑 AUTO-STOP: ${eventIds.length} events >10min stale - stopping`,
+        "error"
+      );
       await this.autoStopStaleEvents(eventIds);
     }
   } catch (error) {
     this.logWithTime(`Error in auto-stop check: ${error.message}`, "error");
     // Clear intervals if database connection failed
-    if (error.message.includes('Database')) {
+    if (error.message.includes("Database")) {
       this.stopRecoveryMonitoring();
     }
   }
@@ -210,21 +241,24 @@ async function handleAutoStopEvents() {
 /**
  * Recover a batch of events with specified recovery level
  */
-async function recoverEventBatch(eventIds, recoveryLevel = 'standard') {
+async function recoverEventBatch(eventIds, recoveryLevel = "standard") {
   const results = { recovered: [], failed: [] };
 
   try {
-    const recoveryPromises = eventIds.map(eventId => 
+    const recoveryPromises = eventIds.map((eventId) =>
       this.recoverSingleEvent(eventId, recoveryLevel)
-        .then(success => {
+        .then((success) => {
           if (success) {
             results.recovered.push(eventId);
           } else {
             results.failed.push(eventId);
           }
         })
-        .catch(err => {
-          this.logWithTime(`Recovery error for ${eventId}: ${err.message}`, "error");
+        .catch((err) => {
+          this.logWithTime(
+            `Recovery error for ${eventId}: ${err.message}`,
+            "error"
+          );
           results.failed.push(eventId);
         })
     );
@@ -237,7 +271,6 @@ async function recoverEventBatch(eventIds, recoveryLevel = 'standard') {
         results.recovered.length > 0 ? "success" : "warning"
       );
     }
-
   } catch (error) {
     this.logWithTime(`Batch recovery error: ${error.message}`, "error");
   }
@@ -248,7 +281,7 @@ async function recoverEventBatch(eventIds, recoveryLevel = 'standard') {
 /**
  * Recover a single event with specified strategy
  */
-async function recoverSingleEvent(eventId, recoveryLevel = 'standard') {
+async function recoverSingleEvent(eventId, recoveryLevel = "standard") {
   try {
     // Reset all failure tracking
     this.failedEvents.delete(eventId);
@@ -258,30 +291,35 @@ async function recoverSingleEvent(eventId, recoveryLevel = 'standard') {
     this.eventFailureTimes.delete(eventId);
 
     // Get fresh proxy and session for critical recovery
-    if (recoveryLevel === 'critical') {
+    if (recoveryLevel === "critical") {
       this.proxyManager.releaseProxy(eventId, false);
       await this.refreshEventHeaders(eventId, true);
     }
 
     // Attempt scrape with higher timeout for recovery
     const scrapeResult = await this.scrapeEventOptimized(
-      eventId, 
-      0, 
-      null, 
-      recoveryLevel === 'critical' ? 60000 : 45000
+      eventId,
+      0,
+      null,
+      recoveryLevel === "critical" ? 60000 : 45000
     );
 
     if (scrapeResult) {
-      this.logWithTime(`✅ ${recoveryLevel.toUpperCase()} recovery SUCCESS for event ${eventId}`, "success");
+      this.logWithTime(
+        `✅ ${recoveryLevel.toUpperCase()} recovery SUCCESS for event ${eventId}`,
+        "success"
+      );
       this.clearFailureCount(eventId);
       this.eventFailureTimes.delete(eventId);
       return true;
     }
 
     return false;
-
   } catch (error) {
-    this.logWithTime(`Recovery failed for ${eventId}: ${error.message}`, "error");
+    this.logWithTime(
+      `Recovery failed for ${eventId}: ${error.message}`,
+      "error"
+    );
     return false;
   }
 }
@@ -294,17 +332,17 @@ function stopRecoveryMonitoring() {
     clearInterval(this.criticalRecoveryIntervalId);
     this.criticalRecoveryIntervalId = null;
   }
-  
+
   if (this.standardRecoveryIntervalId) {
     clearInterval(this.standardRecoveryIntervalId);
     this.standardRecoveryIntervalId = null;
   }
-  
+
   if (this.autoStopIntervalId) {
     clearInterval(this.autoStopIntervalId);
     this.autoStopIntervalId = null;
   }
-  
+
   this.logWithTime("Stopped recovery monitoring intervals", "info");
 }
 

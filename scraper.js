@@ -355,18 +355,40 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
     // Use our new module to refresh cookies
     try {
-      const result = await refreshCookies(eventIdToUse, proxyToUse);
+      let result;
+      // Check if we have a reusable browser instance, context, and page
+      const { browserInstance: existingInstance, browserContext: existingContext, browserPage: existingPage, proxy: existingProxy } = cookieManager.capturedState || {};
+
+      // Basic check if the browser instance might still be usable (Playwright's isConnected() is a good check)
+      // For simplicity here, we'll assume if it exists, we try to use it.
+      // A more robust check would involve `existingInstance && existingInstance.isConnected()`
+      if (existingInstance && existingContext && existingPage && typeof existingInstance.isConnected === 'function' && existingInstance.isConnected()) {
+        console.log("Attempting to reuse existing browser window/tab for cookie refresh.");
+        // If proxy has changed, we might need to re-evaluate or force new browser.
+        // For now, assume if proxyToUse is different, we should prefer a new browser or handle proxy in existing context if possible (advanced).
+        // Let's assume for now if proxyToUse is different from existingProxy, we might still try to reuse, 
+        // but refreshCookies would need to handle this (e.g. by creating a new context with new proxy if browser allows).
+        // Or, more simply, if proxy changes, force new browser. For now, let's pass it and let refreshCookies decide or adapt.
+        result = await refreshCookies(eventIdToUse, proxyToUse, existingInstance, existingContext, existingPage);
+      } else {
+        console.log("No reusable browser session found or browser disconnected, initializing new session for cookie refresh.");
+        result = await refreshCookies(eventIdToUse, proxyToUse);
+      }
       
       if (result && result.cookies) {
-        // Update captured state with the new cookies and fingerprint
+        // Update captured state with the new cookies, fingerprint, and browser resources
         cookieManager.capturedState = {
           cookies: result.cookies,
           fingerprint: result.fingerprint,
           lastRefresh: Date.now(),
           proxy: cookieManager.capturedState.proxy || proxyToUse,
+          browserInstance: result.browserInstanceToReuse, // Store the browser instance
+          browserContext: result.contextToReuse,       // Store the browser context
+          browserPage: result.pageToReuse,             // Store the browser page
         };
         
         clearTimeout(globalTimeoutId);
+        // Note: cleanupRefreshProcess does not close the browser, so it's safe to call.
         await cleanupRefreshProcess();
         return cookieManager.capturedState;
       } else {

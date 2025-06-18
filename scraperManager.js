@@ -18,7 +18,7 @@ export const ENABLE_CSV_UPLOAD = false; // Disabled for performance optimization
 
 
 const MAX_UPDATE_INTERVAL = 60000; // Optimized 1-minute update requirement
-const CONCURRENT_LIMIT = 500; // Increased for maximum throughput
+const CONCURRENT_LIMIT = 2000; // Adjusted for increased parallel batches
 const MAX_RETRIES = 10; // Further reduced for faster failure recovery
 const SCRAPE_TIMEOUT = 30000; // Optimized 20-second timeout
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 10 seconds for faster cycles
@@ -28,7 +28,7 @@ const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped aft
 
 // Optimized recovery settings for maximum performance
 const PARALLEL_BATCH_SIZE = 200; // Optimized for better batching
-const MAX_PARALLEL_BATCHES = 30; // Increased for better parallelization
+const MAX_PARALLEL_BATCHES = 40; // Increased for better parallelization and event handling capacity
 
 // Multi-tier recovery intervals for aggressive processing
 
@@ -3076,8 +3076,8 @@ export class ScraperManager {
       } else {
         // Event is not stale and has retries remaining
         const newRetryCount = retryCount + 1;
-        const baseBackoff = 15000; // 15 seconds
-        const incrementFactor = 5000; // 5 seconds per retry count
+        const baseBackoff = 30000; // Increased to 30 seconds
+        const incrementFactor = 10000; // Increased to 10 seconds per retry count
         const maxBackoff = 300000; // 5 minutes
         const jitter = Math.floor(Math.random() * 5000); // 0-5 seconds jitter
 

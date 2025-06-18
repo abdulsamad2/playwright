@@ -712,10 +712,11 @@ async function loadCookiesFromFile() {
 /**
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
-async function refreshCookies(eventId, proxy = null) {
-  let localContext = null;
-  let page = null;
-  let browserInstance = null;
+async function refreshCookies(eventId, proxy = null, existingBrowserInstance = null, existingContext = null, existingPage = null) {
+  let localContext = existingContext;
+  let page = existingPage;
+  let browserInstance = existingBrowserInstance;
+  let succeeded = false; // Flag to indicate success
 
   try {
     console.log(`Refreshing cookies using event ${eventId}`);
@@ -746,7 +747,56 @@ async function refreshCookies(eventId, proxy = null) {
     let initSuccess = false;
     let initError = null;
 
-    while (initAttempts < 3 && !initSuccess) {
+    if (browserInstance && localContext && page && typeof browserInstance.isConnected === 'function' && browserInstance.isConnected()) {
+      console.log("Reusing provided browser instance, context, and page.");
+      // Update the global browser variable to prevent initBrowser from creating a new one
+      browser = browserInstance;
+      initSuccess = true;
+      // Ensure the page is not closed if it's being reused
+      if (page.isClosed()) {
+        console.warn("Provided page was closed, attempting to create a new one from context.");
+        if (localContext.newPage) { // Check if context is still valid for newPage
+            try {
+                page = await localContext.newPage();
+            } catch (e) {
+                console.error("Failed to create new page from reused context:", e.message);
+                initSuccess = false; // Force re-initialization
+                browser = null; // Reset global browser as well
+            }
+        } else {
+            initSuccess = false; // Force re-initialization if context is also unusable
+            browser = null; // Reset global browser as well
+        }
+      }
+    } else if (browserInstance && localContext && typeof browserInstance.isConnected === 'function' && browserInstance.isConnected()) {
+      console.log("Reusing provided browser instance and context, creating new page.");
+      // Update the global browser variable to prevent initBrowser from creating a new one
+      browser = browserInstance;
+      try {
+        page = await localContext.newPage();
+        initSuccess = true;
+      } catch (e) {
+        console.error("Failed to create new page from reused context:", e.message);
+        // Fall through to full initialization if new page creation fails
+        browserInstance = null; // Reset to allow full init
+        localContext = null;
+        browser = null; // Reset global browser as well
+      }
+    } else {
+      // Clear any potentially stale passed-in instances if they are not fully usable
+      browserInstance = null;
+      localContext = null;
+      page = null;
+      browser = null; // Reset global browser as well
+    }
+
+    if (!initSuccess) {
+      console.log("Proceeding with new browser initialization.");
+      // Resetting these to null ensures initBrowser starts fresh if previous checks failed partially
+      browserInstance = null;
+      localContext = null;
+      page = null;
+      while (initAttempts < 3 && !initSuccess) {
       try {
         const result = await initBrowser(proxy);
         if (!result || !result.context || !result.fingerprint) {
@@ -758,6 +808,8 @@ async function refreshCookies(eventId, proxy = null) {
         browserInstance = result.browser;
         localContext = result.context;
         page = result.page;
+        // Update global browser variable when creating new browser
+        browser = result.browser;
 
         initSuccess = true;
       } catch (error) {
@@ -835,37 +887,36 @@ async function refreshCookies(eventId, proxy = null) {
       throw new Error("Failed to capture cookies");
     }
 
+    // Mark refresh as successful before returning
+    succeeded = true; // Set flag before returning
     return {
       cookies,
       fingerprint,
       lastRefresh: Date.now(),
+      browserInstanceToReuse: browserInstance, // Pass the browser instance back
+      contextToReuse: localContext, // Pass the context back
+      pageToReuse: page // Pass the page back
     };
-  } catch (error) {
-    console.error(`Error refreshing cookies: ${error.message}`);
+  }
+    // Error is re-thrown, cleanup happens in finally
     throw error;
   } finally {
-    // Close page and context but keep browser open for reuse
-    if (page) {
-      try {
-        await page
-          .close()
-          .catch((e) => console.error("Error closing page:", e));
-      } catch (e) {
-        console.error("Error closing page in finally block:", e);
+    if (!succeeded) { // If not successful, clean up everything
+      if (page) {
+        try { await page.close(); } catch (e) { console.warn('Error closing page on refresh failure:', e.message); }
+      }
+      if (localContext) {
+        try { await localContext.close(); } catch (e) { console.warn('Error closing context on refresh failure:', e.message); }
+      }
+      if (browserInstance) {
+        try { await browserInstance.close(); } catch (e) { console.warn('Error closing browser on refresh failure:', e.message); }
       }
     }
-
-    if (localContext) {
-      try {
-        await localContext
-          .close()
-          .catch((e) => console.error("Error closing context:", e));
-      } catch (e) {
-        console.error("Error closing context in finally block:", e);
-      }
-    }
+    // If succeeded is true, browserInstance, localContext, and page were returned and should not be closed here.
+    // The calling function is now responsible for them.
   }
 }
+
 
 /**
  * Clean up browser resources

@@ -6,9 +6,8 @@
   "scripts": {
     "start": "node app.js",
     "start-scraper": "node app.js --start-scraper",
-    "dev": "node --watch app.js",
-    "process-csv": "node processInventory.js process",
-    "test-sync": "node testSyncService.js"
+    "dev": "node --watch app.js"
+   
   },
   "keywords": [],
   "author": "",
