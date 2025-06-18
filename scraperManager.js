@@ -16,6 +16,7 @@ import AutoRestartMonitor from './helpers/AutoRestartMonitor.js';
 export const ENABLE_CSV_PROCESSING = false; // Disabled for performance optimization
 export const ENABLE_CSV_UPLOAD = false; // Disabled for performance optimization
 
+c
 const MAX_UPDATE_INTERVAL = 60000; // Optimized 1-minute update requirement
 const CONCURRENT_LIMIT = 500; // Increased for maximum throughput
 const MAX_RETRIES = 10; // Further reduced for faster failure recovery
@@ -32,10 +33,10 @@ const MAX_PARALLEL_BATCHES = 30; // Increased for better parallelization
 // Multi-tier recovery intervals for aggressive processing
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
-const LOG_LEVEL = 3; // Default to warnings and errors onl
+const LOG_LEVEL = 1; // Default to warnings and errors onl
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
-const COOKIE_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
+const COOKIE_EXPIRATION_MS = 30 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
 const SESSION_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes for session refresh
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
