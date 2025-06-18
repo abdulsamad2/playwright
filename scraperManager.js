@@ -975,14 +975,31 @@ export class ScraperManager {
         const existingRowMap = new Map();
         existingGroups.forEach((group) => {
           const rowKey = `${group.section}-${group.row}`;
+          // Extract seat numbers and ensure they're all strings for consistent comparison
+          const extractedSeats = group.seats.map(s => {
+            // Handle different possible seat formats
+            let seatNumber;
+            if (typeof s === 'object' && s !== null) {
+              seatNumber = s.number;
+            } else {
+              seatNumber = s;
+            }
+            // Ensure seat number is a string
+            return String(seatNumber);
+          }).sort(); // Sort lexicographically as strings
+          
           existingRowMap.set(rowKey, {
             _id: group._id,
             seatCount: group.seatCount,
-            seats: group.seats.map(s => typeof s === 'object' && s !== null && 'number' in s ? s.number : s).sort((a, b) => a - b), // Ensure numeric sort
+            seats: extractedSeats,
             price: group.inventory?.listPrice,
             quantity: group.inventory?.quantity,
             inventoryId: group.inventory?.inventoryId,
           });
+          
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(`[Debug SM ${eventId}] Existing row ${rowKey} seats: ${JSON.stringify(extractedSeats)}`, "debug");
+          }
         });
 
         const newRowMap = new Map();
@@ -992,14 +1009,26 @@ export class ScraperManager {
           const increasedPrice =
             basePrice * (1 + priceIncreasePercentage / 100);
 
-          // Ensure seats are numbers and sorted numerically
-          const sortedNewSeats = group.seats
-            .map(s => typeof s === 'object' && s !== null && 'number' in s ? s.number : s) // Handle both number and object {number: X} formats
-            .sort((a, b) => a - b);
+          // Extract seat numbers and ensure they're all strings for consistent comparison
+          const extractedSeats = group.seats.map(s => {
+            // Handle different possible seat formats
+            let seatNumber;
+            if (typeof s === 'object' && s !== null && 'number' in s) {
+              seatNumber = s.number;
+            } else {
+              seatNumber = s;
+            }
+            // Ensure seat number is a string
+            return String(seatNumber);
+          }).sort(); // Sort lexicographically as strings
+          
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(`[Debug SM ${eventId}] New row ${rowKey} seats: ${JSON.stringify(extractedSeats)}`, "debug");
+          }
 
           newRowMap.set(rowKey, {
             seatCount: group.inventory.quantity,
-            seats: sortedNewSeats, // Use the normalized and sorted array
+            seats: extractedSeats, // Use the normalized and sorted array
             price: increasedPrice,
             quantity: group.inventory.quantity,
             groupData: group,
@@ -1020,27 +1049,66 @@ export class ScraperManager {
             // Row no longer exists in new data - mark for deletion
             rowsToDelete.push(existingData._id);
           } else {
-            // Helper to compare two sorted arrays of numbers
+            // Helper to compare two arrays of strings (already normalized and sorted)
             const areArraysEqual = (arr1, arr2) => {
-              if (arr1.length !== arr2.length) return false;
-              for (let i = 0; i < arr1.length; i++) {
-                if (arr1[i] !== arr2[i]) return false;
+              console.log(`\n\n===== COMPARING SEAT ARRAYS =====`);
+              console.log(`Row: ${rowKey}`);
+              console.log(`Existing seats: ${JSON.stringify(arr1)}`);
+              console.log(`New seats: ${JSON.stringify(arr2)}`);
+              
+              if (arr1.length !== arr2.length) {
+                console.log(`MISMATCH: Array length different - ${arr1.length} vs ${arr2.length}`);
+                if (LOG_LEVEL >= 3) {
+                  this.logWithTime(`[Debug SM ${eventId}] Array length mismatch: ${arr1.length} vs ${arr2.length}`, "debug");
+                }
+                return false;
               }
+              
+              // Since we've already normalized to strings and sorted, we can do a direct comparison
+              for (let i = 0; i < arr1.length; i++) {
+                if (arr1[i] !== arr2[i]) {
+                  console.log(`MISMATCH: Element at index ${i}: '${arr1[i]}' vs '${arr2[i]}'`);
+                  console.log(`Types: ${typeof arr1[i]} vs ${typeof arr2[i]}`);
+                  if (LOG_LEVEL >= 3) {
+                    this.logWithTime(`[Debug SM ${eventId}] Array element mismatch at index ${i}: '${arr1[i]}' vs '${arr2[i]}'`, "debug");
+                  }
+                  return false;
+                }
+              }
+              console.log(`MATCH: Arrays are equal`);
+              console.log(`===== END COMPARISON =====\n\n`);
               return true;
             };
 
             // Check if row data has changed (excluding inventory ID)
             const seatsChanged = !areArraysEqual(existingData.seats, newData.seats);
+            
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Existing seats: ${JSON.stringify(existingData.seats)}`, "debug");
+              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - New seats: ${JSON.stringify(newData.seats)}`, "debug");
+              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Seats changed: ${seatsChanged}`, "debug");
+            }
 
             const existingPrice = parseFloat(existingData.price);
             const newPrice = parseFloat(newData.price);
             const priceChanged = Math.abs(existingPrice - newPrice) > 0.01;
             const quantityChanged = Number(existingData.quantity) !== Number(newData.quantity);
+            
+        
+            
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Price comparison: ${existingPrice} vs ${newPrice}, changed: ${priceChanged}`, "debug");
+              this.logWithTime(`[Debug SM ${eventId}] Row ${rowKey} - Quantity comparison: ${existingData.quantity} vs ${newData.quantity}, changed: ${quantityChanged}`, "debug");
+            }
 
-            // Preserve inventoryId if seats and price haven't changed
             if (!seatsChanged && !priceChanged) {
               newData.groupData.inventory.inventoryId = existingData.inventoryId;
+              console.log(`PRESERVING inventory ID: ${existingData.inventoryId}`);
+            } else {
+              console.log(`NOT preserving inventory ID due to changes`);
             }
+            console.log(`Final inventory ID: ${newData.groupData.inventory.inventoryId || 'will be generated'}`);
+            console.log(`===== END INVENTORY ID LOGIC =====\n`);
             // If seats or price DID change, inventoryId is NOT preserved here,
             // and a new one will be generated for the item when it's processed/saved.
 
