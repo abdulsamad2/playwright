@@ -10,20 +10,12 @@ const seatSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
-  mapping_id: {
-    type: String,
-    required: true,
-  },
 });
 
 // Ticket Schema (as a subdocument)
 const ticketSchema = new mongoose.Schema({
   id: {
     type: Number,
-    required: true,
-  },
-  mapping_id: {
-    type: String,
     required: true,
   },
   seatNumber: {
@@ -73,6 +65,10 @@ const ticketSchema = new mongoose.Schema({
 // Consecutive Group Schema
 const consecutiveGroupSchema = new mongoose.Schema(
   {
+    inHandDate: {
+      type: Date,
+      required: true,
+    },
     eventId: {
       type: String,
       required: true,
@@ -80,6 +76,15 @@ const consecutiveGroupSchema = new mongoose.Schema(
     mapping_id: {
       type: String,
       required: true,
+    },
+    event_name: {
+      type: String,
+    },
+    venue_name: {
+      type: String,
+    },
+    event_date: {
+      type: Date,
     },
     section: {
       type: String,
@@ -161,6 +166,45 @@ const consecutiveGroupSchema = new mongoose.Schema(
         required: true,
       },
       customSplit: {
+        type: String,
+      },
+      face_price: {
+        type: Number,
+      },
+      taxed_cost: {
+        type: Number,
+      },
+      in_hand: {
+        type: Boolean,
+      },
+      instant_transfer: {
+        type: Boolean,
+      },
+      files_available: {
+        type: Boolean,
+      },
+      zone: {
+        type: String,
+      },
+      shown_quantity: {
+        type: String,
+      },
+      passthrough: {
+        type: String,
+      },
+      event_name: {
+        type: String,
+      },
+      venue_name: {
+        type: String,
+      },
+      event_date: {
+        type: Date,
+      },
+      eventId: {
+        type: String,
+      },
+      mapping_id: {
         type: String,
       },
       tickets: [ticketSchema],

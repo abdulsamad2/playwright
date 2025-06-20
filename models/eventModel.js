@@ -43,7 +43,7 @@ const eventSchema = new mongoose.Schema(
     },
     priceIncreasePercentage: {
       type: Number,
-      default: 25, // Default 25% markup
+      default: 35, // Default 25% markup
     },
     Last_Updated: {
       type: Date,
