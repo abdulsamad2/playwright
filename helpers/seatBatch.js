@@ -1,5 +1,29 @@
 import moment from "moment";
-import fs from "fs";
+
+// Function to generate unique 10-digit inventory ID
+
+// Global Filters
+const GLOBAL_FILTERS = {
+  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket","resale",], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+
+
+  inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
+
+
+  description: [
+    
+    "Standard Ticket",
+    "GA Lawn",
+    "General Admission Standing",
+    "Standard Admission",
+    
+  ], // e.g., ['obstructed view', 'aisle'] - empty means no filter, strings to check for (case-insensitive)
+  accessibility: [
+    // Empty array means exclude ALL accessibility seats
+  ], // e.g., ['wheelchair', 'hearing'] - empty means no filter, strings to check for (case-insensitive)
+  excludeAccessibility: true, // Set to true to exclude ALL accessibility seats
+  excludeWheelchair: true, // Set to true to exclude wheelchair accessible seats (sections containing 'WC')
+};
 //it will break map into seats
 function GetMapSeats(data) {
   let seatArray = [];
@@ -25,8 +49,26 @@ function GetMapSeats(data) {
               });
             });
           else {
-            //GernalAdmission seats
-            //console.log(SECTION,"sec")
+            // GeneralAdmission seats - assuming they might be directly under SECTION or have a different structure
+            // This is a placeholder and might need adjustment based on the actual GA data structure
+            if (SECTION.placesNoKeys && Array.isArray(SECTION.placesNoKeys)) {
+              SECTION.placesNoKeys.map((seat) => {
+                seatArray.push({
+                  section: SECTION?.name,
+                  row: "GA", // General Admission typically doesn't have a specific row
+                  seat: seat[1], // Assuming seat number is at index 1
+                  seatId: seat[0], // Assuming seat ID is at index 0
+                });
+              });
+            } else if (SECTION.name && SECTION.id) { // Fallback if placesNoKeys is not present but section has name and id
+                seatArray.push({
+                    section: SECTION?.name,
+                    row: "GA",
+                    seat: "GA", // Placeholder for seat number if not available
+                    seatId: SECTION?.id, // Use section id as seatId if specific seatId is not available
+                });
+            }
+            // console.log("Processing General Admission for SECTION:", SECTION);
           }
         });
       }
@@ -119,6 +161,7 @@ function getSplitType(arr, offer) {
     } else return "1";
   }
 }
+
 function CreateInventoryAndLine(data, offer, event, descriptions) {
 
   let _descriptions = descriptions.find(
@@ -140,10 +183,10 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     isNameAdded = true;
   }
 
-  if (offer?.name?.toLowerCase().includes("limited/obstructed")) {
+  if (offer?.name.toLowerCase().includes("limited/obstructed")) {
     allDescriptions += ", Limted/Obstructed View";
     isNameAdded = true;
-  } else if (offer?.name?.toLowerCase().includes("limited view")) {
+  } else if (offer?.name.toLowerCase().includes("limited view")) {
     allDescriptions += ", Limited View";
     isNameAdded = true;
   }
@@ -151,21 +194,21 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   if (isNameAdded == false) {
     if (_descriptions) {
       _descriptions.descriptions.map((x) => {
-        if (x?.toLowerCase().includes("side")) {
+        if (x.toLowerCase().includes("side")) {
           allDescriptions += ", Side View";
-        } else if (x?.toLowerCase().includes("behind")) {
+        } else if (x.toLowerCase().includes("behind")) {
           allDescriptions += ", Behind The Stage";
-        } else if (x?.toLowerCase().includes("rear")) {
+        } else if (x.toLowerCase().includes("rear")) {
           allDescriptions += ", Rear View Seating";
-        } else if (x?.toLowerCase().includes("partial")) {
+        } else if (x.toLowerCase().includes("partial")) {
           allDescriptions += ", Partial View";
-        } else if (x?.toLowerCase().includes("limited")) {
+        } else if (x.toLowerCase().includes("limited")) {
           allDescriptions += ", Limited View";
-        } else if (x?.toLowerCase().includes("obstructed")) {
+        } else if (x.toLowerCase().includes("obstructed")) {
           allDescriptions += ", obstructed View";
         } else if (
-          x?.toLowerCase().includes("deaf") ||
-          x?.toLowerCase().includes("blind")
+          x.toLowerCase().includes("deaf") ||
+          x.toLowerCase().includes("blind")
         ) {
           allDescriptions += ", deaf/hard, blind/low";
         }
@@ -196,27 +239,25 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   //Face Value
   let faceValue = offer?.faceValue;
   let totalCost = singleExtraCharges + repeatExtraCharges + faceValue;
-  let totalCostWithPercentage =
-    totalCost + totalCost * (event?.listCostPercentage / 100);
+
   return {
     inventory: {
       quantity: data?.seats.length,
       section: data?.section,
       hideSeatNumbers: true,
       row: data?.row,
-      cost: totalCost * data?.seats.length,
+      cost: totalCost,
       seats: data?.seats,
       eventId: event.eventMappingId,
       stockType: "MOBILE_TRANSFER",
       lineType: "PURCHASE",
       seatType: "CONSECUTIVE",
-      inHandDate: moment(event?.inHandDate).format("YYYY-MM-DDTHH:mm:ss"), //"2023-06-09T16:48:09.99",
+      inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"), // Format: 2024-12-22
       // "notes": "+stub +geek +tnet +vivid +tevo +pick",
       notes: "-tnow -tmplus -stub",
       tags: "AWS",
-      inventoryId: 0,
       offerId: data?.offerId,
-      splitType: "CUSTOM",
+      splitType: "NEVERLEAVEONE",
       publicNotes: "xfer" + allDescriptions,
       listPrice: totalCost,
       customSplit: getSplitType(data?.seats, offer),
@@ -368,6 +409,122 @@ export const AttachRowSection = (
       .map((x) => {
         let offerGet = offers.find((e) => e.offerId == x.offerId);
 
+        // Check accessibility exclusion filters first
+        if (GLOBAL_FILTERS.excludeAccessibility) {
+          // Check for any accessibility indicators in various fields
+          const hasAccessibilityIndicators = (
+            // Check section name for wheelchair/accessibility indicators
+            (x.section && (
+              x.section.toUpperCase().includes('WC') ||
+              x.section.toUpperCase().includes('WHEELCHAIR') ||
+              x.section.toUpperCase().includes('ACCESSIBLE') ||
+              x.section.toUpperCase().includes('ADA') ||
+              x.section.toUpperCase().includes('HANDICAP')
+            )) ||
+            // Check accessibility field
+            (x.accessibility && x.accessibility.length > 0) ||
+            // Check attributes for accessibility terms
+            (x.attributes && x.attributes.some(attr => 
+              attr.toLowerCase().includes('wheelchair') ||
+              attr.toLowerCase().includes('accessible') ||
+              attr.toLowerCase().includes('ada') ||
+              attr.toLowerCase().includes('handicap') ||
+              attr.toLowerCase().includes('sight') ||
+              attr.toLowerCase().includes('hearing')
+            )) ||
+            // Check offer name for accessibility terms
+            (offerGet && offerGet.name && (
+              offerGet.name.toLowerCase().includes('wheelchair') ||
+              offerGet.name.toLowerCase().includes('accessible') ||
+              offerGet.name.toLowerCase().includes('ada') ||
+              offerGet.name.toLowerCase().includes('handicap')
+            ))
+          );
+          
+          if (hasAccessibilityIndicators) {
+            // console.log(`Filtering out accessibility seat. Section: ${x.section}, Accessibility: ${x.accessibility}`);
+            return undefined;
+          }
+        }
+
+        // Legacy wheelchair exclusion filter (kept for backward compatibility)
+        if (GLOBAL_FILTERS.excludeWheelchair && x.section && x.section.toUpperCase().includes('WC')) {
+          // console.log(`Filtering out wheelchair seat. Section: ${x.section}`);
+          return undefined;
+        }
+
+        // New Global Filtering Logic: Item must match at least one active global filter category.
+        let keepItemBasedOnGlobalFilters = false;
+        const inventoryFilterActive = GLOBAL_FILTERS.inventoryType.length > 0;
+        const descriptionFilterActive = GLOBAL_FILTERS.description.length > 0;
+        const accessibilityFilterActive = GLOBAL_FILTERS.accessibility.length > 0;
+
+        const anyGlobalFilterActive = inventoryFilterActive || descriptionFilterActive || accessibilityFilterActive;
+
+        if (!anyGlobalFilterActive) {
+            keepItemBasedOnGlobalFilters = true; // No global filters are active, so item passes this stage
+        } else {
+            // Check Inventory Type Filter
+            if (inventoryFilterActive) {
+                if (offerGet && GLOBAL_FILTERS.inventoryType.some(filterType => 
+                    offerGet.inventoryType?.toLowerCase().includes(filterType.toLowerCase())
+                )) {
+                    keepItemBasedOnGlobalFilters = true;
+                }
+            }
+
+            // Check Description Filter (only if not already marked to keep)
+            if (!keepItemBasedOnGlobalFilters && descriptionFilterActive) {
+                let descriptionMatched = false;
+                const offerNameLower = offerGet?.name?.toLowerCase() || "";
+                const offerDescriptionLower = offerGet?.description?.toLowerCase() || "";
+                
+                if (GLOBAL_FILTERS.description.some(filterTerm => 
+                    offerNameLower.includes(filterTerm.toLowerCase()) || 
+                    offerDescriptionLower.includes(filterTerm.toLowerCase())
+                )) {
+                    descriptionMatched = true;
+                }
+
+                if (!descriptionMatched && descriptions) {
+                    const relevantDescriptionDoc = descriptions.find(d => d.descriptionId === x.descriptionId);
+                    if (relevantDescriptionDoc && relevantDescriptionDoc.descriptions) {
+                        const descriptionsTextLower = relevantDescriptionDoc.descriptions.join(' ').toLowerCase();
+                        if (GLOBAL_FILTERS.description.some(filterTerm => descriptionsTextLower.includes(filterTerm.toLowerCase()))) {
+                            descriptionMatched = true;
+                        }
+                    }
+                }
+                
+                if (!descriptionMatched && x.attributes && x.attributes.length > 0){
+                    const attributesTextLower = x.attributes.join(' ').toLowerCase();
+                    if (GLOBAL_FILTERS.description.some(filterTerm => attributesTextLower.includes(filterTerm.toLowerCase()))) {
+                        descriptionMatched = true;
+                    }
+                }
+
+                if (descriptionMatched) {
+                    keepItemBasedOnGlobalFilters = true;
+                }
+            }
+
+            // Check Accessibility Filter (only if not already marked to keep)
+            if (!keepItemBasedOnGlobalFilters && accessibilityFilterActive) {
+                if (x.accessibility) {
+                    const accessibilityLower = x.accessibility.toLowerCase();
+                    if (GLOBAL_FILTERS.accessibility.some(filterTerm => accessibilityLower.includes(filterTerm.toLowerCase()))) {
+                        keepItemBasedOnGlobalFilters = true;
+                    }
+                }
+            }
+        }
+
+        if (!keepItemBasedOnGlobalFilters) {
+            // console.log(`Filtering out by global filters combination. Item: ${x.section}-${x.row}-${x.seats}, Offer: ${offerGet?.name}`);
+            return undefined;
+        }
+
+        // Original offer filtering logic
         if (offerGet) {
           if (offerGet.name == "Special Offers") {
             return undefined;
