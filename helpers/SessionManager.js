@@ -25,7 +25,7 @@ export class SessionManager {
     this.SESSION_CONFIG = {
       ROTATION_INTERVAL: 30 * 60 * 1000, // 30 minutes
       MAX_SESSION_AGE: 2 * 60 * 60 * 1000, // 2 hours maximum
-      MAX_SESSIONS: 10, // Maximum number of concurrent sessions
+      MAX_SESSIONS: 200, // Maximum number of concurrent sessions
       SESSION_WARMUP_TIME: 5000, // 5 seconds to warm up new sessions
       SESSION_VALIDATION_INTERVAL: 5 * 60 * 1000, // Validate sessions every 5 minutes
       SESSION_HEALTH_CHECK_TIMEOUT: 30000, // 30 seconds timeout for health checks
