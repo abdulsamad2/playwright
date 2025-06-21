@@ -24,11 +24,11 @@ export class SessionManager {
     // Session configuration
     // Updated session configuration to align intervals with session expiration
     this.SESSION_CONFIG = {
-      ROTATION_INTERVAL: 25 * 60 * 1000, // 25 minutes, shorter than session expiration
-      MAX_SESSION_AGE: 2 * 60 * 60 * 1000, // 2 hours maximum
+      ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes, shorter than session expiration
+      MAX_SESSION_AGE: 150 * 60 * 1000, // 2.5 hours maximum (was 2 hours)
       MAX_SESSIONS: 200, // Maximum number of concurrent sessions
-      SESSION_WARMUP_TIME: 5000, // 5 seconds to warm up new sessions
-      SESSION_VALIDATION_INTERVAL: 4 * 60 * 1000, // Validate sessions every 4 minutes
+      SESSION_WARMUP_TIME: 2000, // 2 seconds to warm up new sessions
+      SESSION_VALIDATION_INTERVAL: 3 * 60 * 1000, // Validate sessions every 3 minutes (was 4)
       SESSION_HEALTH_CHECK_TIMEOUT: 30000, // 30 seconds timeout for health checks
     };
 
@@ -303,32 +303,94 @@ export class SessionManager {
   }
 
   /**
-   * Force rotation of sessions (for manual triggering)
-   * @returns {Promise<number>} Number of sessions rotated
+   * Force rotation of all sessions
+   * @returns {Promise<boolean>} Success status
    */
   async forceSessionRotation() {
-    this.logger?.logWithTime("Force rotating all sessions", "info");
-    
-    let rotatedCount = 0;
-    const eventIds = Array.from(this.activeSessions.keys());
-    
-    for (const eventId of eventIds) {
-      try {
-        const sessionId = this.activeSessions.get(eventId);
-        if (sessionId) {
-          await this.cleanupSession(sessionId);
-          this.activeSessions.delete(eventId);
-          rotatedCount++;
+    try {
+      this.logger?.logWithTime('Forcing rotation of all sessions', 'info');
+      
+      // Get all active sessions
+      const activeSessionIds = Array.from(this.sessions.keys());
+      
+      // Create new sessions for all events
+      const eventIds = Array.from(this.activeSessions.keys());
+      
+      for (const eventId of eventIds) {
+        const newSessionData = await this.createSession(eventId);
+        if (newSessionData) {
+          this.activeSessions.set(eventId, newSessionData.sessionId);
         }
-      } catch (error) {
-        this.logger?.logWithTime(`Error rotating session for event ${eventId}: ${error.message}`, "error");
       }
+      
+      // Clean up old sessions after a delay
+      setTimeout(() => {
+        for (const sessionId of activeSessionIds) {
+          this.sessions.delete(sessionId);
+        }
+        this.logger?.logWithTime(`Cleaned up ${activeSessionIds.length} old sessions`, 'info');
+      }, 60000); // 1 minute delay
+      
+      this.logger?.logWithTime('Session rotation completed', 'info');
+      return true;
+    } catch (error) {
+      this.logger?.logWithTime(`Session rotation failed: ${error.message}`, 'error');
+      return false;
     }
+  }
 
-    await this.saveSessionsToFile();
-    this.logger?.logWithTime(`Force rotated ${rotatedCount} sessions`, "success");
-    
-    return rotatedCount;
+  /**
+   * Gracefully rotate a single session with overlap period
+   * @param {string} sessionId - Session ID to rotate
+   * @returns {Promise<string|null>} New session ID or null if failed
+   */
+  async rotateSessionGracefully(sessionId) {
+    try {
+      const oldSession = this.sessions.get(sessionId);
+      if (!oldSession) {
+        this.logger?.logWithTime(`Session ${sessionId} not found for graceful rotation`, 'warning');
+        return null;
+      }
+
+      // Find the event ID for this session
+      let eventId = null;
+      for (const [eId, sId] of this.activeSessions.entries()) {
+        if (sId === sessionId) {
+          eventId = eId;
+          break;
+        }
+      }
+
+      if (!eventId) {
+        this.logger?.logWithTime(`No event found for session ${sessionId}`, 'warning');
+        return null;
+      }
+
+      // Create new session before invalidating old one
+       const newSession = await this.createSession(eventId);
+      if (!newSession) {
+        this.logger?.logWithTime(`Failed to create new session for ${eventId}`, 'error');
+        return null;
+      }
+
+      // Update active session mapping
+      this.activeSessions.set(eventId, newSession.sessionId);
+      
+      // Mark old session for gradual phase-out (keep for 1 minute overlap)
+      oldSession.isRotating = true;
+      oldSession.rotationStarted = Date.now();
+      
+      setTimeout(() => {
+        this.sessions.delete(sessionId);
+        this.logger?.logWithTime(`Gracefully removed old session ${sessionId}`, 'info');
+      }, 60000); // 1 minute overlap
+
+      this.logger?.logWithTime(`Gracefully rotated session ${sessionId} to ${newSession.sessionId}`, 'info');
+      return newSession.sessionId;
+    } catch (error) {
+      this.logger?.logWithTime(`Graceful session rotation failed for ${sessionId}: ${error.message}`, 'error');
+      return null;
+    }
   }
 
   /**
@@ -481,6 +543,44 @@ export class SessionManager {
       validSessions,
       averageAge: Math.floor(avgAge / 60000), // in minutes
       oldestSession: sessionAges.length > 0 ? Math.floor(Math.max(...sessionAges) / 60000) : 0,
+    };
+  }
+
+  /**
+   * Get session statistics for health monitoring
+   */
+  getSessionStats() {
+    const now = Date.now();
+    let total = 0;
+    let valid = 0;
+    let invalid = 0;
+    let expired = 0;
+    let rotating = 0;
+
+    for (const [sessionId, session] of this.sessions.entries()) {
+      total++;
+      
+      if (session.isRotating) {
+        rotating++;
+        continue;
+      }
+      
+      if (session.isValid === false) {
+        invalid++;
+      } else if (now - session.createdAt > this.MAX_SESSION_AGE) {
+        expired++;
+      } else {
+        valid++;
+      }
+    }
+
+    return {
+      total,
+      valid,
+      invalid,
+      expired,
+      rotating,
+      active: this.activeSessions.size
     };
   }
 

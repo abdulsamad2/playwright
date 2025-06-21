@@ -22,6 +22,71 @@ import {
   loadCookiesFromFile,
   getRealisticIphoneUserAgent} from './browser-cookies.js';
 
+// Circuit breaker for cookie refresh operations
+class CookieRefreshCircuitBreaker {
+  constructor(failureThreshold = 5, resetTimeout = 300000) { // 5 failures, 5 minute reset
+    this.failureThreshold = failureThreshold;
+    this.resetTimeout = resetTimeout;
+    this.failures = 0;
+    this.lastFailureTime = null;
+    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+  }
+
+  async execute(operation) {
+    if (this.state === 'OPEN') {
+      if (Date.now() - this.lastFailureTime > this.resetTimeout) {
+        this.state = 'HALF_OPEN';
+        console.log('Cookie refresh circuit breaker: Attempting to reset (HALF_OPEN)');
+      } else {
+        throw new Error('Cookie refresh circuit breaker is OPEN - too many recent failures');
+      }
+    }
+
+    try {
+      const result = await operation();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  onSuccess() {
+    this.failures = 0;
+    this.state = 'CLOSED';
+    if (this.lastFailureTime) {
+      console.log('Cookie refresh circuit breaker: Reset to CLOSED after successful operation');
+      this.lastFailureTime = null;
+    }
+  }
+
+  onFailure() {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    
+    if (this.failures >= this.failureThreshold) {
+      this.state = 'OPEN';
+      console.log(`Cookie refresh circuit breaker: OPENED after ${this.failures} failures`);
+    } else {
+      console.log(`Cookie refresh circuit breaker: Failure ${this.failures}/${this.failureThreshold}`);
+    }
+  }
+
+  getStatus() {
+    return {
+      state: this.state,
+      failures: this.failures,
+      lastFailureTime: this.lastFailureTime,
+      timeUntilReset: this.state === 'OPEN' ? 
+        Math.max(0, this.resetTimeout - (Date.now() - this.lastFailureTime)) : 0
+    };
+  }
+}
+
+// Initialize circuit breaker
+const cookieRefreshCircuitBreaker = new CookieRefreshCircuitBreaker();
+
 // Initialize CookieManager instance
 const cookieManager = new CookieManager();
 cookieManager.persistedPage = null;
@@ -72,7 +137,7 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
-  COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes
+  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
   MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
   COOKIE_ROTATION: {
     ENABLED: true,
@@ -348,9 +413,11 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       return cookieManager.capturedState;
     }
 
-    // Use our new module to refresh cookies
+    // Use our new module to refresh cookies with circuit breaker protection
     try {
-      const result = await refreshCookies(eventIdToUse, proxyToUse);
+      const result = await cookieRefreshCircuitBreaker.execute(async () => {
+        return await refreshCookies(eventIdToUse, proxyToUse);
+      });
       
       if (result && result.cookies) {
         // Update captured state with the new cookies and fingerprint

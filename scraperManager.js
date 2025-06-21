@@ -58,9 +58,9 @@ const AUTO_STOP_CHECK_INTERVAL = 60000; // Check auto-stop events every minute
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 3; // Default to warnings and errors only
 
-// Cookie expiration threshold: refresh cookies every 15 minutes
-const COOKIE_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes (reduced for more frequent rotation)
-const SESSION_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes for session refresh
+// Cookie expiration threshold: refresh cookies every 20 minutes
+const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (standardized timing)
+const SESSION_REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes for session refresh (standardized)
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const generateRandomIp = () => Array.from({ length: 4 }, () => Math.floor(Math.random() * 256)).join('.');
@@ -100,12 +100,12 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000,
-  COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced for more frequent rotation)
+  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
   MAX_COOKIE_AGE:   30 * 60 * 60 * 1000,
   COOKIE_ROTATION: {
     ENABLED: true,
     MAX_STORED_COOKIES: 100,
-    ROTATION_INTERVAL: 15 * 60 * 1000, // 15 minutes (reduced for more frequent rotation)
+    ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
     LAST_ROTATION: Date.now(),
     ENFORCE_UNIQUE: true, // Ensure unique cookies are generated
   },
@@ -329,7 +329,7 @@ export class ScraperManager {
   }
 
   async refreshEventHeaders(eventId, forceRefresh = false) {
-    // Anti-bot: Aggressively fetch fresh cookies/headers with 15-minute refresh cycle
+    // Anti-bot: Aggressively fetch fresh cookies/headers with 20-minute refresh cycle
     try {
       // ALWAYS use random event IDs for cookie refresh, never the original eventId
       let eventToUse;
@@ -544,7 +544,7 @@ export class ScraperManager {
         "X-Unique-ID": uuidv4(),
       };
 
-      // More aggressive refresh interval (15 minutes)
+      // More aggressive refresh interval (20 minutes)
       const effectiveExpirationTime = COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL;
 
       // Force refresh if requested or refresh interval exceeded
@@ -1747,7 +1747,7 @@ export class ScraperManager {
           ? Date.now() - passedHeaders.timestamp
           : Infinity;
 
-        // Use passed headers only if they're fresh enough (less than 15 minutes old) and not a retry
+        // Use passed headers only if they're fresh enough (less than 20 minutes old) and not a retry
         if (!needsFreshCookies && passedHeadersAge < SESSION_REFRESH_INTERVAL) {
           headers = passedHeaders;
           if (LOG_LEVEL >= 2) {
@@ -2515,7 +2515,7 @@ export class ScraperManager {
 
   /**
    * Force periodic cookie and session rotation
-   * Schedules automatic cookie and session refresh every 15 minutes
+   * Schedules automatic cookie and session refresh every 20 minutes
    */
   forcePeriodicCookieRotation() {
     // Clear any existing interval
@@ -2524,7 +2524,7 @@ export class ScraperManager {
     }
 
     this.logWithTime(
-      "Starting 30-minute cookie and session rotation schedule",
+      "Starting 20-minute cookie and session rotation schedule",
       "info"
     );
 
@@ -2536,7 +2536,7 @@ export class ScraperManager {
       );
     });
 
-    // Set up rotation interval (15 minutes)
+    // Set up rotation interval (20 minutes)
     this.cookieRotationIntervalId = setInterval(() => {
       // Non-blocking rotation
       this.rotateAllCookiesAndSessions().catch((err) => {
@@ -3405,9 +3405,12 @@ export class ScraperManager {
       // Start performance monitoring
       this.startPerformanceMonitoring();
 
+      // Start session health monitoring
+      this.startSessionHealthMonitoring();
+
       // Start cookie rotation cycle immediately (non-blocking)
       this.forcePeriodicCookieRotation();
-      this.logWithTime("Started 15-minute cookie rotation cycle", "info");
+      this.logWithTime("Started 20-minute cookie rotation cycle", "info");
 
       // Start CSV processing worker (non-blocking)
       this.startCsvProcessingWorker();
@@ -4852,6 +4855,58 @@ export class ScraperManager {
       this.logWithTime(`Emergency recovery failed: ${error.message}`, "error");
       return false;
     }
+  }
+
+  /**
+   * Start session health monitoring to detect and handle session failures
+   */
+  startSessionHealthMonitoring() {
+    this.logWithTime("Starting session health monitoring (5-minute cycles)", "info");
+    
+    setInterval(async () => {
+      try {
+        const sessionStats = this.sessionManager.getSessionStats();
+        const totalSessions = sessionStats.total;
+        const invalidSessions = sessionStats.invalid;
+        
+        if (totalSessions === 0) {
+          this.logWithTime("No sessions available - forcing session creation", "warning");
+          await this.sessionManager.forceSessionRotation();
+          return;
+        }
+        
+        const invalidPercentage = (invalidSessions / totalSessions) * 100;
+        
+        this.logWithTime(
+          `Session Health: ${totalSessions - invalidSessions}/${totalSessions} valid (${invalidPercentage.toFixed(1)}% invalid)`,
+          invalidPercentage > 30 ? "warning" : "info"
+        );
+        
+        // Force rotation if more than 30% of sessions are invalid
+        if (invalidPercentage > 30) {
+          this.logWithTime(
+            `High session failure rate detected (${invalidPercentage.toFixed(1)}%) - forcing graceful rotation`,
+            "warning"
+          );
+          
+          try {
+            await this.sessionManager.rotateSessionGracefully();
+            this.logWithTime("Graceful session rotation completed", "success");
+          } catch (rotationError) {
+            this.logWithTime(
+              `Graceful rotation failed, attempting force rotation: ${rotationError.message}`,
+              "error"
+            );
+            await this.sessionManager.forceSessionRotation();
+          }
+        }
+      } catch (error) {
+        this.logWithTime(
+          `Session health monitoring error: ${error.message}`,
+          "error"
+        );
+      }
+    }, 300000); // 5 minutes
   }
 
   /**
