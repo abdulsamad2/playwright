@@ -4220,7 +4220,7 @@ export class ScraperManager {
         // CRITICAL FIX: First check if this event was recently processed in memory
         // This prevents returning events that have been processed but DB hasn't been updated yet
         const lastProcessedTime = this.eventLastProcessedTime.get(eventId);
-        if (lastProcessedTime && Date.now() - lastProcessedTime < 30000) {
+        if (lastProcessedTime && Date.now() - lastProcessedTime < 120000) {
           // Skip events processed in the last 30 seconds regardless of database state
           continue;
         }
