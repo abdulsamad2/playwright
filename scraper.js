@@ -1142,7 +1142,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
           
           if (global.proxyManager) {
             // Release the old proxy with error
-            if (externalProxy && externalProxy.proxy) {
+            if (agent && agent.proxy) {
               global.proxyManager.releaseProxy(eventId, false, error);
             }
 

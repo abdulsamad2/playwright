@@ -32,7 +32,7 @@ function generateUniqueInventoryId() {
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
-const MAX_RETRIES = 25; // Increased from 20 for better recovery
+const MAX_RETRIES = 15; // Increased from 20 for better recovery
 const SCRAPE_TIMEOUT = 45000; // Increased from 20 seconds to 45 seconds for better success rate
 const MIN_TIME_BETWEEN_EVENT_SCRAPES = 30000; // Reduced to 30 seconds for faster cycles
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
@@ -2585,8 +2585,8 @@ export class ScraperManager {
           if (currentEventIds === lastEventIds) {
             sameEventsCounter++;
 
-            // If we've seen the same events 5 times, something is wrong
-            if (sameEventsCounter >= 5) {
+            // If we've seen the same events 20 times, something is wrong
+            if (sameEventsCounter >= 20) {
               this.logWithTime(
                 `WARNING: Same ${events.length} events returned ${sameEventsCounter} times in a row. Potential processing loop detected.`,
                 "error"
@@ -4220,8 +4220,8 @@ export class ScraperManager {
         // CRITICAL FIX: First check if this event was recently processed in memory
         // This prevents returning events that have been processed but DB hasn't been updated yet
         const lastProcessedTime = this.eventLastProcessedTime.get(eventId);
-        if (lastProcessedTime && Date.now() - lastProcessedTime < 60000) {
-          // Skip events processed in the last minute regardless of database state
+        if (lastProcessedTime && Date.now() - lastProcessedTime < 30000) {
+          // Skip events processed in the last 30 seconds regardless of database state
           continue;
         }
 
