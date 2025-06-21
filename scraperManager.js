@@ -7,12 +7,10 @@ import fs from "fs/promises";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
 import { v4 as uuidv4 } from 'uuid';
-import SyncService from './services/syncService.js';
-import nodeFs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
-import { runCsvUploadCycle } from './helpers/csvUploadCycle.js';
+// CSV upload functionality removed
 let inventoryIdCounter = 0;
 
 function generateUniqueInventoryId() {
@@ -30,9 +28,7 @@ function generateUniqueInventoryId() {
   return parseInt(uniqueId.toString().padStart(10, "1"));
 }
 
-// Add this at the top of the file, after imports
-export const ENABLE_CSV_PROCESSING = false; // Set to false to disable all CSV generation
-export const ENABLE_CSV_UPLOAD = false; // Set to false to disable all_events_combined.csv upload
+// CSV processing functionality removed entirely
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
 const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
@@ -111,13 +107,7 @@ const COOKIE_MANAGEMENT = {
   },
 };
 
-// CSV Upload Constants
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const DATA_DIR = path.join(__dirname, 'data');
-const COMPANY_ID = '702';
-const API_TOKEN = 'OaJwtlUQiriMSrnGd7cauDWtIyAMnS363icaz-7t1vJ7bjIBe9ZFjBwgPYY1Q9eKV_Jt';
-const CSV_UPLOAD_INTERVAL = 6 * 60 * 1000; // 6 minutes in milliseconds
+// CSV upload constants removed
 
 
 export class ScraperManager {
@@ -171,9 +161,7 @@ export class ScraperManager {
     this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
 
-    // CSV upload tracking
-    this.lastCsvUploadTime = null; // Track last successful CSV upload
-    this.csvUploadIntervalId = null; // Track the interval ID for clean shutdown
+    // CSV upload tracking removed
 
     // New: High-performance event processing
     this.eventProcessingQueue = []; // Queue of events to process
@@ -181,8 +169,7 @@ export class ScraperManager {
     this.eventLastProcessedTime = new Map(); // Track when each event was last processed
     this.parallelWorkers = []; // Array of parallel worker promises
     this.maxParallelWorkers = MAX_PARALLEL_BATCHES;
-    this.csvProcessingQueue = []; // Non-blocking CSV processing queue
-    this.csvProcessingActive = false;
+    // CSV processing properties removed
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.processingLocks = new Map(); // Track event locks
   }
@@ -1409,121 +1396,7 @@ export class ScraperManager {
     }
   }
 
-  /**
-   * Generate CSV inventory for an event for each scrape (SUPER FAST - non-blocking)
-   * @param {string} eventId - The event ID
-   * @param {Array} scrapeResult - The scrape result data
-   */
-  async generateInventoryCsv(eventId, scrapeResult) {
-    try {
-      // Import the inventory controller
-      const inventoryController = (
-        await import("./controllers/inventoryController.js")
-      ).default;
-
-      // Get event data upfront with minimal fields for speed
-      const event = await Event.findOne({ Event_ID: eventId })
-        .select(
-          "Event_Name Venue Event_DateTime priceIncreasePercentage inHandDate mapping_id"
-        )
-        .lean();
-
-      if (!event) {
-        return; // Fail silently for speed
-      }
-
-      // Quick validation - fail fast if missing critical data
-      if (!event.mapping_id || !event.priceIncreasePercentage) {
-        return; // Fail silently for speed
-      }
-
-      const mapping_id = event.mapping_id;
-      const priceIncreasePercentage = event.priceIncreasePercentage;
-
-      // Quick filter - only essential validation
-      const validGroups = scrapeResult.filter(
-        (group) => group.seats?.length >= 2 && group.inventory?.quantity >= 2
-      );
-
-      if (validGroups.length === 0) {
-        return; // Fail silently for speed
-      }
-
-      // Fast record creation - minimal processing
-      const inventoryRecords = validGroups.map((group) => {
-        const basePrice = parseFloat(group.inventory.listPrice) || 0;
-        const increasedPrice = (
-          basePrice *
-          (1 + priceIncreasePercentage / 100)
-        ).toFixed(2);
-        const formattedInHandDate = event?.inHandDate
-          ?.toISOString()
-          .split("T")[0];
-
-        // Minimal record structure for speed
-        return {
-          inventory_id: `${eventId}-${group.section}-${
-            group.row
-          }-${Date.now()}`, // Fast ID generation
-          event_name: event?.Event_Name || `Event ${eventId}`,
-          venue_name: event?.Venue || "Unknown Venue",
-          event_date: event?.Event_DateTime?.toISOString(),
-          event_id: mapping_id,
-          quantity: group.inventory.quantity,
-          section: group.section,
-          row: group.row,
-          seats: group.seats.map((seat) => seat.toString()).join(","),
-          list_price: increasedPrice,
-          face_price: group.inventory?.tickets?.[0]?.faceValue || "",
-          taxed_cost: group.inventory?.tickets?.[0]?.taxedCost || "",
-          cost: group.inventory?.tickets?.[0]?.cost || "",
-          hide_seats: "Y",
-          in_hand: "N",
-          in_hand_date: formattedInHandDate,
-          instant_transfer: "N",
-          files_available: "N",
-          split_type: "NEVERLEAVEONE",
-          custom_split: `${Math.ceil(group.inventory.quantity / 2)},${
-            group.inventory.quantity
-          }`,
-          stock_type: "MOBILE_TRANSFER",
-          zone: "N",
-          shown_quantity: String(Math.ceil(group.inventory.quantity / 2)),
-          passthrough: "",
-          mapping_id: mapping_id,
-          source_event_id: eventId,
-          // Essential fields only - remove unnecessary data
-          barcodes: "",
-          internal_notes: `@sec[${group.section}]`,
-          public_notes: `${group.row} Row`,
-          tags: "",
-        };
-      });
-
-      // Use super-fast bulk inventory processing (returns immediately)
-      const result = inventoryController.addBulkInventory(
-        inventoryRecords,
-        eventId
-      );
-
-      // Log result but don't wait for background processing
-      if (result.success) {
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `Fast: Processed ${result.stats.processed} records for event ${eventId}`,
-            "debug"
-          );
-        }
-      }
-    } catch (error) {
-      // Log error but don't throw - keep processing fast
-      if (LOG_LEVEL >= 1) {
-        console.error(
-          `Fast CSV processing error for ${eventId}: ${error.message}`
-        );
-      }
-    }
-  }
+  // CSV generation method removed
 
   /**
    * Get a random event ID for session/cookie management
@@ -1613,664 +1486,7 @@ export class ScraperManager {
     }
   }
 
-  async scrapeEvent(
-    eventId,
-    retryCount = 0,
-    proxyAgent = null,
-    proxy = null,
-    passedHeaders = null
-  ) {
-    // Skip if the event should be skipped
-    if (this.shouldSkipEvent(eventId)) {
-      return false;
-    }
-
-    // If circuit breaker is tripped, allow critical events to proceed
-    if (this.apiCircuitBreaker.tripped) {
-      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
-      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
-
-      // Allow processing of critical events approaching 3-minute maximum, or events approaching 2-minute target
-      if (
-        timeSinceUpdate < MAX_UPDATE_INTERVAL - 10000 && // Reduced threshold for more aggressive processing
-        timeSinceUpdate < MAX_ALLOWED_UPDATE_INTERVAL - 20000 // Reduced threshold
-      ) {
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Skipping ${eventId} temporarily: Circuit breaker tripped`,
-            "info"
-          );
-        }
-        return false;
-      } else if (timeSinceUpdate > MAX_ALLOWED_UPDATE_INTERVAL - 20000) {
-        // Log urgent processing despite circuit breaker
-        if (LOG_LEVEL >= 1) {
-          this.logWithTime(
-            `URGENT: Processing ${eventId} despite circuit breaker: Approaching maximum allowed time (${
-              timeSinceUpdate / 1000
-            }s since last update)`,
-            "warning"
-          );
-        }
-      }
-    }
-
-    await this.acquireSemaphore();
-    this.processingEvents.add(eventId);
-    this.activeJobs.set(eventId, moment());
-
-    // Declare headers variable outside try block so it's accessible in catch block
-    let headers;
-    // Track if we used fresh cookies for this event
-    let usedFreshCookies = false;
-
-    try {
-      // More detailed logging for better troubleshooting
-      if (LOG_LEVEL >= 1) {
-        this.logWithTime(
-          `Scraping ${eventId} (Attempt ${retryCount + 1}/${MAX_RETRIES})`,
-          "info"
-        );
-      }
-
-      // Get a new proxy on retries - no blocking
-      if (retryCount > 0) {
-        // Release any existing proxy to get a new one
-        this.proxyManager.releaseProxy(eventId, false);
-
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Getting new proxy for retry #${retryCount} of event ${eventId}`,
-            "info"
-          );
-        }
-
-        // Reset proxy variables to ensure we get fresh ones
-        proxyAgent = null;
-        proxy = null;
-      }
-
-      // Use passed proxy if available, otherwise get a new one
-      let proxyToUse = proxy;
-      let proxyAgentToUse = proxyAgent;
-
-      if (!proxyAgentToUse || !proxyToUse) {
-        const { proxyAgent: newProxyAgent, proxy: newProxy } =
-          this.proxyManager.getProxyForBatch([eventId]);
-        proxyAgentToUse = newProxyAgent;
-        proxyToUse = newProxy;
-
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Using proxy ${newProxy?.proxy || "default"} for ${
-              retryCount > 0 ? "retry #" + retryCount : "initial attempt"
-            } of event ${eventId}`,
-            "info"
-          );
-        }
-      }
-
-      // Look up the event first before trying to scrape
-      const event = await Event.findOne({ Event_ID: eventId })
-        .select("Skip_Scraping inHandDate url")
-        .lean();
-
-      if (!event) {
-        this.logWithTime(`Event ${eventId} not found in database`, "error");
-        // Put event in cooldown to avoid immediate retries
-        this.cooldownEvents.set(eventId, moment().add(30, "minutes")); // Reduced cooldown
-        return false;
-      }
-
-      if (event.Skip_Scraping) {
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(`Skipping ${eventId} (flagged)`, "info");
-        }
-        // Still update the schedule for next time
-        this.eventUpdateSchedule.set(
-          eventId,
-          moment().add(MIN_TIME_BETWEEN_EVENT_SCRAPES, "milliseconds")
-        );
-        return true;
-      }
-
-      // ENHANCED: Always force fresh cookies/headers on retries
-      const needsFreshCookies =
-        retryCount > 0 ||
-        !this.headerRefreshTimestamps.get(eventId) ||
-        moment().diff(this.headerRefreshTimestamps.get(eventId)) >
-          SESSION_REFRESH_INTERVAL;
-
-      // If headers were passed from batch processing, still check if they're fresh enough
-      if (passedHeaders && !retryCount) {
-        const passedHeadersAge = passedHeaders.timestamp
-          ? Date.now() - passedHeaders.timestamp
-          : Infinity;
-
-        // Use passed headers only if they're fresh enough (less than 20 minutes old) and not a retry
-        if (!needsFreshCookies && passedHeadersAge < SESSION_REFRESH_INTERVAL) {
-          headers = passedHeaders;
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(
-              `Using passed headers for event ${eventId} from batch processing (age: ${Math.floor(
-                passedHeadersAge / 1000
-              )}s)`,
-              "info"
-            );
-          }
-        } else {
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(
-              `Passed headers too old (${Math.floor(
-                passedHeadersAge / 1000
-              )}s) or retry attempt (${retryCount}), getting fresh cookies`,
-              "info"
-            );
-          }
-          // Force refresh to get fresh cookies
-          const randomEventId = await this.getRandomEventId(eventId);
-          headers = await this.refreshEventHeaders(randomEventId, true);
-          usedFreshCookies = true;
-        }
-      } else {
-        // On retries, always force fresh session
-        const forceNewSession = retryCount > 0;
-
-        if (forceNewSession && LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `Forcing fresh session for retry #${retryCount} of event ${eventId}`,
-            "info"
-          );
-        }
-
-        // Prioritize session manager for cookie/session management
-        try {
-          // Always force new session on retries or after expiration
-          const forceNewSession = needsFreshCookies || retryCount > 0;
-
-          // Get a random event ID instead of using the actual event ID
-          const randomEventId = await this.getRandomEventId(eventId);
-
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(
-              `Using random event ID ${randomEventId} for session management (original: ${eventId})`,
-              "info"
-            );
-          }
-
-          const sessionData = await this.sessionManager.getSessionForEvent(
-            randomEventId,
-            proxyToUse,
-            forceNewSession
-          );
-
-          if (sessionData) {
-            const sessionHeaders = await this.sessionManager.getSessionHeaders(
-              eventId
-            );
-
-            if (sessionHeaders) {
-              headers = {
-                headers: sessionHeaders,
-                cookies: sessionData.cookies,
-                fingerprint: sessionData.fingerprint,
-                sessionId: sessionData.sessionId,
-                timestamp: Date.now(),
-                freshlyGenerated: forceNewSession,
-                retryCount: retryCount, // Add retry count for tracking
-              };
-
-              usedFreshCookies = forceNewSession;
-
-              if (LOG_LEVEL >= 2) {
-                this.logWithTime(
-                  `Using ${
-                    forceNewSession ? "fresh" : "existing"
-                  } session headers for ${
-                    retryCount > 0 ? "retry #" + retryCount : "initial attempt"
-                  } of event ${eventId} (session: ${sessionData.sessionId})`,
-                  "info"
-                );
-              }
-
-              // Add retry information to headers
-              if (headers.headers && retryCount > 0) {
-                headers.headers["X-Retry-Count"] = retryCount.toString();
-                headers.headers[
-                  "X-Retry-ID"
-                ] = `retry-${eventId}-${retryCount}-${Date.now()}`;
-              }
-            }
-          }
-        } catch (sessionError) {
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(
-              `Session manager error: ${sessionError.message}, falling back to header refresh`,
-              "warning"
-            );
-          }
-        }
-
-        // If session approach fails, use direct header management
-        if (!headers) {
-          // For retries or no recent headers, always force refresh
-          if (needsFreshCookies || retryCount > 0) {
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `Getting fresh headers for ${
-                  retryCount > 0 ? "retry #" + retryCount : "initial attempt"
-                } of event ${eventId}`,
-                "info"
-              );
-            }
-
-            // Get a random event ID for cookie refresh
-            const randomEventId = await this.getRandomEventId(eventId);
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `Using random event ID ${randomEventId} for header refresh (original: ${eventId})`,
-                "info"
-              );
-            }
-
-            headers = await this.refreshEventHeaders(randomEventId, true);
-            usedFreshCookies = true;
-
-            // Add retry information to headers
-            if (headers && headers.headers && retryCount > 0) {
-              headers.headers["X-Retry-Count"] = retryCount.toString();
-              headers.headers[
-                "X-Retry-ID"
-              ] = `retry-${eventId}-${retryCount}-${Date.now()}`;
-            }
-          } else {
-            // Check if we have recent headers
-            const lastRefresh = this.headerRefreshTimestamps.get(eventId) || 0;
-            const cookieAge = Date.now() - lastRefresh;
-
-            // Use cached headers only if they're fresh enough
-            if (cookieAge < SESSION_REFRESH_INTERVAL / 2) {
-              headers = this.headersCache.get(eventId);
-              if (LOG_LEVEL >= 2) {
-                this.logWithTime(
-                  `Using cached headers for event ${eventId} (age: ${Math.floor(
-                    cookieAge / 1000
-                  )}s)`,
-                  "info"
-                );
-              }
-            } else {
-              // Otherwise refresh
-              if (LOG_LEVEL >= 2) {
-                this.logWithTime(
-                  `Cached headers too old (${Math.floor(
-                    cookieAge / 1000
-                  )}s), getting fresh headers for ${eventId}`,
-                  "info"
-                );
-              }
-
-              // Get a random event ID for cookie refresh
-              const randomEventId = await this.getRandomEventId(eventId);
-              if (LOG_LEVEL >= 2) {
-                this.logWithTime(
-                  `Using random event ID ${randomEventId} for header refresh (original: ${eventId})`,
-                  "info"
-                );
-              }
-
-              headers = await this.refreshEventHeaders(randomEventId, true);
-              usedFreshCookies = true;
-            }
-          }
-
-          // If headers still aren't available, force one last refresh
-          if (!headers) {
-            if (LOG_LEVEL >= 1) {
-              this.logWithTime(
-                `No headers available for ${eventId}, forcing final refresh`,
-                "warning"
-              );
-            }
-
-            // Get a random event ID for cookie refresh
-            const randomEventId = await this.getRandomEventId(eventId);
-            if (LOG_LEVEL >= 1) {
-              this.logWithTime(
-                `Using random event ID ${randomEventId} for final header refresh (original: ${eventId})`,
-                "warning"
-              );
-            }
-
-            headers = await this.refreshEventHeaders(randomEventId, true);
-            usedFreshCookies = true;
-          }
-        }
-      }
-
-      if (!headers) {
-        throw new Error("Failed to obtain valid headers");
-      }
-
-      // Log whether we're using fresh cookies
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
-          `${
-            usedFreshCookies
-              ? "Using fresh cookies"
-              : "Reusing existing cookies"
-          } for ${
-            retryCount > 0 ? "retry #" + retryCount : "initial attempt"
-          } of event ${eventId}`,
-          usedFreshCookies ? "info" : "debug"
-        );
-      }
-
-      // Set a longer timeout for the scrape with better error handling
-      const result = await Promise.race([
-        ScrapeEvent(
-          {
-            eventId,
-            headers,
-            retryCount, // Add retry count to scrape data
-            retryAttempt: retryCount > 0, // Flag that this is a retry
-          },
-          proxyAgentToUse,
-          proxyToUse
-        ),
-        setTimeout(SCRAPE_TIMEOUT).then(() => {
-          throw new Error(`Scrape timeout after ${SCRAPE_TIMEOUT}ms`);
-        }),
-      ]);
-
-      if (!result) {
-        throw new Error("Empty scrape result: null or undefined returned");
-      }
-
-      if (!Array.isArray(result)) {
-        throw new Error(
-          `Invalid scrape result: expected array but got ${typeof result}`
-        );
-      }
-
-      if (result.length === 0) {
-        // Don't treat empty results as failures - they might be valid
-        this.logWithTime(
-          `Event ${eventId} returned empty result - may be sold out or no inventory`,
-          "warning"
-        );
-      }
-
-      // Mark this header as successful
-      if (headers) {
-        const headerKey =
-          headers.headers?.Cookie?.substring(0, 20) ||
-          headers.headers?.["User-Agent"]?.substring(0, 20);
-        if (headerKey) {
-          const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
-            success: 0,
-            failure: 0,
-          };
-          currentSuccessRate.success++;
-          this.headerSuccessRates.set(headerKey, currentSuccessRate);
-
-          // Add to rotation pool if not already there
-          if (
-            !this.headerRotationPool.some(
-              (h) =>
-                h.headers?.Cookie?.substring(0, 20) === headerKey ||
-                h.headers?.["User-Agent"]?.substring(0, 20) === headerKey
-            )
-          ) {
-            this.headerRotationPool.push(headers);
-            // Limit pool size
-            if (this.headerRotationPool.length > 10) {
-              this.headerRotationPool.shift();
-            }
-          }
-        }
-      }
-
-      // Update session usage on success
-      if (headers.sessionId) {
-        this.sessionManager.updateSessionUsage(headers.sessionId, true);
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `Updated session ${headers.sessionId} usage for successful scrape of event ${eventId}`,
-            "debug"
-          );
-        }
-      }
-
-      await this.updateEventMetadata(eventId, result);
-
-      // Generate fresh CSV inventory for each scrape (non-blocking)
-      this.queueCsvGeneration(eventId, result);
-
-      // Success! If this event was previously failing, update its status in DB
-      const recentFailures = this.getRecentFailureCount(eventId);
-      if (recentFailures > 0) {
-        try {
-          // Mark event as active again after successful scrape
-          await Event.updateOne(
-            { Event_ID: eventId },
-            { $set: { Skip_Scraping: false, status: "active" } }
-          );
-          this.logWithTime(
-            `Reactivated previously failing event: ${eventId}`,
-            "success"
-          );
-        } catch (err) {
-          console.error(`Failed to update status for event ${eventId}:`, err);
-        }
-      }
-
-      this.successCount++;
-      this.lastSuccessTime = moment();
-      this.eventUpdateTimestamps.set(eventId, moment());
-      this.failedEvents.delete(eventId);
-      this.clearFailureCount(eventId);
-
-      // Reset API error counter on success
-      this.apiCircuitBreaker.failures = Math.max(
-        0,
-        this.apiCircuitBreaker.failures - 1
-      );
-
-      // Reset global consecutive error counter on success
-      this.globalConsecutiveErrors = 0;
-
-      // Increase retry limit by 3 after a successful scrape (reduced from 5)
-      const prevMax = this.eventMaxRetries.get(eventId) ?? MAX_RETRIES;
-      const newMax = Math.min(prevMax + 3, MAX_RETRIES * 2); // Cap at 2x MAX_RETRIES
-      this.eventMaxRetries.set(eventId, newMax);
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
-          `Increased retry limit for ${eventId} to ${newMax}`,
-          "info"
-        );
-      }
-
-      return true;
-    } catch (error) {
-      this.failedEvents.add(eventId);
-
-      // Update session usage on failure
-      if (headers?.sessionId) {
-        this.sessionManager.updateSessionUsage(headers.sessionId, false);
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `Updated session ${headers.sessionId} usage for failed scrape of event ${eventId}`,
-            "debug"
-          );
-        }
-      }
-
-      // New: Try to handle the API error with smart strategies first
-      const errorHandled = await this.handleApiError(eventId, error, headers);
-
-      // If the error was handled by the circuit breaker or proxy rotation, skip retry
-      if (errorHandled) {
-        return false;
-      }
-
-      // Track failure count
-      this.incrementFailureCount(eventId);
-
-      // Add to failed events
-      this.failedEvents.add(eventId);
-
-      // Mark headers as potentially problematic
-      if (headers) {
-        const headerKey =
-          headers.headers?.Cookie?.substring(0, 20) ||
-          headers.headers?.["User-Agent"]?.substring(0, 20);
-        if (headerKey) {
-          const currentSuccessRate = this.headerSuccessRates.get(headerKey) || {
-            success: 0,
-            failure: 0,
-          };
-          currentSuccessRate.failure++;
-          this.headerSuccessRates.set(headerKey, currentSuccessRate);
-        }
-      }
-
-      // Increment global error counter
-      this.globalConsecutiveErrors++;
-
-      // Track failures by type for batch processing
-      const errorType = this.categorizeError(error);
-      if (!this.failureTypeGroups.has(errorType)) {
-        this.failureTypeGroups.set(errorType, new Set());
-      }
-      this.failureTypeGroups.get(errorType).add(eventId);
-
-      // MODIFIED: Check the time since last update to determine if we should stop
-      const lastUpdate = this.eventUpdateTimestamps.get(eventId);
-      const timeSinceUpdate = lastUpdate ? moment().diff(lastUpdate) : Infinity;
-
-      // If approaching max allowed update interval of 10 minutes, escalate retries
-      if (timeSinceUpdate >= 600000) {
-        // 10 minutes threshold
-        this.logWithTime(
-          `Event ${eventId} exceeded 10-minute threshold (${Math.floor(
-            timeSinceUpdate / 1000
-          )}s) - marking for auto-stop`,
-          "error"
-        );
-
-        // Use the unified auto-stop mechanism
-        await this.setEventSkipScraping(
-          eventId,
-          "exceeded_10min_threshold",
-          retryCount,
-          MAX_RETRIES
-        );
-        return false;
-      }
-
-      // Calculate backoff time based on retry count and error type
-      let backoffTime;
-      const isApiError =
-        error.message.includes("403") ||
-        error.message.includes("400") ||
-        error.message.includes("429") ||
-        error.message.includes("timeout") || // Include timeout errors
-        error.message.includes("API");
-
-      // For critical events approaching the threshold, use smaller backoff times
-      if (timeSinceUpdate > 540000) {
-        // Over 9 minutes
-        // Very aggressive retry for events approaching threshold
-        backoffTime = 3000; // Just 3 seconds for critical events
-        this.logWithTime(
-          `CRITICAL: Event ${eventId} at ${Math.floor(
-            timeSinceUpdate / 1000
-          )}s since update - using minimal 3s backoff`,
-          "warning"
-        );
-      } else if (timeSinceUpdate > 300000) {
-        // Over 5 minutes
-        // Aggressive retry for stale events
-        backoffTime = Math.min(
-          5000,
-          SHORT_COOLDOWNS[retryCount % SHORT_COOLDOWNS.length]
-        );
-        this.logWithTime(
-          `URGENT: Event ${eventId} at ${Math.floor(
-            timeSinceUpdate / 1000
-          )}s since update - using reduced ${backoffTime}ms backoff`,
-          "warning"
-        );
-      } else if (retryCount < SHORT_COOLDOWNS.length) {
-        // Use progressive short cooldowns for initial retries
-        backoffTime = SHORT_COOLDOWNS[retryCount];
-
-        if (LOG_LEVEL >= 1) {
-          this.logWithTime(
-            `${isApiError ? "API/Timeout error" : "Error"} for ${eventId}: ${
-              error.message
-            }. Retry ${retryCount + 1}/${MAX_RETRIES} in ${backoffTime}ms`,
-            "warning"
-          );
-        }
-      } else {
-        // Use shorter cooldown for persistent failures but ensure we can meet 10-minute target
-        const remainingTime = Math.max(600000 - timeSinceUpdate, 10000);
-        backoffTime = Math.min(30000, remainingTime / 3); // Allow at least 3 more retries within remaining time
-
-        this.logWithTime(
-          `Persistent ${
-            isApiError ? "API/timeout errors" : "errors"
-          } for ${eventId}: ${error.message}. ` +
-            `Retry in ${backoffTime / 1000}s (${Math.floor(
-              timeSinceUpdate / 1000
-            )}s since last update, ${Math.floor(
-              remainingTime / 1000
-            )}s until threshold)`,
-          "warning"
-        );
-      }
-
-      // Set cooldown
-      const cooldownUntil = moment().add(backoffTime, "milliseconds");
-      this.cooldownEvents.set(eventId, cooldownUntil);
-
-      // Add to retry queue with flags for fresh proxy and session
-      this.retryQueue.push({
-        eventId,
-        retryCount: retryCount + 1,
-        retryAfter: cooldownUntil,
-        priority: Math.max(1, 15 - retryCount), // Higher priority for fewer retries
-        needsFreshProxy: true, // Flag to indicate we need a fresh proxy
-        needsFreshSession: true, // Flag to indicate we need a fresh session
-      });
-
-      // Update event schedule for next update
-      this.eventUpdateSchedule.set(
-        eventId,
-        moment().add(
-          Math.min(backoffTime, MIN_TIME_BETWEEN_EVENT_SCRAPES),
-          "milliseconds"
-        )
-      );
-
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
-          `Queued ${eventId} for retry ${
-            retryCount + 1
-          }/${MAX_RETRIES} (cooldown: ${backoffTime}ms) with fresh proxy and session`,
-          "info"
-        );
-      }
-
-      return false;
-    } finally {
-      this.processingEvents.delete(eventId);
-      this.activeJobs.delete(eventId);
-      this.releaseSemaphore();
-    }
-  }
+  // Removed duplicate scrapeEvent function - using optimized version below
 
   /**
    * Calculate adaptive pause time for sequential processing
@@ -2395,36 +1611,13 @@ export class ScraperManager {
       this.logWithTime("Cookie rotation cycle stopped", "info");
     }
 
-    // Clear the CSV upload interval if it exists
-    if (this.csvUploadIntervalId) {
-      clearInterval(this.csvUploadIntervalId);
-      this.csvUploadIntervalId = null;
-      this.logWithTime("CSV upload cycle stopped", "info");
-    }
-
-    // Run one final CSV upload to ensure latest data is uploaded
-    if (ENABLE_CSV_UPLOAD) {
-      try {
-        this.logWithTime("Running final CSV upload before shutdown", "info");
-        const { runCsvUploadCycle } = await import(
-          "./helpers/csvUploadCycle.js"
-        );
-        await runCsvUploadCycle();
-        this.logWithTime("Final CSV upload completed", "success");
-      } catch (error) {
-        this.logWithTime(
-          `Error in final CSV upload: ${error.message}`,
-          "error"
-        );
-      }
-    }
+    // CSV upload interval cleanup removed
 
     // Release any active proxies
     this.proxyManager.releaseAllProxies();
 
     // Clear all processing queues
     this.eventProcessingQueue = [];
-    this.csvProcessingQueue = [];
     this.processingEvents.clear();
     this.processingBatches.clear();
 
@@ -2887,7 +2080,7 @@ export class ScraperManager {
           this.processingEvents.add(eventId);
 
           // Process with unique session for each event (no shared headers)
-          const result = await this.scrapeEventOptimized(
+          const result = await this.scrapeEvent(
             eventId,
             retryCount,
             null
@@ -2944,7 +2137,7 @@ export class ScraperManager {
   /**
    * Optimized scrape event method for parallel processing
    */
-  async scrapeEventOptimized(eventId, retryCount = 0, sharedHeaders = null) {
+  async scrapeEvent(eventId, retryCount = 0, sharedHeaders = null) {
     // Check if we should skip
     const lastProcessed = this.eventLastProcessedTime.get(eventId);
     if (lastProcessed && Date.now() - lastProcessed < 30000) {
@@ -3043,8 +2236,7 @@ export class ScraperManager {
       // Update metadata asynchronously
       this.updateEventMetadataAsync(eventId, result);
 
-      // Queue CSV generation (non-blocking)
-      this.queueCsvGeneration(eventId, result);
+      // CSV generation removed
 
       // Success tracking
       this.successCount++;
@@ -3185,49 +2377,7 @@ export class ScraperManager {
     }
   }
 
-  /**
-   * Queue CSV generation for non-blocking processing (INSTANT)
-   */
-  queueCsvGeneration(eventId, scrapeResult) {
-    // Don't queue - process immediately and return
-    setImmediate(() => {
-      this.generateInventoryCsv(eventId, scrapeResult).catch((err) =>
-        console.error(`Background CSV error for ${eventId}: ${err.message}`)
-      );
-    });
-  }
-
-  /**
-   * Non-blocking CSV processing worker (LIGHTWEIGHT)
-   */
-  async startCsvProcessingWorker() {
-    // This is now handled by the background CSV generation in inventoryController
-    // Just mark as active for compatibility
-    this.csvProcessingActive = true;
-
-    // Lightweight monitoring - check every 60 seconds
-    const monitorInterval = setInterval(async () => {
-      if (!this.isRunning) {
-        clearInterval(monitorInterval);
-        this.csvProcessingActive = false;
-        return;
-      }
-
-      try {
-        // Force combined CSV generation every 60 seconds
-        const { forceCombinedCSVGeneration } = await import(
-          "./controllers/inventoryController.js"
-        );
-        forceCombinedCSVGeneration(); // This is now non-blocking
-
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime("Background CSV generation triggered", "info");
-        }
-      } catch (error) {
-        console.error(`CSV monitoring error: ${error.message}`);
-      }
-    }, 60000); // Every 60 seconds
-  }
+  // CSV generation methods removed
 
   async captureCookies(page, fingerprint) {
     let retryCount = 0;
@@ -3412,53 +2562,7 @@ export class ScraperManager {
       this.forcePeriodicCookieRotation();
       this.logWithTime("Started 20-minute cookie rotation cycle", "info");
 
-      // Start CSV processing worker (non-blocking)
-      this.startCsvProcessingWorker();
-
-      // Start CSV upload cycle immediately (non-blocking)
-      if (ENABLE_CSV_UPLOAD) {
-        try {
-          const { runCsvUploadCycle } = await import(
-            "./helpers/csvUploadCycle.js"
-          );
-          runCsvUploadCycle();
-          this.logWithTime(
-            "Started CSV upload cycle - initial upload executed",
-            "info"
-          );
-
-          // Set up recurring CSV upload cycle every 6 minutes
-          this.csvUploadIntervalId = setInterval(async () => {
-            try {
-              // Each interval call is non-blocking
-              await runCsvUploadCycle();
-              this.lastCsvUploadTime = moment(); // Track successful upload time
-            } catch (uploadError) {
-              this.logWithTime(
-                `CSV upload cycle error: ${uploadError.message}`,
-                "error"
-              );
-            }
-          }, CSV_UPLOAD_INTERVAL);
-
-          this.logWithTime(
-            `CSV upload cycle scheduled to run every ${
-              CSV_UPLOAD_INTERVAL / 60000
-            } minutes`,
-            "info"
-          );
-        } catch (error) {
-          this.logWithTime(
-            `Error setting up CSV upload cycle: ${error.message}`,
-            "error"
-          );
-        }
-      } else {
-        this.logWithTime(
-          "CSV upload is disabled (ENABLE_CSV_UPLOAD = false)",
-          "warning"
-        );
-      }
+      // CSV processing and upload cycles removed
 
       // Start multiple parallel processing workers
       for (let i = 0; i < this.maxParallelWorkers; i++) {
@@ -4032,7 +3136,7 @@ export class ScraperManager {
             }
 
             // Attempt scraping with current strategy
-            const scrapeResult = await this.scrapeEventOptimized(
+            const scrapeResult = await this.scrapeEvent(
               eventId,
               0,
               null
@@ -4174,7 +3278,7 @@ export class ScraperManager {
             }
 
             // Attempt scraping with current approach
-            const scrapeResult = await this.scrapeEventOptimized(
+            const scrapeResult = await this.scrapeEvent(
               eventId,
               0,
               null
@@ -4555,11 +3659,7 @@ export class ScraperManager {
       successRate:
         (this.successCount / (this.successCount + this.failedEvents.size)) *
         100,
-      csvProcessingActive: this.csvProcessingActive,
       memoryUsage: process.memoryUsage(),
-      lastCsvUpload: this.lastCsvUploadTime
-        ? moment().diff(this.lastCsvUploadTime, "minutes")
-        : null,
     };
 
     // Get currently active events from database to filter tracking
@@ -4688,18 +3788,7 @@ export class ScraperManager {
         "info"
       );
 
-      // CSV processing status
-      if (stats.csvProcessingActive) {
-        this.logWithTime(
-          `CSV Processing: Active (${stats.csvQueueLength} in queue)`,
-          "info"
-        );
-      } else if (stats.csvQueueLength > 0) {
-        this.logWithTime(
-          `CSV Processing: Idle with ${stats.csvQueueLength} pending`,
-          "warning"
-        );
-      }
+      // CSV processing status removed
 
       // Memory warning
       if (memoryMB > 1024) {

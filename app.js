@@ -10,7 +10,6 @@ import scraperRoutes from "./routes/scraperRoutes.js";
 import eventRoutes from "./routes/eventRoutes.js";
 import statsRoutes from "./routes/statsRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
-import inventoryRoutes from "./routes/inventoryRoutes.js";
 import cookieRefreshRoutes from "./routes/cookieRefreshRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 
@@ -65,7 +64,6 @@ app.use("/api/health", healthRoutes);
 app.use("/api/scraper", scraperRoutes);
 app.use("/api/events", eventRoutes);
 app.use("/api/stats", statsRoutes);
-app.use("/api/inventory", inventoryRoutes);
 app.use("/api/cookies", cookieRefreshRoutes);
 app.use("/api/admin", adminRoutes);
 

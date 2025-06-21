@@ -2,10 +2,10 @@
 // This file contains the optimized recovery methods to be integrated into scraperManager.js
 
 // Recovery Configuration Constants - Optimized for 1000+ events
-const CRITICAL_RECOVERY_INTERVAL = 10000; // 10 seconds - faster for 1000+ events
-const AGGRESSIVE_RECOVERY_INTERVAL = 20000; // 20 seconds - more frequent
-const STANDARD_RECOVERY_INTERVAL = 30000; // 30 seconds for standard recovery
-const AUTO_STOP_CHECK_INTERVAL = 60000; // 1 minute for auto-stop checks
+const CRITICAL_RECOVERY_INTERVAL = 15000; // 10 seconds - faster for 1000+ events
+const AGGRESSIVE_RECOVERY_INTERVAL = 30000; // 20 seconds - more frequent
+const STANDARD_RECOVERY_INTERVAL = 50000; // 30 seconds for standard recovery
+const AUTO_STOP_CHECK_INTERVAL = 50000; // 1 minute for auto-stop checks
 
 // Enhanced batch processing for 1000+ events
 const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
