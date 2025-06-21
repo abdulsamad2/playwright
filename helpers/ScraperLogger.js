@@ -31,10 +31,10 @@ class ScraperLogger {
       console.log(
         `${statusEmoji} [${formattedTime}] ${message}\n` +
         `   Runtime: ${Math.floor(runningTime.asHours())}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
-        `   Active: ${this.state.activeJobs.size}/${config.CONCURRENT_LIMIT}, ` +
-        `Success: ${this.state.successCount}, ` +
-        `Failed: ${this.state.failedEvents.size}, ` +
-        `Retry Queue: ${this.state.retryQueue.length}`
+        `   Active: ${this.state.workers.reduce((acc, w) => acc + w.activeJobs.size, 0)}/${this.state.config.workerCount * this.state.config.concurrencyPerWorker}, ` +
+        `Success: ${this.state.stats.totalSuccesses}, ` +
+        `Failed: ${this.state.stats.totalFailures}, ` +
+        `Retry Queue: ${this.state.workers.reduce((acc, w) => acc + w.retryQueue.length, 0)}`
       );
     } else {
       console.log(`${statusEmoji} [${formattedTime}] ${message}`);
@@ -80,4 +80,4 @@ class ScraperLogger {
   }
 }
 
-export default ScraperLogger; 
+export default ScraperLogger;

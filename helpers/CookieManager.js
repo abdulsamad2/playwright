@@ -37,16 +37,16 @@ export class CookieManager {
 
   // Configuration constants
   static CONFIG = {
-    COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
+    COOKIE_REFRESH_INTERVAL: 6 * 60 * 60 * 1000, // 6 hours, aligned with typical cookie expiry
     MAX_COOKIE_LENGTH: 8000,
     MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days
     COOKIE_ROTATION: {
       ENABLED: true,
       MAX_STORED_COOKIES: 100,
-      ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
+      ROTATION_INTERVAL: 2 * 60 * 60 * 1000, // 2 hours
       LAST_ROTATION: Date.now()
     },
-    PERIODIC_REFRESH_INTERVAL: 15 * 60 * 1000 // 15 minutes
+    PERIODIC_REFRESH_INTERVAL: 10 * 60 * 1000 // 10 minutes, shorter to ensure timely refresh
   };
 
   // Essential cookies that must be present
@@ -96,9 +96,15 @@ export class CookieManager {
    */
   async refreshEventHeaders(eventId, proxy = null) {
     const lastRefresh = this.headerRefreshTimestamps.get(eventId);
-    
+
     // Only refresh headers if they haven't been refreshed in last 5 minutes
     if (!lastRefresh || moment().diff(lastRefresh) > config.HEADER_REFRESH_INTERVAL) {
+      if (this.isRefreshingCookies) {
+        this.logger?.logWithTime(`Refresh already in progress for ${eventId}`, "info");
+        return this.headersCache.get(eventId);
+      }
+
+      this.isRefreshingCookies = true;
       try {
         this.logger?.logWithTime(`Refreshing headers for ${eventId}`, "info");
         const headers = await refreshHeaders(eventId, proxy);
@@ -112,6 +118,8 @@ export class CookieManager {
           `Failed to refresh headers for ${eventId}: ${error.message}`,
           "error"
         );
+      } finally {
+        this.isRefreshingCookies = false;
       }
     }
 
@@ -511,4 +519,4 @@ export class CookieManager {
       console.error('Error in periodic cookie refresh:', error);
     }
   }
-} 
+}

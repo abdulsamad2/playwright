@@ -22,12 +22,13 @@ export class SessionManager {
     this.sessionRotationQueue = [];
     
     // Session configuration
+    // Updated session configuration to align intervals with session expiration
     this.SESSION_CONFIG = {
-      ROTATION_INTERVAL: 30 * 60 * 1000, // 30 minutes
+      ROTATION_INTERVAL: 25 * 60 * 1000, // 25 minutes, shorter than session expiration
       MAX_SESSION_AGE: 2 * 60 * 60 * 1000, // 2 hours maximum
       MAX_SESSIONS: 200, // Maximum number of concurrent sessions
       SESSION_WARMUP_TIME: 5000, // 5 seconds to warm up new sessions
-      SESSION_VALIDATION_INTERVAL: 5 * 60 * 1000, // Validate sessions every 5 minutes
+      SESSION_VALIDATION_INTERVAL: 4 * 60 * 1000, // Validate sessions every 4 minutes
       SESSION_HEALTH_CHECK_TIMEOUT: 30000, // 30 seconds timeout for health checks
     };
 
@@ -336,7 +337,22 @@ export class SessionManager {
   startSessionValidation() {
     setInterval(async () => {
       try {
+        // Validate and cleanup sessions
         await this.validateAndCleanupSessions();
+
+        // Force session rotation after ROTATION_INTERVAL
+        const now = Date.now();
+        for (const [sessionId, timestamp] of this.sessionRotationTimestamps.entries()) {
+          if (now - timestamp >= this.SESSION_CONFIG.ROTATION_INTERVAL) {
+            this.logger?.logWithTime(`Session ${sessionId} exceeded rotation interval, forcing rotation`, "info");
+            await this.cleanupSession(sessionId);
+          }
+        }
+
+        // Generate fresh sessions for active events
+        for (const eventId of this.activeSessions.keys()) {
+          await this.getSessionForEvent(eventId);
+        }
       } catch (error) {
         this.logger?.logWithTime(`Error in session validation cycle: ${error.message}`, "error");
       }
@@ -486,4 +502,4 @@ export class SessionManager {
   }
 }
 
-export default SessionManager; 
+export default SessionManager;
