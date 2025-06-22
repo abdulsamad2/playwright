@@ -40,10 +40,10 @@ const EVENT_FAILURE_THRESHOLD = 120000; // Reduced to 2 minutes for faster recov
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
 // Enhanced recovery settings for 1000+ events
-const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
-const MAX_RECOVERY_BATCHES = 20; // Increased from 10 for parallel processing
-const PARALLEL_BATCH_SIZE = 25; // Increased from 100 for better batching
-const MAX_PARALLEL_BATCHES = 25; // Increased from 20 for 1000+ events
+const RECOVERY_BATCH_SIZE = 50; // Increased for better recovery throughput
+const MAX_RECOVERY_BATCHES = 10; // Increased for parallel recovery processing
+const PARALLEL_BATCH_SIZE = 20; // Optimized for higher throughput with 2-second intervals
+const MAX_PARALLEL_BATCHES = 15; // Increased for better event handling capacity
 
 // Multi-tier recovery intervals for aggressive processing
 const CRITICAL_RECOVERY_INTERVAL = 10000; // Check critical events every 10 seconds
@@ -288,6 +288,23 @@ export class ScraperManager {
 
   releaseSemaphore() {
     this.concurrencySemaphore++;
+  }
+
+  // Stop continuous scraping
+  stopContinuousScraping() {
+    if (!this.isRunning) {
+      this.logWithTime("Scraper is not running", "warning");
+      return;
+    }
+
+    this.isRunning = false;
+    this.logWithTime("Stopping continuous scraping...", "warning");
+    
+    // Clear any active jobs
+    this.activeJobs.clear();
+    this.processingEvents.clear();
+    
+    this.logWithTime("Continuous scraping stopped", "success");
   }
 
   shouldSkipEvent(eventId) {
@@ -2053,8 +2070,8 @@ export class ScraperManager {
           // Process batch in parallel
           await this.processBatchParallel(batch, workerId);
         } else {
-          // No events to process, wait a bit
-          await setTimeout(50); // Reduced for faster cycling
+          // No events to process, wait for next interval
+          await setTimeout(1000); // 1-second interval for faster batch processing
         }
       } catch (error) {
         console.error(`Worker ${workerId} error: ${error.message}`);
@@ -2702,7 +2719,7 @@ export class ScraperManager {
           }
 
           // Short pause before next cycle
-          await setTimeout(100); // Check every 100ms for new events
+          await setTimeout(1000); // Check every 1 second for new events
         } catch (error) {
           console.error(`Error in main event loop: ${error.message}`);
           await setTimeout(1000);

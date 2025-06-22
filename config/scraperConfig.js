@@ -7,10 +7,11 @@ export default {
   SCRAPE_TIMEOUT: 45000, // Timeout for each scrape operation (increased from 30000)
   MIN_TIME_BETWEEN_EVENT_SCRAPES: 10000, // Minimum time between scrapes of the same event
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
+  PROCESSING_INTERVAL: 1000, // 1-second interval between batch processing cycles for higher throughput
   
-  // Concurrency settings
-  CONCURRENT_LIMIT: Math.max(4, Math.floor(cpus().length * 0.9)), // 90% of CPU cores
-  BATCH_SIZE: Math.max(Math.floor(cpus().length * 0.9) * 2, 10), // Dynamic batch size based on CPU
+  // Concurrency settings - optimized for 2-second intervals with higher throughput
+  CONCURRENT_LIMIT: Math.max(8, Math.floor(cpus().length * 1.5)), // Increased CPU utilization for better throughput
+  BATCH_SIZE: 20, // Increased batch size for better event handling capacity
   
   // Retry settings
   MAX_RETRIES: 5, // Increased from 3
@@ -31,4 +32,4 @@ export default {
   
   // Failure cleanup
   FAILURE_HISTORY_EXPIRY: 60 * 60 * 1000, // 1 hour
-}; 
+};
