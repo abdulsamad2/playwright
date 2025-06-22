@@ -492,8 +492,8 @@ function generateFallbackHeaders() {
 
 
 const throttle = pThrottle({
-  limit: 100, // Increased from 50 for even higher volume
-  interval: 1000 // Keep at 1 second for good balance
+  limit: 50, // Increased from 50 for even higher volume
+  interval: 2000 // Keep at 1 second for good balance
 });
 
 const throttledRequest = throttle(async (options) => {

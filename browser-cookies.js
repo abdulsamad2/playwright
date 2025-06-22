@@ -14,6 +14,8 @@ const CONFIG = {
   MAX_RETRIES: 5,
   RETRY_DELAY: 10000,
   CHALLENGE_TIMEOUT: 10000,
+  COOKIE_REFRESH_TIMEOUT: 2 * 60 * 1000, // 2 minutes timeout for cookie refresh
+  MAX_REFRESH_RETRIES: 3, // Maximum retries for cookie refresh with new proxy/event
 };
 
 let browser = null;
@@ -539,136 +541,253 @@ async function loadCookiesFromFile() {
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
 async function refreshCookies(eventId, proxy = null) {
-  let localContext = null;
-  let page = null;
-  let browserInstance = null;
+  let retryCount = 0;
+  let lastError = null;
   
-  try {
-    console.log(`Refreshing cookies using event ${eventId}`);
-
-    // Try to load existing cookies first
-    const existingCookies = await loadCookiesFromFile();
-    if (existingCookies && existingCookies.length >= 3) {
-      const cookieAge = existingCookies[0]?.expiry ? 
-        (existingCookies[0].expiry * 1000 - Date.now()) : 0;
-      
-      if (cookieAge > 0 && cookieAge < CONFIG.COOKIE_REFRESH_INTERVAL) {
-        console.log(`Using existing cookies (age: ${Math.floor(cookieAge/1000/60)} minutes)`);
-        return {
-          cookies: existingCookies,
-          fingerprint: BrowserFingerprint.generate(),
-          lastRefresh: Date.now()
-        };
-      }
-    }
-
-    // Initialize browser with improved error handling
-    let initAttempts = 0;
-    let initSuccess = false;
-    let initError = null;
+  while (retryCount <= CONFIG.MAX_REFRESH_RETRIES) {
+    let localContext = null;
+    let page = null;
+    let browserInstance = null;
+    let timeoutId = null;
     
-    while (initAttempts < 3 && !initSuccess) {
-      try {
-        const result = await initBrowser(proxy);
-        if (!result || !result.context || !result.fingerprint) {
-          throw new Error("Failed to initialize browser or generate fingerprint");
+    try {
+      console.log(`Refreshing cookies using event ${eventId} (attempt ${retryCount + 1}/${CONFIG.MAX_REFRESH_RETRIES + 1})`);
+
+      // Try to load existing cookies first (only on first attempt)
+      if (retryCount === 0) {
+        const existingCookies = await loadCookiesFromFile();
+        if (existingCookies && existingCookies.length >= 3) {
+          const cookieAge = existingCookies[0]?.expiry ? 
+            (existingCookies[0].expiry * 1000 - Date.now()) : 0;
+          
+          if (cookieAge > 0 && cookieAge < CONFIG.COOKIE_REFRESH_INTERVAL) {
+            console.log(`Using existing cookies (age: ${Math.floor(cookieAge/1000/60)} minutes)`);
+            return {
+              cookies: existingCookies,
+              fingerprint: BrowserFingerprint.generate(),
+              lastRefresh: Date.now()
+            };
+          }
+        }
+      }
+      
+      // Create a promise that will be resolved/rejected based on timeout
+      const refreshPromise = new Promise(async (resolve, reject) => {
+        // Set up timeout
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Cookie refresh timeout after ${CONFIG.COOKIE_REFRESH_TIMEOUT / 1000} seconds`));
+        }, CONFIG.COOKIE_REFRESH_TIMEOUT);
+        
+        try {
+
+          // Initialize browser with improved error handling
+          let initAttempts = 0;
+          let initSuccess = false;
+          let initError = null;
+          
+          while (initAttempts < 3 && !initSuccess) {
+            try {
+              const result = await initBrowser(proxy);
+              if (!result || !result.context || !result.fingerprint) {
+                throw new Error("Failed to initialize browser or generate fingerprint");
+              }
+              
+              browserInstance = result.browser;
+              localContext = result.context;
+              page = result.page;
+              
+              initSuccess = true;
+            } catch (error) {
+              initAttempts++;
+              initError = error;
+              console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
+              await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
+            }
+          }
+          
+          if (!initSuccess) {
+            console.error("All browser initialization attempts failed");
+            throw initError || new Error("Failed to initialize browser");
+          }
+
+          // Navigate to event page
+          const url = `https://www.ticketmaster.com/event/${eventId}`;
+          console.log(`Navigating to ${url}`);
+          
+          await page.goto(url, {
+            waitUntil: "domcontentloaded",
+            timeout: CONFIG.PAGE_TIMEOUT
+          });
+          
+          // Check if the page loaded properly
+          const currentUrl = page.url();
+          const pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
+          
+          if (!pageLoadSuccessful) {
+            console.warn(`Failed to load event page, URL: ${currentUrl}`);
+            
+            // Try refreshing the page
+            console.log("Attempting to reload the page...");
+            await page.reload({ waitUntil: "domcontentloaded", timeout: CONFIG.PAGE_TIMEOUT });
+            
+            const newUrl = page.url();
+            const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
+            
+            if (!reloadSuccessful) {
+              console.warn(`Reload failed, URL: ${newUrl}`);
+              throw new Error("Failed to load Ticketmaster event page");
+            }
+          }
+          
+          console.log(`Successfully loaded page for event ${eventId}`);
+          
+          // Check for Ticketmaster challenge
+          const isChallengePresent = await checkForTicketmasterChallenge(page);
+          if (isChallengePresent) {
+            console.warn("Detected Ticketmaster challenge page, attempting to resolve...");
+            await handleTicketmasterChallenge(page);
+          }
+          
+          // Simulate human behavior
+          await simulateMobileInteractions(page);
+          
+          // Wait for cookies to be set
+          await page.waitForTimeout(2000);
+          
+          // Capture cookies
+          const fingerprint = BrowserFingerprint.generate();
+          const { cookies } = await captureCookies(page, fingerprint);
+          
+          if (!cookies || cookies.length === 0) {
+            throw new Error("Failed to capture cookies");
+          }
+          
+          // Clear timeout and resolve with success
+          clearTimeout(timeoutId);
+          resolve({
+            cookies,
+            fingerprint,
+            lastRefresh: Date.now()
+          });
+        } catch (error) {
+          clearTimeout(timeoutId);
+          reject(error);
+        }
+      });
+      
+      // Wait for the refresh promise to complete
+      const result = await refreshPromise;
+      return result;
+    } catch (error) {
+      lastError = error;
+      console.error(`Cookie refresh attempt ${retryCount + 1} failed: ${error.message}`);
+      
+      // Check if this was a timeout error
+      const isTimeout = error.message.includes('timeout');
+      
+      if (isTimeout && retryCount < CONFIG.MAX_REFRESH_RETRIES) {
+        console.log(`Cookie refresh timed out, will retry with new proxy and event ID`);
+        
+        // Generate a new event ID for retry (use a different event from the same venue/artist)
+        const newEventId = await generateAlternativeEventId(eventId);
+        if (newEventId && newEventId !== eventId) {
+          console.log(`Using alternative event ID for retry: ${newEventId}`);
+          eventId = newEventId;
         }
         
-        browserInstance = result.browser;
-        localContext = result.context;
-        page = result.page;
-        
-        initSuccess = true;
-      } catch (error) {
-        initAttempts++;
-        initError = error;
-        console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
-        await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
+        // Get a new proxy for retry
+        if (proxy) {
+          const newProxy = await getAlternativeProxy(proxy);
+          if (newProxy) {
+            console.log(`Using alternative proxy for retry: ${newProxy.host}:${newProxy.port}`);
+            proxy = newProxy;
+          }
+        }
+      }
+      
+      retryCount++;
+      
+      // If we've exhausted all retries, throw the last error
+      if (retryCount > CONFIG.MAX_REFRESH_RETRIES) {
+        console.error(`All cookie refresh attempts failed after ${CONFIG.MAX_REFRESH_RETRIES + 1} tries`);
+        throw lastError;
+      }
+      
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY * retryCount));
+      
+    } finally {
+      // Close page and context but keep browser open for reuse
+      if (page) {
+        try {
+          await page.close().catch(e => console.error("Error closing page:", e));
+        } catch (e) {
+          console.error("Error closing page in finally block:", e);
+        }
+      }
+      
+      if (localContext) {
+        try {
+          await localContext.close().catch(e => console.error("Error closing context:", e));
+        } catch (e) {
+          console.error("Error closing context in finally block:", e);
+        }
       }
     }
-    
-    if (!initSuccess) {
-      console.error("All browser initialization attempts failed");
-      throw initError || new Error("Failed to initialize browser");
-    }
+  }
+  
+  // This should never be reached, but just in case
+  throw lastError || new Error('Cookie refresh failed after all retries');
+}
 
-    // Navigate to event page
-    const url = `https://www.ticketmaster.com/event/${eventId}`;
-    console.log(`Navigating to ${url}`);
+/**
+ * Generate an alternative event ID for retry attempts
+ * This function attempts to find a similar event or generates a fallback
+ */
+async function generateAlternativeEventId(originalEventId) {
+  try {
+    // For now, we'll generate a simple variation of the original event ID
+    // In a production environment, this could query a database for similar events
+    const timestamp = Date.now().toString().slice(-6);
+    const randomSuffix = Math.random().toString(36).substring(2, 8);
     
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: CONFIG.PAGE_TIMEOUT
-    });
+    // Create a variation that's likely to be a valid event ID format
+    const alternativeId = originalEventId.replace(/\d+$/, timestamp + randomSuffix);
     
-    // Check if the page loaded properly
-    const currentUrl = page.url();
-    const pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
-    
-    if (!pageLoadSuccessful) {
-      console.warn(`Failed to load event page, URL: ${currentUrl}`);
-      
-      // Try refreshing the page
-      console.log("Attempting to reload the page...");
-      await page.reload({ waitUntil: "domcontentloaded", timeout: CONFIG.PAGE_TIMEOUT });
-      
-      const newUrl = page.url();
-      const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
-      
-      if (!reloadSuccessful) {
-        console.warn(`Reload failed, URL: ${newUrl}`);
-        throw new Error("Failed to load Ticketmaster event page");
-      }
-    }
-    
-    console.log(`Successfully loaded page for event ${eventId}`);
-    
-    // Check for Ticketmaster challenge
-    const isChallengePresent = await checkForTicketmasterChallenge(page);
-    if (isChallengePresent) {
-      console.warn("Detected Ticketmaster challenge page, attempting to resolve...");
-      await handleTicketmasterChallenge(page);
-    }
-    
-    // Simulate human behavior
-    await simulateMobileInteractions(page);
-    
-    // Wait for cookies to be set
-    await page.waitForTimeout(2000);
-    
-    // Capture cookies
-    const fingerprint = BrowserFingerprint.generate();
-    const { cookies } = await captureCookies(page, fingerprint);
-    
-    if (!cookies || cookies.length === 0) {
-      throw new Error("Failed to capture cookies");
-    }
-    
-    return {
-      cookies,
-      fingerprint,
-      lastRefresh: Date.now()
-    };
+    console.log(`Generated alternative event ID: ${alternativeId} from original: ${originalEventId}`);
+    return alternativeId;
   } catch (error) {
-    console.error(`Error refreshing cookies: ${error.message}`);
-    throw error;
-  } finally {
-    // Close page and context but keep browser open for reuse
-    if (page) {
-      try {
-        await page.close().catch(e => console.error("Error closing page:", e));
-      } catch (e) {
-        console.error("Error closing page in finally block:", e);
-      }
+    console.warn(`Failed to generate alternative event ID: ${error.message}`);
+    return originalEventId; // Fallback to original
+  }
+}
+
+/**
+ * Get an alternative proxy for retry attempts
+ * This function should integrate with your proxy management system
+ */
+async function getAlternativeProxy(currentProxy) {
+  try {
+    // This is a placeholder implementation
+    // In a real system, this would interface with your proxy pool/manager
+    
+    // For now, we'll create a simple variation
+    if (currentProxy && currentProxy.host && currentProxy.port) {
+      // Generate a different port or host variation
+      const portVariation = parseInt(currentProxy.port) + Math.floor(Math.random() * 100) + 1;
+      
+      return {
+        host: currentProxy.host,
+        port: portVariation.toString(),
+        username: currentProxy.username,
+        password: currentProxy.password
+      };
     }
     
-    if (localContext) {
-      try {
-        await localContext.close().catch(e => console.error("Error closing context:", e));
-      } catch (e) {
-        console.error("Error closing context in finally block:", e);
-      }
-    }
+    return null;
+  } catch (error) {
+    console.warn(`Failed to get alternative proxy: ${error.message}`);
+    return null;
   }
 }
 
@@ -698,5 +817,7 @@ export {
   enhancedFingerprint,
   getRandomLocation,
   getRealisticIphoneUserAgent,
+  generateAlternativeEventId,
+  getAlternativeProxy,
   simulateMobileInteractions
 };

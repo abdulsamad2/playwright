@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
+import pThrottle from 'p-throttle';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -173,6 +174,14 @@ export class ScraperManager {
     // CSV processing properties removed
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.processingLocks = new Map(); // Track event locks
+    
+    // Throttled ScrapeEvent to prevent overwhelming the system
+    // Limit to 25 requests per 2 seconds to work with parallel workers
+    this.throttledScrapeEvent = pThrottle({
+      limit: 25,
+      interval: 2000,
+      strict: true
+    })(ScrapeEvent);
   }
 
   logWithTime(message, type = "info") {
@@ -468,9 +477,9 @@ export class ScraperManager {
         throw new Error("Failed to obtain valid headers");
       }
       
-      // Perform the scrape with timeout
+      // Perform the scrape with timeout using throttled function
       const result = await Promise.race([
-        ScrapeEvent({ eventId, headers }),
+        this.throttledScrapeEvent({ eventId, headers }),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error("Scrape timed out")), 30000)
         )
@@ -887,13 +896,21 @@ export class ScraperManager {
         const { proxy: cookieProxy } =
           this.proxyManager.getProxyForEvent(eventToUse);
 
-        // Try to refresh headers with the proxy
+        // Try to refresh headers with the proxy (now includes retry mechanism)
         let capturedState = null;
         try {
+          this.logWithTime(
+            `Attempting cookie refresh for ${eventToUse} with proxy ${cookieProxy ? cookieProxy.host + ':' + cookieProxy.port : 'none'}`,
+            "info"
+          );
           capturedState = await refreshHeaders(eventToUse, cookieProxy);
+          this.logWithTime(
+            `Successfully refreshed cookies for ${eventToUse}`,
+            "info"
+          );
         } catch (error) {
           this.logWithTime(
-            `Error refreshing headers with proxy: ${error.message}`,
+            `Cookie refresh failed for ${eventToUse} after retries: ${error.message}`,
             "warning"
           );
         }
@@ -905,14 +922,18 @@ export class ScraperManager {
           capturedState.cookies.length < MIN_VALID_COOKIES
         ) {
           this.logWithTime(
-            `Trying to refresh headers without proxy for ${eventToUse}`,
+            `Trying to refresh headers without proxy for ${eventToUse} (includes retry mechanism)`,
             "warning"
           );
           try {
             capturedState = await refreshHeaders(eventToUse);
+            this.logWithTime(
+              `Successfully refreshed cookies for ${eventToUse} without proxy`,
+              "info"
+            );
           } catch (error) {
             this.logWithTime(
-              `Error refreshing headers without proxy: ${error.message}`,
+              `Cookie refresh failed for ${eventToUse} without proxy after retries: ${error.message}`,
               "warning"
             );
           }
@@ -2493,9 +2514,9 @@ export class ScraperManager {
         retryCount: retryCount,
       };
 
-      // Quick scrape with shorter timeout and unique session
+      // Quick scrape with shorter timeout and unique session using throttled function
       const result = await Promise.race([
-        ScrapeEvent(eventWithUniqueSession, proxyAgent, proxy),
+        this.throttledScrapeEvent(eventWithUniqueSession, proxyAgent, proxy),
         setTimeout(SCRAPE_TIMEOUT).then(() => {
           throw new Error("Scrape timeout");
         }),
@@ -4210,7 +4231,7 @@ export class ScraperManager {
     });
 
     try {
-      const results = await ScrapeEvent(processable, this);
+      const results = await this.throttledScrapeEvent(processable, this);
 
       // Mark successfully processed events
       await Promise.all(
