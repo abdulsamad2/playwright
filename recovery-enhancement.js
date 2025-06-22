@@ -8,8 +8,8 @@ const STANDARD_RECOVERY_INTERVAL = 50000; // 30 seconds for standard recovery
 const AUTO_STOP_CHECK_INTERVAL = 50000; // 1 minute for auto-stop checks
 
 // Enhanced batch processing for 1000+ events
-const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
-const MAX_RECOVERY_BATCHES = 20; // Increased from 10 for parallel processing
+const RECOVERY_BATCH_SIZE = 10; // Increased from 50 for better throughput
+const MAX_RECOVERY_BATCHES = 5; // Increased from 10 for parallel processing
 const CONCURRENT_RECOVERY_LIMIT = 500; // Max concurrent recovery operations
 
 // Aggressive thresholds for 3-minute guarantee
@@ -45,14 +45,7 @@ function startRecoveryMonitoring() {
     }
   }, STANDARD_RECOVERY_INTERVAL);
 
-  // Auto-stop check every 1 minute
-  this.autoStopIntervalId = setInterval(async () => {
-    try {
-      await this.handleAutoStopEvents();
-    } catch (error) {
-      this.logWithTime(`Auto-stop check error: ${error.message}`, "error");
-    }
-  }, AUTO_STOP_CHECK_INTERVAL);
+  // AUTO-STOP FUNCTIONALITY REMOVED - No longer automatically stopping stale events
 }
 
 /**
@@ -126,15 +119,7 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
       const lastUpdated = new Date(event.Last_Updated).getTime();
       const timeStale = now - lastUpdated;
       
-      // Auto-stop if stale for >10 minutes
-      if (timeStale > STOP_THRESHOLD) {
-        await Event.updateOne(
-          { Event_ID: eventId },
-          { $set: { Status: "STOPPED", Stop_Reason: "stale_timeout" }}
-        );
-        this.logWithTime(`⚠️ STOPPED event ${eventId} (stale for ${Math.round(timeStale/60000)} minutes)`, 'warning');
-        continue;
-      }
+      // AUTO-STOP REMOVED: Events will continue to be retried regardless of staleness duration
       
       // Skip if in cooldown (5 seconds)
       if (this.cooldownEvents.has(eventId)) continue;
@@ -174,38 +159,7 @@ async function handleStandardStaleEvents(processedEvents = new Set()) {
   }
 }
 
-/**
- * Handle auto-stop for events stale >10 minutes
- */
-async function handleAutoStopEvents() {
-  const now = Date.now();
-  
-  try {
-    // Verify database connection first
-    if (!this.db || !this.db.readyState) {
-      throw new Error('Database connection not ready');
-    }
-
-    const eventsToStop = await Event.find({
-      Skip_Scraping: { $ne: true },
-      Last_Updated: { $lt: new Date(now - AUTO_STOP_THRESHOLD) }
-    }).select("Event_ID").lean().catch(err => {
-      throw new Error(`Database query failed: ${err.message}`);
-    });
-
-    if (eventsToStop.length > 0) {
-      const eventIds = eventsToStop.map(e => e.Event_ID);
-      this.logWithTime(`🛑 AUTO-STOP: ${eventIds.length} events >10min stale - stopping`, "error");
-      await this.autoStopStaleEvents(eventIds);
-    }
-  } catch (error) {
-    this.logWithTime(`Error in auto-stop check: ${error.message}`, "error");
-    // Clear intervals if database connection failed
-    if (error.message.includes('Database')) {
-      this.stopRecoveryMonitoring();
-    }
-  }
-}
+// AUTO-STOP FUNCTION REMOVED - Events will no longer be automatically stopped
 
 /**
  * Recover a batch of events with specified recovery level

@@ -31,10 +31,10 @@ function generateUniqueInventoryId() {
 // CSV processing functionality removed entirely
 
 const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
-const CONCURRENT_LIMIT = 200; // Increased from 100 for 1000+ events
+const CONCURRENT_LIMIT =100; // Increased from 100 for 1000+ events
 const MAX_RETRIES = 15; // Increased from 20 for better recovery
 const SCRAPE_TIMEOUT = 45000; // Increased from 20 seconds to 45 seconds for better success rate
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 30000; // Reduced to 30 seconds for faster cycles
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 30 seconds for faster cycles
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
 const EVENT_FAILURE_THRESHOLD = 120000; // Reduced to 2 minutes for faster recovery
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
@@ -42,7 +42,7 @@ const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped aft
 // Enhanced recovery settings for 1000+ events
 const RECOVERY_BATCH_SIZE = 100; // Increased from 50 for better throughput
 const MAX_RECOVERY_BATCHES = 20; // Increased from 10 for parallel processing
-const PARALLEL_BATCH_SIZE = 150; // Increased from 100 for better batching
+const PARALLEL_BATCH_SIZE = 25; // Increased from 100 for better batching
 const MAX_PARALLEL_BATCHES = 25; // Increased from 20 for 1000+ events
 
 // Multi-tier recovery intervals for aggressive processing
@@ -50,6 +50,7 @@ const CRITICAL_RECOVERY_INTERVAL = 10000; // Check critical events every 10 seco
 const AGGRESSIVE_RECOVERY_INTERVAL = 20000; // Check stale events every 20 seconds
 const STANDARD_RECOVERY_INTERVAL = 30000; // Check standard events every 30 seconds
 const AUTO_STOP_CHECK_INTERVAL = 60000; // Check auto-stop events every minute
+const DISABLE_AUTO_STOP = true; // Global constant to disable auto-stopping of stale or failed events - PERMANENTLY DISABLED
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 3; // Default to warnings and errors only
@@ -2580,28 +2581,33 @@ export class ScraperManager {
           // Get all events that need processing
           const events = await this.getEvents();
 
-          // CRITICAL FIX: Track if we're getting the same events repeatedly
-          const currentEventIds = JSON.stringify(events.slice(0, 10).sort());
-          if (currentEventIds === lastEventIds) {
-            sameEventsCounter++;
+          // OPTIONAL: Loop detection (can be disabled by setting DISABLE_LOOP_DETECTION=true)
+          const DISABLE_LOOP_DETECTION = process.env.DISABLE_LOOP_DETECTION === 'true';
+          
+          if (!DISABLE_LOOP_DETECTION) {
+            // Track if we're getting the same events repeatedly
+            const currentEventIds = JSON.stringify(events.slice(0, 10).sort());
+            if (currentEventIds === lastEventIds) {
+              sameEventsCounter++;
 
-            // If we've seen the same events 20 times, something is wrong
-            if (sameEventsCounter >= 20) {
-              this.logWithTime(
-                `WARNING: Same ${events.length} events returned ${sameEventsCounter} times in a row. Potential processing loop detected.`,
-                "error"
-              );
+              // If we've seen the same events 20 times, something is wrong
+              if (sameEventsCounter >= 20) {
+                this.logWithTime(
+                  `WARNING: Same ${events.length} events returned ${sameEventsCounter} times in a row. Potential processing loop detected.`,
+                  "error"
+                );
 
-              // Force cleanup of tracking to break the loop
-              await this.forceCleanupAllTracking();
+                // Force cleanup of tracking to break the loop
+                await this.forceCleanupAllTracking();
 
-              // Reset counter after cleanup
+                // Reset counter after cleanup
+                sameEventsCounter = 0;
+              }
+            } else {
+              // Different events, reset counter
+              lastEventIds = currentEventIds;
               sameEventsCounter = 0;
             }
-          } else {
-            // Different events, reset counter
-            lastEventIds = currentEventIds;
-            sameEventsCounter = 0;
           }
 
           if (events.length > 0) {
@@ -2676,6 +2682,24 @@ export class ScraperManager {
           this.retryQueue = this.retryQueue.filter(
             (job) => !retryEvents.includes(job)
           );
+
+          // CRITICAL FIX: Periodic cleanup of stuck processing locks
+          if (Date.now() % 30000 < 100) { // Every 30 seconds
+            const fiveMinutesAgo = Date.now() - 300000;
+            let releasedLocks = 0;
+            for (const [eventId, lockTime] of this.processingLocks.entries()) {
+              if (lockTime < fiveMinutesAgo) {
+                this.processingLocks.delete(eventId);
+                releasedLocks++;
+              }
+            }
+            if (releasedLocks > 0) {
+              this.logWithTime(
+                `🔓 Released ${releasedLocks} stuck processing locks (>5min old)`,
+                "warning"
+              );
+            }
+          }
 
           // Short pause before next cycle
           await setTimeout(100); // Check every 100ms for new events
@@ -2802,9 +2826,9 @@ export class ScraperManager {
           processedEventsSet.add(eventId)
         );
 
-        // For failed recovery events, check if they should be auto-stopped
+        // AUTO-STOP REMOVED: Failed recovery events will continue to be retried
         if (recoveryResult.failed.length > 0) {
-          await this.autoStopStaleEvents(recoveryResult.failed);
+          this.logWithTime(`Recovery failed for ${recoveryResult.failed.length} events - will continue retrying`, "warning");
         }
       }
 
@@ -2878,9 +2902,9 @@ export class ScraperManager {
       processedEventsSet.add(eventId)
     );
 
-    // For failed recovery events, check if they should be auto-stopped
+    // AUTO-STOP REMOVED: Failed recovery events will continue to be retried
     if (recoveryResult.failed.length > 0) {
-      await this.handleAutoStopEvents(recoveryResult.failed);
+      this.logWithTime(`Critical recovery failed for ${recoveryResult.failed.length} events - will continue retrying`, "warning");
     }
   }
 
@@ -2926,65 +2950,16 @@ export class ScraperManager {
       processedEventsSet.add(eventId)
     );
 
-    // For failed recovery events over 10 minutes, consider auto-stop
+    // AUTO-STOP REMOVED: Failed recovery events will continue to be retried regardless of time
     if (recoveryResult.failed.length > 0) {
-      const failedEvents = staleEvents.filter((e) =>
-        recoveryResult.failed.includes(e.eventId)
+      this.logWithTime(
+        `Standard recovery failed for ${recoveryResult.failed.length} events - will continue retrying indefinitely`,
+        "warning"
       );
-      const failedOver10Min = failedEvents
-        .filter((e) => e.minutesSinceUpdate >= 10)
-        .map((e) => e.eventId);
-
-      if (failedOver10Min.length > 0) {
-        await this.handleAutoStopEvents(failedOver10Min);
-      } else {
-        this.logWithTime(
-          `Not auto-stopping ${recoveryResult.failed.length} failed events - under 10 minute threshold`,
-          "info"
-        );
-      }
     }
   }
 
-  /**
-   * Handle events that failed recovery - decide whether to auto-stop based on time
-   */
-  async handleAutoStopEvents(eventIds) {
-    if (eventIds.length === 0) {
-      return;
-    }
-
-    this.logWithTime(
-      `🛑 Evaluating ${eventIds.length} events for auto-stop after failed recovery`,
-      "warning"
-    );
-
-    // Get full event stats to check exact staleness
-    const stats = await this.getStaleEventStats();
-    if (!stats) return;
-
-    // Filter to events that are still over 10 minutes stale
-    const eventsStillStale = stats.staleOver10Min.filter((event) =>
-      eventIds.includes(event.eventId)
-    );
-
-    const eventsToAutoStop = eventsStillStale.map((e) => e.eventId);
-
-    if (eventsToAutoStop.length > 0) {
-      this.logWithTime(
-        `🛑 AUTO-STOPPING ${eventsToAutoStop.length} events: Failed recovery and still >10 minutes stale - setting Skip_Scraping = true`,
-        "error"
-      );
-
-      // Auto-stop events that remain critically stale
-      await this.autoStopStaleEvents(eventsToAutoStop);
-    } else {
-      this.logWithTime(
-        `Not auto-stopping ${eventIds.length} events - no longer critically stale`,
-        "info"
-      );
-    }
-  }
+  // HANDLE AUTO STOP EVENTS METHOD REMOVED - Auto-stopping functionality disabled
 
   /**
    * Attempt AGGRESSIVE recovery for critically stale events (>8 minutes)
@@ -3330,123 +3305,7 @@ export class ScraperManager {
     return results;
   }
 
-  /**
-   * Auto-stop events that are stale and couldn't be recovered
-   */
-  async autoStopStaleEvents(eventIds) {
-    if (eventIds.length === 0) {
-      return;
-    }
-
-    try {
-      // Double-check that these events actually exceed the 10-minute threshold
-      const now = Date.now();
-      const confirmedStaleEvents = [];
-
-      for (const eventId of eventIds) {
-        const lastUpdate = this.eventUpdateTimestamps.get(eventId);
-        const timeSinceUpdate = lastUpdate
-          ? now - lastUpdate.valueOf()
-          : Infinity;
-
-        if (timeSinceUpdate >= 600000) {
-          // Confirm 10-minute threshold
-          confirmedStaleEvents.push(eventId);
-        } else {
-          this.logWithTime(
-            `Event ${eventId} not yet at 10-minute threshold (${Math.floor(
-              timeSinceUpdate / 1000
-            )}s) - continuing retries`,
-            "info"
-          );
-        }
-      }
-
-      if (confirmedStaleEvents.length === 0) {
-        return; // No events actually at threshold
-      }
-
-      // Update events in database to stop scraping
-      const updateResult = await Event.updateMany(
-        { Event_ID: { $in: confirmedStaleEvents } },
-        {
-          $set: {
-            Skip_Scraping: true,
-            status: "auto_stopped",
-            auto_stopped_reason:
-              "Failed recovery after 10+ minutes of inactivity",
-            auto_stopped_at: new Date(),
-            last_recovery_attempt: new Date(),
-            recovery_attempts_failed: true,
-          },
-        }
-      );
-
-      this.logWithTime(
-        `🛑 AUTO-STOPPED ${updateResult.modifiedCount}/${confirmedStaleEvents.length} stale events: Skip_Scraping = true (exceeded 10-minute threshold) - excluded from future scraping`,
-        "error"
-      );
-
-      // Clean up tracking for auto-stopped events
-      for (const eventId of confirmedStaleEvents) {
-        // Complete cleanup of all tracking data
-        this.cleanupEventTracking(eventId);
-
-        // Remove from retry queue permanently
-        this.retryQueue = this.retryQueue.filter(
-          (item) => item.eventId !== eventId
-        );
-
-        // Clear from all processing queues
-        this.eventProcessingQueue = this.eventProcessingQueue.filter(
-          (item) => (typeof item === "string" ? item : item.eventId) !== eventId
-        );
-
-        // Log detailed audit trail
-        await this.logError(
-          eventId,
-          "AUTO_STOPPED",
-          new Error(
-            `Event auto-stopped after exceeding 10-minute threshold - excluded from scraping`
-          ),
-          {
-            reason: "exceeded_10min_threshold",
-            lastUpdate: this.eventUpdateTimestamps.get(eventId)?.toISOString(),
-            autoStoppedAt: new Date().toISOString(),
-            excludedFromScraping: true,
-            skipScraping: true,
-          }
-        );
-
-        this.logWithTime(
-          `🚫 STOPPED event ${eventId}: Skip_Scraping = true (Reason: exceeded_10min_threshold) - excluded from future scraping`,
-          "warning"
-        );
-      }
-
-      // Force a CSV regeneration to exclude stopped events
-      try {
-        const { forceCombinedCSVGeneration } = await import(
-          "./controllers/inventoryController.js"
-        );
-        forceCombinedCSVGeneration();
-        this.logWithTime(
-          `📊 Forced CSV regeneration to exclude ${confirmedStaleEvents.length} auto-stopped events`,
-          "info"
-        );
-      } catch (csvError) {
-        this.logWithTime(
-          `Error forcing CSV regeneration: ${csvError.message}`,
-          "warning"
-        );
-      }
-    } catch (error) {
-      this.logWithTime(
-        `Error auto-stopping stale events: ${error.message}`,
-        "error"
-      );
-    }
-  }
+  // AUTO-STOP FUNCTIONALITY REMOVED - Events will no longer be automatically stopped
 
   /**
    * Force immediate cleanup of all tracking Maps (manual cleanup)
@@ -3535,6 +3394,25 @@ export class ScraperManager {
         }
       }
 
+      // CRITICAL FIX: Clean up processing locks to prevent stuck events
+      for (const eventId of [...this.processingLocks.keys()]) {
+        if (!activeEventIds.has(eventId)) {
+          this.processingLocks.delete(eventId);
+        }
+      }
+
+      // AGGRESSIVE FIX: Clear all processing locks older than 5 minutes
+      const fiveMinutesAgo = Date.now() - 300000;
+      for (const [eventId, lockTime] of this.processingLocks.entries()) {
+        if (lockTime < fiveMinutesAgo) {
+          this.processingLocks.delete(eventId);
+          this.logWithTime(
+            `🔓 Released stuck processing lock for event ${eventId} (locked for ${Math.floor((Date.now() - lockTime) / 1000)}s)`,
+            "warning"
+          );
+        }
+      }
+
       const cleanedCount = beforeCount - this.eventUpdateTimestamps.size;
 
       this.logWithTime(
@@ -3615,6 +3493,13 @@ export class ScraperManager {
       for (const eventId of this.cooldownEvents.keys()) {
         if (!activeEventIds.has(eventId)) {
           this.cooldownEvents.delete(eventId);
+        }
+      }
+
+      // Clean up processing locks for inactive events
+      for (const eventId of this.processingLocks.keys()) {
+        if (!activeEventIds.has(eventId)) {
+          this.processingLocks.delete(eventId);
         }
       }
 
@@ -4121,6 +4006,10 @@ export class ScraperManager {
    * @param {number} retryLimit - Retry limit
    */
   async setEventSkipScraping(eventId, reason, retryCount, retryLimit) {
+    if (DISABLE_AUTO_STOP) {
+      this.logWithTime(`Skipping setting Skip_Scraping for event ${eventId} due to DISABLE_AUTO_STOP.`, "info");
+      return false;
+    }
     try {
       // Only stop if 10-minute threshold is exceeded
       const lastUpdate = this.eventUpdateTimestamps.get(eventId);
@@ -4293,7 +4182,7 @@ ScraperManager.prototype.initializeRecoverySystem = function() {
   this.handleStaleEvents = this.handleStaleEvents?.bind(this) || function() {};
   this.handleCriticalStaleEvents = this.handleCriticalStaleEvents?.bind(this) || this.handleStaleEvents;
   this.handleStandardStaleEvents = this.handleStandardStaleEvents?.bind(this) || this.handleStaleEvents;
-  this.handleAutoStopEvents = this.handleAutoStopEvents?.bind(this) || function() {};
+  // handleAutoStopEvents binding removed - auto-stop functionality disabled
   this.recoverEventBatch = this.recoverEventBatch?.bind(this) || function() {};
   this.recoverSingleEvent = this.recoverSingleEvent?.bind(this) || function() {};
 };
