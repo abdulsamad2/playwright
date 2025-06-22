@@ -156,7 +156,7 @@ class EventProcessor {
   }
 
   /**
-   * Process the retry queue
+   * Process the retry queue (non-blocking)
    */
   async processRetryQueue() {
     const readyForRetry = this.errorTracker.getEventsReadyForRetry();
@@ -165,19 +165,44 @@ class EventProcessor {
       return 0;
     }
 
-    // Process retries one at a time with delay between to avoid overwhelming the server
-    let retryCount = 0;
-    for (const job of readyForRetry) {
-      // Attempt the retry
-      await this.scrapeEvent(job.eventId, job.retryCount);
-      retryCount++;
+    // Process retries asynchronously without blocking the main loop
+    // Limit concurrent retries to prevent overwhelming the server
+    const maxConcurrentRetries = Math.min(3, readyForRetry.length);
+    const retryBatches = [];
+    
+    for (let i = 0; i < readyForRetry.length; i += maxConcurrentRetries) {
+      retryBatches.push(readyForRetry.slice(i, i + maxConcurrentRetries));
+    }
 
-      // Add delay between retries
-      await setTimeout(2000);
+    let totalRetryCount = 0;
+    
+    // Process batches with controlled concurrency
+    for (const batch of retryBatches) {
+      const retryPromises = batch.map(async (job) => {
+        try {
+          await this.scrapeEvent(job.eventId, job.retryCount);
+          return true;
+        } catch (error) {
+          this.logger.logWithTime(
+            `Retry failed for event ${job.eventId}: ${error.message}`,
+            "warning"
+          );
+          return false;
+        }
+      });
+      
+      // Wait for current batch to complete before starting next batch
+      const results = await Promise.allSettled(retryPromises);
+      totalRetryCount += results.filter(r => r.status === 'fulfilled' && r.value).length;
+      
+      // Small delay between batches to prevent rate limiting
+      if (retryBatches.length > 1) {
+        await setTimeout(500); // Reduced from 2000ms to 500ms
+      }
     }
     
-    return retryCount;
+    return totalRetryCount;
   }
 }
 
-export default EventProcessor; 
+export default EventProcessor;
