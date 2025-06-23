@@ -8,14 +8,12 @@ import config from "../config/scraperConfig.js";
 class EventProcessor {
   constructor(
     logger,
-    concurrencyManager,
     cookieManager,
     databaseManager,
     errorTracker,
     scheduler
   ) {
     this.logger = logger;
-    this.concurrencyManager = concurrencyManager;
     this.cookieManager = cookieManager;
     this.databaseManager = databaseManager;
     this.errorTracker = errorTracker;
@@ -28,13 +26,7 @@ class EventProcessor {
   async scrapeEvent(eventId, retryCount = 0) {
     const eventUpdateTimestamps = this.scheduler.getUpdateTimestamps();
     
-    // Skip if the event should be skipped
-    if (this.concurrencyManager.shouldSkipEvent(eventId, eventUpdateTimestamps)) {
-      return false;
-    }
 
-    await this.concurrencyManager.acquireSemaphore();
-    this.concurrencyManager.startJob(eventId);
 
     try {
       this.logger.logWithTime(`Scraping ${eventId} (Attempt ${retryCount + 1})`);
@@ -44,8 +36,7 @@ class EventProcessor {
 
       if (!event) {
         this.logger.logWithTime(`Event ${eventId} not found in database`, "error");
-        // Put event in cooldown to avoid immediate retries
-        this.concurrencyManager.setCooldown(eventId, 60 * 60 * 1000); // 1 hour
+
         return false;
       }
 
@@ -56,15 +47,24 @@ class EventProcessor {
         return true;
       }
 
-      // Check for recent consecutive failures and apply longer cooldowns
+      // Optimized failure handling - shorter cooldowns to keep system moving
       const recentFailures = this.errorTracker.getRecentFailureCount(eventId);
-      if (recentFailures >= 3 && retryCount > 1) {
-        const backoffMinutes = Math.min(30, 5 * Math.pow(2, recentFailures - 3));
+      if (recentFailures >= 5 && retryCount > 2) { // Increased threshold from 3 to 5
+        const backoffMinutes = Math.min(10, 2 + recentFailures); // Reduced max from 30 to 10 minutes
+
         this.logger.logWithTime(
-          `Event ${eventId} has failed ${recentFailures} times, extending cooldown to ${backoffMinutes} minutes`,
+          `Event ${eventId} has failed ${recentFailures} times, short cooldown of ${backoffMinutes} minutes`,
           "warning"
         );
-        this.concurrencyManager.setCooldown(eventId, backoffMinutes * 60 * 1000);
+
+        
+        // Clear some failure history to prevent permanent penalties
+        if (recentFailures >= 8) {
+          setTimeout(() => {
+            this.errorTracker.clearFailureCount(eventId);
+            this.logger.logWithTime(`Reset failure count for ${eventId} to prevent permanent blocking`, "info");
+          }, 2 * 60 * 1000); // Reset after 2 minutes
+        }
         
         // Still update the schedule to prevent urgent flags
         this.scheduler.scheduleNextUpdate(eventId);
@@ -100,16 +100,12 @@ class EventProcessor {
         eventId, 
         error, 
         retryCount, 
-        this.concurrencyManager,
         this.scheduler
       );
       
       await this.logger.logError(eventId, "SCRAPE_ERROR", error, { retryCount });
       
       return false;
-    } finally {
-      this.concurrencyManager.endJob(eventId);
-      this.concurrencyManager.releaseSemaphore();
     }
   }
 

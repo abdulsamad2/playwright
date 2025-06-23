@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 import pThrottle from 'p-throttle';
+import config from './config/scraperConfig.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -31,26 +32,19 @@ function generateUniqueInventoryId() {
 
 // CSV processing functionality removed entirely
 
-const MAX_UPDATE_INTERVAL = 120000; // Strict 2-minute update requirement (reduced from 160000)
-const CONCURRENT_LIMIT =100; // Increased from 100 for 1000+ events
-const MAX_RETRIES = 15; // Increased from 20 for better recovery
-const SCRAPE_TIMEOUT = 45000; // Increased from 20 seconds to 45 seconds for better success rate
-const MIN_TIME_BETWEEN_EVENT_SCRAPES = 10000; // Reduced to 30 seconds for faster cycles
+const MAX_UPDATE_INTERVAL = config.MAX_UPDATE_INTERVAL; // Use config value
+const MAX_RETRIES = config.MAX_RETRIES; // Use config value
+const SCRAPE_TIMEOUT = config.SCRAPE_TIMEOUT; // Use config value
+const MIN_TIME_BETWEEN_EVENT_SCRAPES = config.MIN_TIME_BETWEEN_EVENT_SCRAPES; // Use config value (reduced to 5000ms)
 const MAX_ALLOWED_UPDATE_INTERVAL = 180000; // Maximum 3 minutes allowed between updates
-const EVENT_FAILURE_THRESHOLD = 120000; // Reduced to 2 minutes for faster recovery
+const EVENT_FAILURE_THRESHOLD = 120000; // 2 minutes for faster recovery
 const STALE_EVENT_THRESHOLD = 600000; // 10 minutes - events will be stopped after this
 
-// Enhanced recovery settings for 1000+ events
-const RECOVERY_BATCH_SIZE = 50; // Increased for better recovery throughput
-const MAX_RECOVERY_BATCHES = 10; // Increased for parallel recovery processing
-const PARALLEL_BATCH_SIZE = 20; // Optimized for higher throughput with 2-second intervals
-const MAX_PARALLEL_BATCHES = 15; // Increased for better event handling capacity
-
 // Multi-tier recovery intervals for aggressive processing
-const CRITICAL_RECOVERY_INTERVAL = 10000; // Check critical events every 10 seconds
-const AGGRESSIVE_RECOVERY_INTERVAL = 20000; // Check stale events every 20 seconds
-const STANDARD_RECOVERY_INTERVAL = 30000; // Check standard events every 30 seconds
-const AUTO_STOP_CHECK_INTERVAL = 60000; // Check auto-stop events every minute
+const CRITICAL_RECOVERY_INTERVAL = config.PROCESSING_INTERVAL * 20; // Check critical events more frequently
+const AGGRESSIVE_RECOVERY_INTERVAL = config.PROCESSING_INTERVAL * 40; // Check stale events more frequently
+const STANDARD_RECOVERY_INTERVAL = config.PROCESSING_INTERVAL * 60; // Check standard events more frequently
+const AUTO_STOP_CHECK_INTERVAL = config.PROCESSING_INTERVAL * 120; // Check auto-stop events more frequently
 const DISABLE_AUTO_STOP = true; // Global constant to disable auto-stopping of stale or failed events - PERMANENTLY DISABLED
 
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
@@ -124,8 +118,8 @@ export class ScraperManager {
     this.headersCache = new Map();
     this.eventUpdateTimestamps = new Map();
     this.priorityQueue = new Set();
-    this.concurrencySemaphore = CONCURRENT_LIMIT;
     this.processingEvents = new Set(); // Track events currently being processed
+    this.processingLocks = new Map(); // Track events that are locked for processing
     this.headerRefreshTimestamps = new Map(); // Track when headers were last refreshed
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
     this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
@@ -136,7 +130,6 @@ export class ScraperManager {
     this.cookiesPath = path.join(process.cwd(), "cookies.json"); // Path to cookies file
     // Initialize the proxy manager
     this.proxyManager = new ProxyManager(this);
-    this.batchProxies = new Map(); // Map batch ID to proxy
 
     // Initialize SessionManager for robust session handling
     this.sessionManager = new SessionManager(this);
@@ -157,30 +150,17 @@ export class ScraperManager {
     };
     this.headerSuccessRates = new Map(); // Track which headers work better
 
-    // New: Failed events batching
-    this.failureTypeGroups = new Map(); // Group failed events by error type
-    this.lastFailedBatchProcess = null; // Last time we processed a batch of failed events
-    this.failedEventsProcessingInterval = 5000; // Process failed events every 5 seconds
-    this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
-
-    // CSV upload tracking removed
-
-    // New: High-performance event processing
+    // Event processing
     this.eventProcessingQueue = []; // Queue of events to process
-    this.processingBatches = new Map(); // Track active processing batches
     this.eventLastProcessedTime = new Map(); // Track when each event was last processed
-    this.parallelWorkers = []; // Array of parallel worker promises
-    this.maxParallelWorkers = MAX_PARALLEL_BATCHES;
-    // CSV processing properties removed
     this.eventPriorityScores = new Map(); // Cache priority scores
-    this.processingLocks = new Map(); // Track event locks
+    this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
     
-    // Throttled ScrapeEvent to prevent overwhelming the system
-    // Limit to 25 requests per 2 seconds to work with parallel workers
+    // Enhanced throttled ScrapeEvent for concurrent processing
     this.throttledScrapeEvent = pThrottle({
-      limit: 25,
-      interval: 2000,
-      strict: true
+      limit: config.CONCURRENT_LIMIT, // Use config value (8-12 concurrent)
+      interval: config.PROCESSING_INTERVAL, // Use config value (500ms)
+      strict: false // Allow bursts for better throughput
     })(ScrapeEvent);
   }
 
@@ -219,7 +199,7 @@ export class ScraperManager {
           `   Runtime: ${Math.floor(
             runningTime.asHours()
           )}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
-          `   Active: ${this.activeJobs.size}/${CONCURRENT_LIMIT}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}, Retry Queue: ${this.retryQueue.length}`
+          `   Active: ${this.activeJobs.size}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}, Retry Queue: ${this.retryQueue.length}`
       );
     } else {
       console.log(`${statusEmoji} [${formattedTime}] ${message}`);
@@ -288,16 +268,7 @@ export class ScraperManager {
     return timeSinceUpdate >= EVENT_FAILURE_THRESHOLD;
   }
 
-  async acquireSemaphore() {
-    while (this.concurrencySemaphore <= 0) {
-      await setTimeout(100);
-    }
-    this.concurrencySemaphore--;
-  }
-
-  releaseSemaphore() {
-    this.concurrencySemaphore++;
-  }
+  // Semaphore methods removed - using sequential processing
 
   // Start continuous scraping
   async startContinuousScraping() {
@@ -310,8 +281,7 @@ export class ScraperManager {
       this.isRunning = true;
       this.logWithTime("Starting continuous scraping with optimized retry handling...", "success");
       
-      // Start background retry processor to handle failed events without blocking main loop
-      this.startBackgroundRetryProcessor();
+      // Background retry processor removed - retries handled in sequential processing
       
       // Start performance monitoring
       this.startPerformanceMonitoring();
@@ -322,20 +292,17 @@ export class ScraperManager {
       // Start cookie rotation
       this.forcePeriodicCookieRotation();
       
-      // Start parallel workers for main event processing
-      this.parallelWorkers = [];
-      for (let i = 0; i < this.maxParallelWorkers; i++) {
-        const workerPromise = this.startParallelWorker(i + 1);
-        this.parallelWorkers.push(workerPromise);
-      }
+      // Start retry queue cleanup
+      this.startRetryQueueCleanup();
       
+      // Start concurrent event processing
       this.logWithTime(
-        `Started ${this.maxParallelWorkers} parallel workers with background retry processing`,
+        "Started concurrent event processing with enhanced throughput",
         "success"
       );
       
-      // Wait for all workers to complete (they run indefinitely while isRunning is true)
-      await Promise.all(this.parallelWorkers);
+      // Main concurrent processing loop
+      await this.startConcurrentProcessing();
       
     } catch (error) {
       this.logWithTime(`Error in startContinuousScraping: ${error.message}`, "error");
@@ -358,217 +325,21 @@ export class ScraperManager {
     this.activeJobs.clear();
     this.processingEvents.clear();
     
-    // Stop background retry processor
-    if (this.retryProcessorInterval) {
-      clearInterval(this.retryProcessorInterval);
-      this.retryProcessorInterval = null;
+    // Clear retry queue cleanup interval
+    if (this.retryQueueCleanupIntervalId) {
+      clearInterval(this.retryQueueCleanupIntervalId);
+      this.retryQueueCleanupIntervalId = null;
+      this.logWithTime("Retry queue cleanup interval cleared", "info");
     }
     
     this.logWithTime("Continuous scraping stopped", "success");
   }
 
-  /**
-   * Start background retry processor to handle failed events without blocking main loop
-   */
-  startBackgroundRetryProcessor() {
-    if (this.retryProcessorInterval) {
-      clearInterval(this.retryProcessorInterval);
-    }
-    
-    this.logWithTime("Starting background retry processor (30-second cycles)", "info");
-    
-    this.retryProcessorInterval = setInterval(async () => {
-      if (!this.isRunning) return;
-      
-      try {
-        const now = moment();
-        const readyForRetry = this.retryQueue.filter((job) =>
-          job.retryAfter.isBefore(now)
-        );
-        
-        if (readyForRetry.length === 0) return;
-        
-        // Process up to 5 retries in background without blocking main loop
-        const MAX_BACKGROUND_RETRIES = 5;
-        const retryBatch = readyForRetry.slice(0, MAX_BACKGROUND_RETRIES);
-        
-        this.logWithTime(
-          `Background retry processor: Processing ${retryBatch.length} failed events`,
-          "info"
-        );
-        
-        // Process retries in parallel with limited concurrency
-        const retryPromises = retryBatch.map(async (job) => {
-          try {
-            // Check if event is already being processed
-            if (this.processingEvents.has(job.eventId)) {
-              return false;
-            }
-            
-            // Mark as processing
-            this.processingEvents.add(job.eventId);
-            
-            // Process the retry
-            const result = await this.processEventWithRetry(job.eventId, job.retryCount);
-            
-            if (result) {
-              // Remove from retry queue on success
-              this.retryQueue = this.retryQueue.filter(r => r.eventId !== job.eventId);
-              this.logWithTime(
-                `Background retry successful for event ${job.eventId}`,
-                "success"
-              );
-            }
-            
-            return result;
-          } catch (error) {
-            this.logWithTime(
-              `Background retry failed for event ${job.eventId}: ${error.message}`,
-              "warning"
-            );
-            return false;
-          } finally {
-            // Always remove from processing set
-            this.processingEvents.delete(job.eventId);
-          }
-        });
-        
-        // Wait for all retries to complete
-        const results = await Promise.allSettled(retryPromises);
-        const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
-        
-        if (successCount > 0) {
-          this.logWithTime(
-            `Background retry processor: ${successCount}/${retryBatch.length} retries successful`,
-            "success"
-          );
-        }
-        
-      } catch (error) {
-        this.logWithTime(
-          `Background retry processor error: ${error.message}`,
-          "error"
-        );
-      }
-    }, 30000); // Run every 30 seconds
-  }
+  // Background retry processor removed - retries handled in sequential processing
   
-  /**
-   * Process a single event with retry logic (used by background processor)
-   */
-  async processEventWithRetry(eventId, retryCount = 0) {
-    try {
-      // Get event from database
-      const event = await Event.findOne({ Event_ID: eventId }).lean();
-      
-      if (!event) {
-        this.logWithTime(`Event ${eventId} not found in database`, "warning");
-        return false;
-      }
-      
-      if (event.Skip_Scraping) {
-         this.logWithTime(`Skipping ${eventId} (flagged for skip)`, "info");
-         return true; // Consider this a success to remove from retry queue
-       }
-      
-      // Get fresh headers
-      const headers = await this.getHeadersForEvent(eventId);
-      if (!headers) {
-        throw new Error("Failed to obtain valid headers");
-      }
-      
-      // Perform the scrape with timeout using throttled function
-      const result = await Promise.race([
-        this.throttledScrapeEvent({ eventId, headers }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("Scrape timed out")), 30000)
-        )
-      ]);
-      
-      if (!result || !Array.isArray(result) || result.length === 0) {
-        throw new Error("Empty or invalid scrape result");
-      }
-      
-      // Update event in database
-      await this.updateEventInDatabase(eventId, result);
-      
-      // Remove from failed events
-      this.failedEvents.delete(eventId);
-      
-      return true;
-    } catch (error) {
-      // Add back to retry queue with exponential backoff
-      const backoffMinutes = Math.min(60, 5 * Math.pow(2, retryCount));
-      const retryAfter = moment().add(backoffMinutes, 'minutes');
-      
-      // Only add back if retry count is reasonable
-      if (retryCount < 5) {
-        this.retryQueue.push({
-          eventId,
-          retryCount: retryCount + 1,
-          retryAfter,
-          error: error.message
-        });
-      } else {
-        // Too many retries, mark as failed
-        this.failedEvents.add(eventId);
-        this.logWithTime(
-          `Event ${eventId} exceeded retry limit, marking as failed`,
-          "error"
-        );
-      }
-      
-      return false;
-     }
-   }
+  // processEventWithRetry method removed - retry logic handled in sequential processing
 
-   /**
-    * Get headers for an event (helper method for background retry processor)
-    */
-   async getHeadersForEvent(eventId) {
-     try {
-       // Use existing header refresh logic
-       await this.refreshEventHeaders(eventId, false);
-       return this.headersCache.get(eventId) || null;
-     } catch (error) {
-       this.logWithTime(`Error getting headers for ${eventId}: ${error.message}`, "warning");
-       return null;
-     }
-   }
-
-   /**
-    * Update event in database (helper method for background retry processor)
-    */
-   async updateEventInDatabase(eventId, result) {
-     try {
-       const updateData = {
-         Last_Updated: new Date(),
-         scrape_result: result,
-         last_scrape_success: true,
-         last_scrape_timestamp: new Date(),
-       };
-
-       await Event.updateOne(
-         { Event_ID: eventId },
-         { $set: updateData }
-       );
-
-       // Update local timestamp tracking
-       this.eventUpdateTimestamps.set(eventId, moment());
-       this.eventLastProcessedTime.set(eventId, Date.now());
-
-       this.logWithTime(
-         `Updated event ${eventId} in database via background retry`,
-         "debug"
-       );
-     } catch (error) {
-       this.logWithTime(
-         `Error updating event ${eventId} in database: ${error.message}`,
-         "error"
-       );
-       throw error;
-     }
-   }
+   // Helper methods for background retry processor removed - using sequential processing
  
    shouldSkipEvent(eventId) {
     // Check if event is in cooldown period
@@ -1794,7 +1565,7 @@ export class ScraperManager {
     const failedEventCount = this.failedEvents.size;
 
     // Only throttle if we have many active jobs
-    if (activeJobCount > CONCURRENT_LIMIT * 0.8) {
+    if (activeJobCount > config.CONCURRENT_LIMIT * 0.8) {
       pauseTime += 50;
     }
 
@@ -1887,15 +1658,7 @@ export class ScraperManager {
 
     this.logWithTime("Stopping continuous scraping process...", "info");
 
-    // Wait for all parallel workers to finish
-    if (this.parallelWorkers.length > 0) {
-      this.logWithTime(
-        `Waiting for ${this.parallelWorkers.length} parallel workers to finish...`,
-        "info"
-      );
-      await Promise.allSettled(this.parallelWorkers);
-      this.parallelWorkers = [];
-    }
+    // Sequential processing - no workers to wait for
 
     // Clear the cookie rotation interval if it exists
     if (this.cookieRotationIntervalId) {
@@ -1912,7 +1675,7 @@ export class ScraperManager {
     // Clear all processing queues
     this.eventProcessingQueue = [];
     this.processingEvents.clear();
-    this.processingBatches.clear();
+    // No batch processing to clear
 
     this.logWithTime("Continuous scraping process stopped", "success");
 
@@ -1972,6 +1735,59 @@ export class ScraperManager {
   clearFailureCount(eventId) {
     this.eventFailureCounts.delete(eventId);
     this.eventFailureTimes.delete(eventId);
+    
+
+
+    
+    // Clear from error tracker if available
+    if (this.errorTracker && this.errorTracker.clearFailureCount) {
+      this.errorTracker.clearFailureCount(eventId);
+    }
+    
+    // Remove from processing locks if stuck
+    this.processingLocks.delete(eventId);
+    this.processingEvents.delete(eventId);
+  }
+
+  /**
+   * Perform health check to monitor scraper performance and identify issues
+   */
+  performHealthCheck() {
+    const now = Date.now();
+    const fiveMinutesAgo = now - 300000;
+    
+    // Count stuck events
+    const stuckEvents = Array.from(this.processingLocks.entries())
+      .filter(([_, lockTime]) => lockTime < fiveMinutesAgo).length;
+    
+    // Count failed events
+    const failedEventsCount = this.failedEvents.size;
+    
+    // Count retry queue size
+    const retryQueueSize = this.retryQueue.length;
+    
+    // Count processing queue size
+    const processingQueueSize = this.eventProcessingQueue.length;
+    
+    // Calculate success rate
+    const totalAttempts = this.successCount + failedEventsCount;
+    const successRate = totalAttempts > 0 ? (this.successCount / totalAttempts * 100).toFixed(1) : 0;
+    
+    // Log health status if there are issues
+    if (stuckEvents > 0 || failedEventsCount > 10 || retryQueueSize > 50) {
+      this.logWithTime(
+        `🏥 Health Check: ${stuckEvents} stuck events, ${failedEventsCount} failed, ${retryQueueSize} in retry queue, ${processingQueueSize} processing, ${successRate}% success rate`,
+        "warning"
+      );
+    } else {
+      // Periodic positive health report
+      if (now % 300000 < 60000) { // Every 5 minutes
+        this.logWithTime(
+          `✅ Health Check: System healthy - ${successRate}% success rate, ${processingQueueSize} events processing`,
+          "info"
+        );
+      }
+    }
   }
 
   /**
@@ -2309,6 +2125,69 @@ export class ScraperManager {
     });
   }
 
+  /**
+   * Start retry queue cleanup that runs every minute
+   * Removes stale retry entries and expired cooldown events
+   */
+  startRetryQueueCleanup() {
+    this.logWithTime("Starting retry queue cleanup (every 1 minute)", "info");
+    
+    // Clear any existing cleanup interval
+    if (this.retryQueueCleanupIntervalId) {
+      clearInterval(this.retryQueueCleanupIntervalId);
+    }
+    
+    // Set up cleanup interval (1 minute)
+    this.retryQueueCleanupIntervalId = setInterval(() => {
+      this.cleanupRetryQueue();
+    }, 60000); // 60 seconds = 1 minute
+    
+    return this.retryQueueCleanupIntervalId;
+  }
+
+  /**
+   * Clean up stale entries from retry queue and cooldown events
+   */
+  cleanupRetryQueue() {
+    const now = Date.now();
+    const initialRetryQueueSize = this.retryQueue.length;
+    const initialCooldownSize = this.cooldownEvents.size;
+    
+    // Remove stale retry queue entries (older than 10 minutes)
+    const staleThreshold = 10 * 60 * 1000; // 10 minutes
+    this.retryQueue = this.retryQueue.filter(job => {
+      const age = now - (job.addedAt || job.nextAttemptAt || 0);
+      return age < staleThreshold;
+    });
+    
+    // Clean up expired cooldown events
+    for (const [eventId, cooldownUntil] of this.cooldownEvents.entries()) {
+      if (now > cooldownUntil) {
+        this.cooldownEvents.delete(eventId);
+      }
+    }
+    
+    // Clean up old failure times (older than 30 minutes)
+    const failureThreshold = 30 * 60 * 1000; // 30 minutes
+    for (const [eventId, failureTime] of this.eventFailureTimes.entries()) {
+      if (now - failureTime > failureThreshold) {
+        this.eventFailureTimes.delete(eventId);
+        this.eventFailureCounts.delete(eventId);
+      }
+    }
+    
+    // Log cleanup results if anything was cleaned
+    const retryQueueCleaned = initialRetryQueueSize - this.retryQueue.length;
+    const cooldownCleaned = initialCooldownSize - this.cooldownEvents.size;
+    
+    if (retryQueueCleaned > 0 || cooldownCleaned > 0) {
+      this.logWithTime(
+        `🧹 Retry queue cleanup: removed ${retryQueueCleaned} stale retries, ${cooldownCleaned} expired cooldowns`,
+        "info"
+      );
+    }
+  }
+
   // Helper method to get retry events ready to process
   getRetryEventsToProcess() {
     const now = Date.now();
@@ -2321,111 +2200,123 @@ export class ScraperManager {
   }
 
   /**
-   * Start a parallel worker that processes events from the queue
+   * Start concurrent processing of events
    */
-  async startParallelWorker(workerId) {
+  async startConcurrentProcessing() {
     while (this.isRunning) {
       try {
-        // Get batch of events from queue
-        const batchSize = PARALLEL_BATCH_SIZE;
-        const batch = [];
-
-        // Pull events from queue
-        while (
-          batch.length < batchSize &&
-          this.eventProcessingQueue.length > 0
-        ) {
-          const event = this.eventProcessingQueue.shift();
-          if (event && !this.processingEvents.has(event.eventId || event)) {
-            batch.push(event);
-          }
-        }
-
-        if (batch.length > 0) {
-          // Process batch in parallel
-          await this.processBatchParallel(batch, workerId);
+        // Get events that need processing
+        const eventsToProcess = await this.getEvents();
+        
+        if (eventsToProcess.length > 0) {
+          // Process events in batches for better throughput
+          const batchSize = Math.min(config.CONCURRENT_LIMIT, eventsToProcess.length);
+          const batch = eventsToProcess.slice(0, batchSize);
+          
+          // Process batch concurrently
+          const processingPromises = batch.map(async (eventId) => {
+            if (this.processingEvents.has(eventId)) {
+              return null; // Skip if already processing
+            }
+            
+            try {
+              this.processingEvents.add(eventId);
+              const result = await this.scrapeEvent(eventId, 0, null);
+              
+              if (result) {
+                this.eventLastProcessedTime.set(eventId, Date.now());
+                this.logWithTime(`✅ Successfully processed event ${eventId}`, "success");
+              } else {
+                await this.handleEventFailure(eventId, 0);
+              }
+              
+              return { eventId, success: !!result };
+            } catch (error) {
+              this.logWithTime(`❌ Error processing event ${eventId}: ${error.message}`, "error");
+              await this.handleEventFailure(eventId, 0);
+              return { eventId, success: false, error: error.message };
+            } finally {
+              this.processingEvents.delete(eventId);
+            }
+          });
+          
+          // Wait for all concurrent operations to complete
+          await Promise.allSettled(processingPromises);
+          
+          // Short pause between batches
+          await setTimeout(config.PROCESSING_INTERVAL);
         } else {
-          // No events to process, wait for next interval
-          await setTimeout(1000); // 1-second interval for faster batch processing
+          // No events to process, wait before checking again
+          await setTimeout(config.PROCESSING_INTERVAL * 2);
         }
       } catch (error) {
-        console.error(`Worker ${workerId} error: ${error.message}`);
-        await setTimeout(500);
+        this.logWithTime(`Concurrent processing error: ${error.message}`, "error");
+        await setTimeout(config.PROCESSING_INTERVAL * 4); // Wait longer on error
       }
     }
   }
-
+  
   /**
-   * Process a batch of events in parallel
+   * Handle event failure with retry logic
    */
-  async processBatchParallel(batch, workerId) {
-    const batchId = `batch-${workerId}-${Date.now()}`;
-    this.processingBatches.set(batchId, batch);
-
+  async handleEventFailure(eventId, retryCount) {
+    const currentRetries = retryCount || 0;
+    
+    if (currentRetries < MAX_RETRIES) {
+      // Add to retry queue
+      const retryJob = {
+        eventId,
+        retryCount: currentRetries + 1,
+        retryAfter: moment().add(30, 'seconds'), // Wait 30 seconds before retry
+        isRetry: true
+      };
+      
+      this.retryQueue.push(retryJob);
+      this.logWithTime(`🔄 Event ${eventId} queued for retry ${currentRetries + 1}/${MAX_RETRIES}`, "warning");
+    } else {
+      // Max retries reached, skip to next cycle
+      this.logWithTime(`⏭️ Event ${eventId} skipped after ${MAX_RETRIES} retries`, "warning");
+      this.incrementFailureCount(eventId);
+    }
+  }
+  
+  /**
+   * Refresh the event queue with new events
+   */
+  async refreshEventQueue() {
     try {
-      // Process all events in parallel with unique sessions for each
-      const promises = batch.map(async (eventItem) => {
-        const eventId = eventItem.eventId || eventItem;
-        const retryCount = eventItem.retryCount || 0;
-
-        try {
-          // Mark as processing
-          this.processingEvents.add(eventId);
-
-          // Process with unique session for each event (no shared headers)
-          const result = await this.scrapeEvent(
-            eventId,
-            retryCount,
-            null
-          );
-
-          if (result) {
-            // Update last processed time
-            this.eventLastProcessedTime.set(eventId, Date.now());
-          }
-
-          return { eventId, success: result };
-        } catch (error) {
-          console.error(`Error processing ${eventId}: ${error.message}`);
-          return { eventId, success: false, error };
-        } finally {
-          // Always remove from processing set
-          this.processingEvents.delete(eventId);
+      const events = await this.getEvents();
+      
+      // Add new events to queue
+      for (const eventId of events) {
+        if (!this.eventProcessingQueue.some(item => 
+          (typeof item === 'string' ? item : item.eventId) === eventId
+        ) && !this.processingEvents.has(eventId)) {
+          this.eventProcessingQueue.push(eventId);
         }
-      });
-
-      // Wait for all to complete
-      const results = await Promise.all(promises);
-
-      // Log batch results
-      const successful = results.filter((r) => r.success).length;
-      if (LOG_LEVEL >= 2) {
-        this.logWithTime(
-          `Worker ${workerId} completed batch: ${successful}/${batch.length} successful (each with unique session)`,
-          "info"
-        );
       }
-    } finally {
-      this.processingBatches.delete(batchId);
+      
+      // Process retry queue
+      const now = moment();
+      const readyRetries = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
+      
+      for (const retryJob of readyRetries) {
+        if (!this.eventProcessingQueue.some(item => 
+          (typeof item === 'string' ? item : item.eventId) === retryJob.eventId
+        ) && !this.processingEvents.has(retryJob.eventId)) {
+          this.eventProcessingQueue.unshift(retryJob); // Add retries to front
+        }
+      }
+      
+      // Remove processed retries
+      this.retryQueue = this.retryQueue.filter(job => !readyRetries.includes(job));
+      
+    } catch (error) {
+      this.logWithTime(`Error refreshing event queue: ${error.message}`, "error");
     }
   }
 
-  async processEventBatch(events) {
-    const now = Date.now();
-    const processable = events.filter((event) => {
-      const lockTime = this.processingLocks.get(event.id);
-      return !lockTime || now - lockTime > LOCK_TIMEOUT;
-    });
-
-    processable.forEach((event) => this.processingLocks.set(event.id, now));
-
-    const results = await this._processBatch(processable);
-
-    results.successful.forEach((event) =>
-      this.processingLocks.delete(event.id)
-    );
-    return results;
-  }
+  // processEventBatch method removed - using sequential processing
 
   /**
    * Optimized scrape event method for parallel processing
@@ -2591,25 +2482,44 @@ export class ScraperManager {
           STALE_EVENT_THRESHOLD
         );
       } else if (retryCount >= MAX_RETRIES) {
+        // Instead of auto-stop, implement recovery mechanism
+        const recoveryDelay = 10 * 60 * 1000; // 10 minutes recovery time
+        
         this.logWithTime(
-          `Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}) in optimized path. Time since last update: ${Math.floor(
+          `🔄 Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}). Scheduling recovery in 10 minutes. Time since update: ${Math.floor(
             timeSinceUpdate / 1000
-          )}s. Marking for auto-stop.`,
-          "error"
+          )}s.`,
+          "warning"
         );
-        await this.setEventSkipScraping(
-          eventId,
-          "max_retries_exceeded_optimized",
-          retryCount,
-          MAX_RETRIES
-        );
+        
+        // Schedule a recovery attempt with reset state
+        setTimeout(() => {
+          this.clearFailureCount(eventId); // Reset all failure tracking
+          
+          const recoveryJob = {
+            eventId,
+            retryCount: 0, // Start fresh
+            retryAfter: moment(),
+            priority: 15, // High priority for recovery
+            needsFreshProxy: true,
+            needsFreshSession: true,
+            isRecovery: true
+          };
+          
+          this.retryQueue.push(recoveryJob);
+          
+          this.logWithTime(
+            `🆕 Recovery attempt scheduled for event ${eventId} with reset state`,
+            "info"
+          );
+        }, recoveryDelay);
       } else {
-        // Event is not stale and has retries remaining
+        // Event is not stale and has retries remaining - optimized for faster recovery
         const newRetryCount = retryCount + 1;
-        const baseBackoff = 15000; // 15 seconds
-        const incrementFactor = 5000; // 5 seconds per retry count
-        const maxBackoff = 300000; // 5 minutes
-        const jitter = Math.floor(Math.random() * 5000); // 0-5 seconds jitter
+        const baseBackoff = 8000; // Reduced from 15s to 8s
+        const incrementFactor = 3000; // Reduced from 5s to 3s per retry
+        const maxBackoff = 120000; // Reduced from 5min to 2min
+        const jitter = Math.floor(Math.random() * 2000); // Reduced jitter from 5s to 2s
 
         let backoffDuration =
           baseBackoff + retryCount * incrementFactor + jitter;
@@ -2619,7 +2529,7 @@ export class ScraperManager {
           eventId,
           retryCount: newRetryCount,
           retryAfter: moment().add(backoffDuration, "milliseconds"),
-          priority: 10, // Default priority, consistent with scrapeEvent
+          priority: Math.max(5, 10 - retryCount), // Higher priority for more retries
           needsFreshProxy: true,
           needsFreshSession: true,
         };
@@ -2627,7 +2537,7 @@ export class ScraperManager {
         this.retryQueue.push(retryJob); // Push to the central retryQueue
 
         this.logWithTime(
-          `Queuing retry #${newRetryCount} for ${eventId} (optimized path) in ${backoffDuration}ms. Time since last update: ${Math.floor(
+          `⏳ Queuing retry #${newRetryCount} for ${eventId} in ${Math.round(backoffDuration/1000)}s (optimized). Time since update: ${Math.floor(
             timeSinceUpdate / 1000
           )}s.`,
           "info"
@@ -2804,221 +2714,7 @@ export class ScraperManager {
     }
   }
 
-  /**
-   * Start continuous scraping process
-   * @returns {Promise<void>}
-   */
-  async startContinuousScraping() {
-    if (!this.isRunning) {
-      this.isRunning = true;
-      this.logWithTime(
-        "Starting high-performance parallel scraping for 1000+ events...",
-        "info"
-      );
 
-      // Log Skip_Scraping status summary at startup
-      try {
-        const totalEvents = await Event.countDocuments({});
-        const skippedEvents = await Event.countDocuments({
-          Skip_Scraping: true,
-        });
-        const activeEvents = totalEvents - skippedEvents;
-
-        this.logWithTime(
-          `📊 Event Status Summary: ${totalEvents} total events, ${activeEvents} active for scraping, ${skippedEvents} excluded (Skip_Scraping: true)`,
-          "info"
-        );
-
-        if (skippedEvents > 0) {
-          this.logWithTime(
-            `⚠️ ${skippedEvents} events will be EXCLUDED from scraping due to Skip_Scraping: true`,
-            "warning"
-          );
-        }
-      } catch (error) {
-        this.logWithTime(
-          `Error getting event status summary: ${error.message}`,
-          "warning"
-        );
-      }
-
-      // Ensure proxy manager is available globally for the scraper
-      global.proxyManager = this.proxyManager;
-
-      // Start performance monitoring
-      this.startPerformanceMonitoring();
-
-      // Start session health monitoring
-      this.startSessionHealthMonitoring();
-
-      // Start cookie rotation cycle immediately (non-blocking)
-      this.forcePeriodicCookieRotation();
-      this.logWithTime("Started 20-minute cookie rotation cycle", "info");
-
-      // CSV processing and upload cycles removed
-
-      // Start multiple parallel processing workers
-      for (let i = 0; i < this.maxParallelWorkers; i++) {
-        this.parallelWorkers.push(this.startParallelWorker(i));
-      }
-
-      // Track metrics to detect stuck loops
-      let lastEventsCount = 0;
-      let sameEventsCounter = 0;
-      let lastEventIds = [];
-
-      // Main event queue management loop
-      while (this.isRunning) {
-        try {
-          // Get all events that need processing
-          const events = await this.getEvents();
-
-          // OPTIONAL: Loop detection (can be disabled by setting DISABLE_LOOP_DETECTION=true)
-          const DISABLE_LOOP_DETECTION = process.env.DISABLE_LOOP_DETECTION === 'true';
-          
-          if (!DISABLE_LOOP_DETECTION) {
-            // Track if we're getting the same events repeatedly
-            const currentEventIds = JSON.stringify(events.slice(0, 10).sort());
-            if (currentEventIds === lastEventIds) {
-              sameEventsCounter++;
-
-              // If we've seen the same events 20 times, something is wrong
-              if (sameEventsCounter >= 20) {
-                this.logWithTime(
-                  `WARNING: Same ${events.length} events returned ${sameEventsCounter} times in a row. Potential processing loop detected.`,
-                  "error"
-                );
-
-                // Force cleanup of tracking to break the loop
-                await this.forceCleanupAllTracking();
-
-                // Reset counter after cleanup
-                sameEventsCounter = 0;
-              }
-            } else {
-              // Different events, reset counter
-              lastEventIds = currentEventIds;
-              sameEventsCounter = 0;
-            }
-          }
-
-          if (events.length > 0) {
-            this.logWithTime(
-              `Found ${events.length} events needing updates, distributing to parallel workers`,
-              "info"
-            );
-
-            // Add events to processing queue if not already there
-            let addedCount = 0;
-            for (const eventId of events) {
-              // Only add if not already in queue and not being processed
-              if (
-                !this.eventProcessingQueue.some((e) =>
-                  typeof e === "string" ? e === eventId : e.eventId === eventId
-                ) &&
-                !this.processingEvents.has(eventId)
-              ) {
-                this.eventProcessingQueue.push(eventId);
-                addedCount++;
-              }
-            }
-
-            // Report if we're adding events but not processing them
-            if (addedCount > 0) {
-              this.logWithTime(
-                `Added ${addedCount} new events to processing queue (total: ${this.eventProcessingQueue.length})`,
-                "info"
-              );
-            } else if (events.length > 0 && addedCount === 0) {
-              this.logWithTime(
-                `Warning: Found ${events.length} events needing updates but added 0 to queue - they may be stuck in processing`,
-                "warning"
-              );
-            }
-          }
-
-          // Process retry queue asynchronously
-          const now = moment();
-          const retryEvents = this.retryQueue.filter((job) =>
-            job.retryAfter.isBefore(now)
-          );
-          
-          // Limit the number of retries processed in one cycle to prevent overwhelming the queue
-          const MAX_RETRIES_PER_CYCLE = 10;
-          const retryEventsToProcess = retryEvents.slice(0, MAX_RETRIES_PER_CYCLE);
-          let retryAddedCount = 0;
-
-          // Process retries in batches to avoid blocking the main loop
-          const retryBatches = [];
-          const RETRY_BATCH_SIZE = 3; // Process 3 retries at a time
-          
-          for (let i = 0; i < retryEventsToProcess.length; i += RETRY_BATCH_SIZE) {
-            retryBatches.push(retryEventsToProcess.slice(i, i + RETRY_BATCH_SIZE));
-          }
-          
-          // Add retries to the queue in batches
-          for (const batch of retryBatches) {
-            for (const job of batch) {
-              if (
-                !this.eventProcessingQueue.some((e) =>
-                  typeof e === "string"
-                    ? e === job.eventId
-                    : e.eventId === job.eventId
-                ) &&
-                !this.processingEvents.has(job.eventId)
-              ) {
-                // Add to processing queue with retry info but not all at the front
-                // Distribute retries throughout the queue to prevent blocking high-priority events
-                const position = Math.min(retryAddedCount, Math.floor(this.eventProcessingQueue.length / 2));
-                this.eventProcessingQueue.splice(position, 0, {
-                  eventId: job.eventId,
-                  retryCount: job.retryCount,
-                  isRetry: true,
-                });
-                retryAddedCount++;
-              }
-            }
-          }
-
-          if (retryAddedCount > 0) {
-            this.logWithTime(
-              `Added ${retryAddedCount} retry events to processing queue (${retryEvents.length - retryAddedCount} remaining for next cycle)`,
-              "info"
-            );
-          }
-
-          // Remove processed retry jobs
-          this.retryQueue = this.retryQueue.filter(
-            (job) => !retryEventsToProcess.includes(job)
-          );
-
-          // CRITICAL FIX: Periodic cleanup of stuck processing locks
-          if (Date.now() % 30000 < 100) { // Every 30 seconds
-            const fiveMinutesAgo = Date.now() - 300000;
-            let releasedLocks = 0;
-            for (const [eventId, lockTime] of this.processingLocks.entries()) {
-              if (lockTime < fiveMinutesAgo) {
-                this.processingLocks.delete(eventId);
-                releasedLocks++;
-              }
-            }
-            if (releasedLocks > 0) {
-              this.logWithTime(
-                `🔓 Released ${releasedLocks} stuck processing locks (>5min old)`,
-                "warning"
-              );
-            }
-          }
-
-          // Short pause before next cycle
-          await setTimeout(1000); // Check every 1 second for new events
-        } catch (error) {
-          console.error(`Error in main event loop: ${error.message}`);
-          await setTimeout(1000);
-        }
-      }
-    }
-  }
 
   /**
    * Get statistics about stale events (events not updated in specific time periods)
@@ -3846,7 +3542,7 @@ export class ScraperManager {
       eventsUpdatedLast2Min: 0,
       eventsUpdatedLast1Min: 0,
       criticalEvents: [],
-      activeWorkers: this.parallelWorkers.length,
+      processingEvents: this.processingEvents.size,
       queueLength: this.eventProcessingQueue.length,
       processingCount: this.processingEvents.size,
       failedCount: this.failedEvents.size,
@@ -3973,9 +3669,7 @@ export class ScraperManager {
       this.logWithTime(
         `Performance: ${stats.eventsUpdatedLast3Min}/${stats.totalEvents} events updated in 3min | ` +
           `Queue: ${stats.queueLength} | Processing: ${stats.processingCount} | ` +
-          `Workers: ${
-            stats.activeWorkers
-          } | Success: ${stats.successRate.toFixed(1)}% | ` +
+          `Success: ${stats.successRate.toFixed(1)}% | ` +
           `Rate: ${eventsPerMinute}/min | Capacity: ${projectedCapacity} events/3min | ` +
           `Tracked: ${this.eventUpdateTimestamps.size} events | ` +
           `Memory: ${memoryMB}MB${csvInfo}`,
@@ -4127,7 +3821,7 @@ export class ScraperManager {
       }
 
       // 8. Ensure concurrency semaphore is reset
-      this.concurrencySemaphore = CONCURRENT_LIMIT;
+      this.concurrencySemaphore = config.CONCURRENT_LIMIT;
 
       this.logWithTime(
         "🔄 EMERGENCY RECOVERY COMPLETE - resuming operation",

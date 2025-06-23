@@ -25,8 +25,7 @@ setupGlobals();
 const app = express();
 const initialPort = parseInt(process.env.PORT, 10) || 3000; // Renamed and parsed
 let serverInstance; // To hold the server instance for graceful shutdown
-const mongoUri =
-  process.env.DATABASE_URL || "mongodb://localhost:27017/ticketScraper";
+// MongoDB URI now handled in config/db.js
 
 // Middleware
 const allowedOrigins = [
@@ -53,11 +52,11 @@ app.use(express.json());
 app.use(morgan("dev"));
 
 
+// Import database configuration
+import connectDB, { closeConnections } from "./config/db.js";
+
 // Database connection
-mongoose
-  .connect(mongoUri)
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((err) => console.error("MongoDB connection error:", err));
+connectDB();
 
 // Routes
 app.use("/api/health", healthRoutes);
@@ -141,31 +140,31 @@ process.on("SIGTERM", async () => {
     console.log("Scraper manager not found or stop method is unavailable. Skipping scraper stop.");
   }
 
-  const closeDbAndExit = (serverError) => {
-    console.log("Closing MongoDB connection...");
-    mongoose.connection.close(false, (dbErr) => {
-      if (dbErr) {
-        console.error("Error closing MongoDB connection:", dbErr);
-      } else {
-        console.log("MongoDB connection closed successfully.");
-      }
-      process.exit(serverError || dbErr ? 1 : 0);
-    });
+  const closeDbAndExit = async (serverError) => {
+    console.log("Closing database connections...");
+    try {
+      await closeConnections();
+      console.log("Database connections closed successfully.");
+      process.exit(serverError ? 1 : 0);
+    } catch (dbErr) {
+      console.error("Error closing database connections:", dbErr);
+      process.exit(1);
+    }
   };
 
   if (serverInstance && serverInstance.listening) {
     console.log("Closing HTTP server...");
-    serverInstance.close((serverCloseErr) => {
+    serverInstance.close(async (serverCloseErr) => {
       if (serverCloseErr) {
         console.error("Error closing HTTP server:", serverCloseErr);
       } else {
         console.log("HTTP server closed successfully.");
       }
-      closeDbAndExit(serverCloseErr);
+      await closeDbAndExit(serverCloseErr);
     });
   } else {
     console.log("HTTP server was not started or already closed. Proceeding to close database.");
-    closeDbAndExit(null);
+    await closeDbAndExit(null);
   }
 });
 

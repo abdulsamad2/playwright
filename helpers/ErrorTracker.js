@@ -51,71 +51,88 @@ class ErrorTracker {
   /**
    * Record a failure and apply appropriate policy
    */
-  recordFailure(eventId, error, retryCount, concurrencyManager, scheduler) {
+  recordFailure(eventId, error, retryCount, scheduler) {
     this.failedEvents.add(eventId);
     this.incrementFailureCount(eventId);
-    
-    let backoffTime = config.RETRY_BACKOFF_MS * Math.pow(2, retryCount);
+
+    // Optimized backoff: shorter initial delays, cap at reasonable maximum
+    let backoffTime = Math.min(
+      config.RETRY_BACKOFF_MS * Math.pow(1.5, retryCount),
+      60000
+    ); // Cap at 1 minute
     let isApiError = false;
-    
+
     // Detect API-specific errors for special handling
-    if (error.message.includes("403") || 
-        error.message.includes("400") || 
-        error.message.includes("429") ||
-        error.message.includes("API")) {
+    if (
+      error.message.includes("403") ||
+      error.message.includes("400") ||
+      error.message.includes("429") ||
+      error.message.includes("API")
+    ) {
       isApiError = true;
-      
-      // For API errors, apply longer cooldown
-      const apiBackoffMinutes = Math.min(15, 2 + retryCount * 3);
+
+      // For API errors, apply shorter cooldown to keep system moving
+      const apiBackoffMinutes = Math.min(5, 1 + retryCount); // Reduced from 15 to 5 minutes max
       backoffTime = apiBackoffMinutes * 60 * 1000;
-      
+
       // Schedule next update to prevent urgent flags
       scheduler.scheduleNextUpdate(eventId);
-      
+
       this.logger.logWithTime(
-        `API error for ${eventId}: ${error.message}. Extended cooldown for ${apiBackoffMinutes} minutes`,
-        "error"
+        `API error for ${eventId}: ${error.message}. Cooldown for ${apiBackoffMinutes} minutes`,
+        "warning" // Changed from error to warning to reduce noise
       );
-      
-      // Increment global consecutive error counter for API errors
-      this.globalConsecutiveErrors++;
+
+      // Only increment global counter for severe API errors
+      if (error.message.includes("429") || error.message.includes("403")) {
+        this.globalConsecutiveErrors++;
+      }
     } else {
       this.logger.logWithTime(
         `Error scraping ${eventId}: ${error.message}. Cooldown for ${
           backoffTime / 1000
         }s`,
-        "error"
+        "warning" // Changed from error to warning
       );
     }
-    
-    // Set cooldown for this event
-    concurrencyManager.setCooldown(eventId, backoffTime);
+
+
     const cooldownUntil = moment().add(backoffTime, "milliseconds");
 
-    // Add to retry queue if under max retries
-    if (retryCount < config.MAX_RETRIES) {
+    // Always add to retry queue with optimized retry count
+    const maxRetries = isApiError ? config.MAX_RETRIES + 2 : config.MAX_RETRIES; // Extra retries for API errors
+    if (retryCount < maxRetries) {
       this.addToRetryQueue(eventId, retryCount + 1, cooldownUntil);
-      
+
       this.logger.logWithTime(
-        `Queued for retry: ${eventId} (after ${
-          backoffTime / 1000
-        }s cooldown)`,
+        `Queued for retry: ${eventId} (after ${backoffTime / 1000}s cooldown)`,
         "warning"
       );
     } else {
-      this.logger.logWithTime(`Max retries exceeded for ${eventId}`, "error");
-      
-      // For max retries, set a longer cooldown
-      concurrencyManager.setCooldown(eventId, 30 * 60 * 1000); // 30 minutes
-      
+      this.logger.logWithTime(
+        `Max retries exceeded for ${eventId} - will retry with fresh session later`,
+        "warning"
+      );
+
+
+
+      // Clear failure count to give event a fresh start after cooldown
+      setTimeout(() => {
+        this.clearFailureCount(eventId);
+        this.logger.logWithTime(
+          `Cleared failure history for ${eventId} - ready for fresh attempts`,
+          "info"
+        );
+      }, 5 * 60 * 1000); // Clear after 5 minutes
+
       // Still schedule next update to prevent urgent flags
       scheduler.scheduleNextUpdate(eventId);
     }
-    
+
     return {
       backoffTime,
       isApiError,
-      cooldownUntil
+      cooldownUntil,
     };
   }
 
@@ -154,18 +171,18 @@ class ErrorTracker {
    */
   clearOldFailureData() {
     const oldFailureThreshold = moment().subtract(
-      config.FAILURE_HISTORY_EXPIRY, 
-      'milliseconds'
+      config.FAILURE_HISTORY_EXPIRY,
+      "milliseconds"
     );
-    const clearedCount = 0;
-    
+    let clearedCount = 0; // Fixed: changed from const to let
+
     for (const [eventId, failureTime] of this.eventFailureTimes.entries()) {
       if (failureTime.isBefore(oldFailureThreshold)) {
         this.clearFailureCount(eventId);
         clearedCount++;
       }
     }
-    
+
     return clearedCount;
   }
 
@@ -190,9 +207,9 @@ class ErrorTracker {
     return {
       failedEventCount: this.failedEvents.size,
       retryQueueLength: this.retryQueue.length,
-      globalConsecutiveErrors: this.globalConsecutiveErrors
+      globalConsecutiveErrors: this.globalConsecutiveErrors,
     };
   }
 }
 
-export default ErrorTracker; 
+export default ErrorTracker;

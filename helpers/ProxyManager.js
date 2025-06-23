@@ -319,6 +319,29 @@ class ProxyManager {
   getTotalProxies() {
     return this.proxies.length;
   }
+
+  /**
+   * Release all proxies from all events
+   * @param {boolean} success - Whether to mark releases as successful
+   * @param {Object} error - Optional error object if failed
+   */
+  releaseAllProxies(success = true, error = null) {
+    const allEventIds = new Set();
+    
+    // Collect all event IDs from all proxy usage
+    for (const usageSet of this.proxyUsage.values()) {
+      for (const eventId of usageSet) {
+        allEventIds.add(eventId);
+      }
+    }
+    
+    // Release all events
+    for (const eventId of allEventIds) {
+      this.releaseProxy(eventId, success, error);
+    }
+    
+    this.log(`Released all proxies for ${allEventIds.size} events`);
+  }
 }
 
-export default ProxyManager; 
+export default ProxyManager;

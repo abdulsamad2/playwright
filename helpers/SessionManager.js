@@ -317,7 +317,7 @@ export class SessionManager {
       const eventIds = Array.from(this.activeSessions.keys());
       
       for (const eventId of eventIds) {
-        const newSessionData = await this.createSession(eventId);
+        const newSessionData = await this.createNewSession(eventId);
         if (newSessionData) {
           this.activeSessions.set(eventId, newSessionData.sessionId);
         }
@@ -367,7 +367,7 @@ export class SessionManager {
       }
 
       // Create new session before invalidating old one
-       const newSession = await this.createSession(eventId);
+       const newSession = await this.createNewSession(eventId);
       if (!newSession) {
         this.logger?.logWithTime(`Failed to create new session for ${eventId}`, 'error');
         return null;
@@ -525,26 +525,7 @@ export class SessionManager {
     }
   }
 
-  /**
-   * Get session statistics
-   * @returns {object} Session statistics
-   */
-  getSessionStats() {
-    const totalSessions = this.sessions.size;
-    const activeSessions = this.activeSessions.size;
-    const validSessions = Array.from(this.sessions.values()).filter(s => s.isValid).length;
-    
-    const sessionAges = Array.from(this.sessions.values()).map(s => Date.now() - s.createdAt);
-    const avgAge = sessionAges.length > 0 ? sessionAges.reduce((a, b) => a + b, 0) / sessionAges.length : 0;
 
-    return {
-      totalSessions,
-      activeSessions,
-      validSessions,
-      averageAge: Math.floor(avgAge / 60000), // in minutes
-      oldestSession: sessionAges.length > 0 ? Math.floor(Math.max(...sessionAges) / 60000) : 0,
-    };
-  }
 
   /**
    * Get session statistics for health monitoring
