@@ -112,8 +112,8 @@ export class ScraperManager {
     this.lastSuccessTime = null;
     this.successCount = 0;
     this.activeJobs = new Map();
-    this.failedEvents = new Set();
-    this.retryQueue = [];
+    this.failedEvents = new Set(); // Kept for tracking purposes only, no retry logic
+    // retryQueue removed
     this.isRunning = false;
     this.headersCache = new Map();
     this.eventUpdateTimestamps = new Map();
@@ -199,7 +199,7 @@ export class ScraperManager {
           `   Runtime: ${Math.floor(
             runningTime.asHours()
           )}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
-          `   Active: ${this.activeJobs.size}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}, Retry Queue: ${this.retryQueue.length}`
+          `   Active: ${this.activeJobs.size}, Success: ${this.successCount}, Failed: ${this.failedEvents.size}`
       );
     } else {
       console.log(`${statusEmoji} [${formattedTime}] ${message}`);
@@ -292,8 +292,7 @@ export class ScraperManager {
       // Start cookie rotation
       this.forcePeriodicCookieRotation();
       
-      // Start retry queue cleanup
-      this.startRetryQueueCleanup();
+      // Retry queue cleanup removed
       
       // Start concurrent event processing
       this.logWithTime(
@@ -325,12 +324,7 @@ export class ScraperManager {
     this.activeJobs.clear();
     this.processingEvents.clear();
     
-    // Clear retry queue cleanup interval
-    if (this.retryQueueCleanupIntervalId) {
-      clearInterval(this.retryQueueCleanupIntervalId);
-      this.retryQueueCleanupIntervalId = null;
-      this.logWithTime("Retry queue cleanup interval cleared", "info");
-    }
+    // Retry queue cleanup interval removed
     
     this.logWithTime("Continuous scraping stopped", "success");
   }
@@ -2129,75 +2123,9 @@ export class ScraperManager {
    * Start retry queue cleanup that runs every minute
    * Removes stale retry entries and expired cooldown events
    */
-  startRetryQueueCleanup() {
-    this.logWithTime("Starting retry queue cleanup (every 1 minute)", "info");
-    
-    // Clear any existing cleanup interval
-    if (this.retryQueueCleanupIntervalId) {
-      clearInterval(this.retryQueueCleanupIntervalId);
-    }
-    
-    // Set up cleanup interval (1 minute)
-    this.retryQueueCleanupIntervalId = setInterval(() => {
-      this.cleanupRetryQueue();
-    }, 60000); // 60 seconds = 1 minute
-    
-    return this.retryQueueCleanupIntervalId;
-  }
+  // Retry queue cleanup methods removed
 
-  /**
-   * Clean up stale entries from retry queue and cooldown events
-   */
-  cleanupRetryQueue() {
-    const now = Date.now();
-    const initialRetryQueueSize = this.retryQueue.length;
-    const initialCooldownSize = this.cooldownEvents.size;
-    
-    // Remove stale retry queue entries (older than 10 minutes)
-    const staleThreshold = 10 * 60 * 1000; // 10 minutes
-    this.retryQueue = this.retryQueue.filter(job => {
-      const age = now - (job.addedAt || job.nextAttemptAt || 0);
-      return age < staleThreshold;
-    });
-    
-    // Clean up expired cooldown events
-    for (const [eventId, cooldownUntil] of this.cooldownEvents.entries()) {
-      if (now > cooldownUntil) {
-        this.cooldownEvents.delete(eventId);
-      }
-    }
-    
-    // Clean up old failure times (older than 30 minutes)
-    const failureThreshold = 30 * 60 * 1000; // 30 minutes
-    for (const [eventId, failureTime] of this.eventFailureTimes.entries()) {
-      if (now - failureTime > failureThreshold) {
-        this.eventFailureTimes.delete(eventId);
-        this.eventFailureCounts.delete(eventId);
-      }
-    }
-    
-    // Log cleanup results if anything was cleaned
-    const retryQueueCleaned = initialRetryQueueSize - this.retryQueue.length;
-    const cooldownCleaned = initialCooldownSize - this.cooldownEvents.size;
-    
-    if (retryQueueCleaned > 0 || cooldownCleaned > 0) {
-      this.logWithTime(
-        `🧹 Retry queue cleanup: removed ${retryQueueCleaned} stale retries, ${cooldownCleaned} expired cooldowns`,
-        "info"
-      );
-    }
-  }
-
-  // Helper method to get retry events ready to process
-  getRetryEventsToProcess() {
-    const now = Date.now();
-    return this.retryQueue.filter(
-      (event) =>
-        event.nextAttemptAt <= now &&
-        (!this.processingLocks.has(event.id) ||
-          now - this.processingLocks.get(event.id) > LOCK_TIMEOUT)
-    );
-  }
+  // Helper method for retry events removed
 
   /**
    * Start concurrent processing of events
@@ -2257,27 +2185,12 @@ export class ScraperManager {
   }
   
   /**
-   * Handle event failure with retry logic
+   * Handle event failure without retry logic
    */
   async handleEventFailure(eventId, retryCount) {
-    const currentRetries = retryCount || 0;
-    
-    if (currentRetries < MAX_RETRIES) {
-      // Add to retry queue
-      const retryJob = {
-        eventId,
-        retryCount: currentRetries + 1,
-        retryAfter: moment().add(30, 'seconds'), // Wait 30 seconds before retry
-        isRetry: true
-      };
-      
-      this.retryQueue.push(retryJob);
-      this.logWithTime(`🔄 Event ${eventId} queued for retry ${currentRetries + 1}/${MAX_RETRIES}`, "warning");
-    } else {
-      // Max retries reached, skip to next cycle
-      this.logWithTime(`⏭️ Event ${eventId} skipped after ${MAX_RETRIES} retries`, "warning");
-      this.incrementFailureCount(eventId);
-    }
+    // Simply log the failure without adding to retry queue
+    this.logWithTime(`⏭️ Event ${eventId} failed, moving to next event`, "warning");
+    this.incrementFailureCount(eventId);
   }
   
   /**
@@ -2296,20 +2209,7 @@ export class ScraperManager {
         }
       }
       
-      // Process retry queue
-      const now = moment();
-      const readyRetries = this.retryQueue.filter(job => job.retryAfter.isBefore(now));
-      
-      for (const retryJob of readyRetries) {
-        if (!this.eventProcessingQueue.some(item => 
-          (typeof item === 'string' ? item : item.eventId) === retryJob.eventId
-        ) && !this.processingEvents.has(retryJob.eventId)) {
-          this.eventProcessingQueue.unshift(retryJob); // Add retries to front
-        }
-      }
-      
-      // Remove processed retries
-      this.retryQueue = this.retryQueue.filter(job => !readyRetries.includes(job));
+      // Retry queue processing removed
       
     } catch (error) {
       this.logWithTime(`Error refreshing event queue: ${error.message}`, "error");
@@ -2332,15 +2232,7 @@ export class ScraperManager {
     let proxy = null;
 
     try {
-      // Simply get a new proxy on retries - no blocking
-      if (retryCount > 0) {
-        // Just release the proxy and get a new one
-        this.proxyManager.releaseProxy(eventId, false);
-        this.logWithTime(
-          `Getting fresh proxy for retry #${retryCount} of event ${eventId}`,
-          "info"
-        );
-      }
+      // Retry logic removed
 
       // Get a unique proxy for this specific event
       try {
@@ -2361,19 +2253,8 @@ export class ScraperManager {
       }
 
       // Force fresh headers for each event to ensure unique sessions
-      // ENHANCED: Always force refresh on retries
       const randomEventId = await this.getRandomEventId(eventId);
-      const headers = await this.refreshEventHeaders(
-        randomEventId,
-        retryCount > 0
-      ); // Force refresh on retries
-
-      if (retryCount > 0) {
-        this.logWithTime(
-          `Using fresh session/cookies for retry #${retryCount} of event ${eventId}`,
-          "info"
-        );
-      }
+      const headers = await this.refreshEventHeaders(randomEventId, false);
 
       if (!headers) {
         throw new Error("Failed to obtain unique headers");
@@ -2482,62 +2363,17 @@ export class ScraperManager {
           STALE_EVENT_THRESHOLD
         );
       } else if (retryCount >= MAX_RETRIES) {
-        // Instead of auto-stop, implement recovery mechanism
-        const recoveryDelay = 10 * 60 * 1000; // 10 minutes recovery time
-        
+        // Log the failure without scheduling recovery
         this.logWithTime(
-          `🔄 Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}). Scheduling recovery in 10 minutes. Time since update: ${Math.floor(
+          `❌ Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}). No recovery scheduled. Time since update: ${Math.floor(
             timeSinceUpdate / 1000
           )}s.`,
           "warning"
         );
-        
-        // Schedule a recovery attempt with reset state
-        setTimeout(() => {
-          this.clearFailureCount(eventId); // Reset all failure tracking
-          
-          const recoveryJob = {
-            eventId,
-            retryCount: 0, // Start fresh
-            retryAfter: moment(),
-            priority: 15, // High priority for recovery
-            needsFreshProxy: true,
-            needsFreshSession: true,
-            isRecovery: true
-          };
-          
-          this.retryQueue.push(recoveryJob);
-          
-          this.logWithTime(
-            `🆕 Recovery attempt scheduled for event ${eventId} with reset state`,
-            "info"
-          );
-        }, recoveryDelay);
       } else {
-        // Event is not stale and has retries remaining - optimized for faster recovery
-        const newRetryCount = retryCount + 1;
-        const baseBackoff = 8000; // Reduced from 15s to 8s
-        const incrementFactor = 3000; // Reduced from 5s to 3s per retry
-        const maxBackoff = 120000; // Reduced from 5min to 2min
-        const jitter = Math.floor(Math.random() * 2000); // Reduced jitter from 5s to 2s
-
-        let backoffDuration =
-          baseBackoff + retryCount * incrementFactor + jitter;
-        backoffDuration = Math.min(backoffDuration, maxBackoff);
-
-        const retryJob = {
-          eventId,
-          retryCount: newRetryCount,
-          retryAfter: moment().add(backoffDuration, "milliseconds"),
-          priority: Math.max(5, 10 - retryCount), // Higher priority for more retries
-          needsFreshProxy: true,
-          needsFreshSession: true,
-        };
-
-        this.retryQueue.push(retryJob); // Push to the central retryQueue
-
+        // Log the failure without retry
         this.logWithTime(
-          `⏳ Queuing retry #${newRetryCount} for ${eventId} in ${Math.round(backoffDuration/1000)}s (optimized). Time since update: ${Math.floor(
+          `❌ Event ${eventId} failed. No retry scheduled. Time since update: ${Math.floor(
             timeSinceUpdate / 1000
           )}s.`,
           "info"
