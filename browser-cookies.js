@@ -1,8 +1,11 @@
-import { chromium, devices } from "playwright";
+import {devices } from "playwright";
 import fs from "fs/promises";
 import path from "path";
-import { BrowserFingerprint } from "./browserFingerprint.js";
+import { chromium } from 'playwright-extra'
 
+import { BrowserFingerprint } from "./browserFingerprint.js";
+import stealth from 'puppeteer-extra-plugin-stealth'
+stealth()
 // Device settings
 const iphone13 = devices["iPhone 13"];
 
@@ -141,6 +144,7 @@ async function simulateMobileInteractions(page) {
 /**
  * Initialize the browser with enhanced fingerprinting
  */
+
 async function initBrowser(proxy) {
   let context = null;
   
@@ -198,6 +202,7 @@ async function initBrowser(proxy) {
       }
 
       // Launch browser
+      chromium.use(stealth)
       browser = await chromium.launch(launchOptions);
     }
     
