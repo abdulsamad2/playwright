@@ -2109,9 +2109,11 @@ export class ScraperManager {
         const eventsToProcess = await this.getEvents();
         
         if (eventsToProcess.length > 0) {
-          // Process events in batches for better throughput
-          const batchSize = Math.min(config.CONCURRENT_LIMIT, eventsToProcess.length);
+          // Process events in batches of 5 for optimized throughput
+          const batchSize = Math.min(5, eventsToProcess.length);
           const batch = eventsToProcess.slice(0, batchSize);
+          
+          this.logWithTime(`🔄 Processing batch of ${batch.length} events: [${batch.join(', ')}]`, "info");
           
           // Process batch concurrently
           const processingPromises = batch.map(async (eventId) => {
@@ -2141,7 +2143,12 @@ export class ScraperManager {
           });
           
           // Wait for all concurrent operations to complete
-          await Promise.allSettled(processingPromises);
+          const batchResults = await Promise.allSettled(processingPromises);
+          
+          // Log batch completion summary
+          const successCount = batchResults.filter(r => r.status === 'fulfilled' && r.value?.success).length;
+          const failureCount = batchResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value?.success)).length;
+          this.logWithTime(`✅ Batch completed: ${successCount} successful, ${failureCount} failed`, "info");
           
           // Short pause between batches
           await setTimeout(config.PROCESSING_INTERVAL);

@@ -4,19 +4,29 @@ import moment from "moment";
 
 // Global Filters
 const GLOBAL_FILTERS = {
-  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket",], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
-
+  inventoryType: [
+    "Primary",
+    "Official Platinum",
+    "Aisle Seating",
+    "Standard",
+    "Standard Ticket",
+    "resale",
+    "Platinum",
+    "Verified Resale",
+    "Resale",
+    "VIP Package",
+    "VIP Tickets",
+    "Discounted Ticket",
+  ], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
 
   inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
 
-
   description: [
-    
     "Standard Ticket",
     "GA Lawn",
     "General Admission Standing",
     "Standard Admission",
-    
+    "verified resale ",
   ], // e.g., ['obstructed view', 'aisle'] - empty means no filter, strings to check for (case-insensitive)
   accessibility: [
     // Empty array means exclude ALL accessibility seats
