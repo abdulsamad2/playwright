@@ -211,11 +211,6 @@ export const stopEventScraping = async (req, res) => {
     // Clean up all tracking data for this event
     scraperManager.cleanupEventTracking(event.Event_ID);
 
-    // Remove from retry queue if present
-    scraperManager.retryQueue = scraperManager.retryQueue.filter(
-      (item) => item.eventId !== event.Event_ID
-    );
-
     res.json({
       status: "success",
       message: `Scraping stopped for event ${event.Event_ID}`,
@@ -246,11 +241,6 @@ export const deleteEvent = async (req, res) => {
 
     // Clean up all tracking data for this event
     scraperManager.cleanupEventTracking(eventId);
-
-    // Remove from retry queue if present
-    scraperManager.retryQueue = scraperManager.retryQueue.filter(
-      (item) => item.eventId !== eventId
-    );
 
     res.json({
       status: "success",

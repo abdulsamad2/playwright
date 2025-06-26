@@ -108,13 +108,12 @@ class AdvancedScraperLogger {
       metadata: {
         ...metadata,
         activeJobs: this.scraperManager.activeJobs?.size || 0,
-        failedEvents: this.scraperManager.failedEvents?.size || 0,
-        retryQueue: this.scraperManager.retryQueue?.length || 0
+        failedEvents: this.scraperManager.failedEvents?.size || 0
       }
     };
     
     return `${timestamp} [${level}] [${category}] ${message}\n` +
-           `  Runtime: ${runtime} | Active: ${logEntry.metadata.activeJobs} | Failed: ${logEntry.metadata.failedEvents} | Queue: ${logEntry.metadata.retryQueue}\n` +
+           `  Runtime: ${runtime} | Active: ${logEntry.metadata.activeJobs} | Failed: ${logEntry.metadata.failedEvents}\n` +
            (Object.keys(metadata).length > 0 ? `  Metadata: ${JSON.stringify(metadata, null, 2)}\n` : '') +
            '\n';
   }
