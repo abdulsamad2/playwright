@@ -2,6 +2,7 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
+import { waitForCookiesReady } from "./browser-cookies.js";
 import { cpus } from "os";
 import fs from "fs/promises";
 import path from "path";
@@ -278,6 +279,18 @@ export class ScraperManager {
     try {
       this.isRunning = true;
       this.logWithTime("Starting continuous scraping with optimized retry handling...", "success");
+      
+      // Wait for cookies to be ready before starting scraping (only for scraper instances)
+      if (process.argv.includes('--start-scraper')) {
+        this.logWithTime("Scraper instance detected, waiting for cookies to be ready...", "info");
+        const cookiesReady = await waitForCookiesReady(5 * 60 * 1000, 15 * 1000); // Wait up to 5 minutes, check every 15 seconds
+        
+        if (!cookiesReady) {
+          this.logWithTime("Failed to get ready cookies within timeout, proceeding with fallback headers", "warning");
+        } else {
+          this.logWithTime("Cookies are ready, starting scraping operations", "success");
+        }
+      }
       
       // Background retry processor removed - retries handled in sequential processing
       

@@ -555,6 +555,49 @@ async function loadCookiesFromFile() {
 }
 
 /**
+ * Check if cookies are ready and valid for scraping
+ * @param {number} maxWaitTime - Maximum time to wait in milliseconds (default: 5 minutes)
+ * @param {number} checkInterval - Interval between checks in milliseconds (default: 10 seconds)
+ * @returns {Promise<boolean>} - True if cookies are ready, false if timeout
+ */
+async function waitForCookiesReady(maxWaitTime = 5 * 60 * 1000, checkInterval = 10 * 1000) {
+  const startTime = Date.now();
+  
+  console.log('Waiting for cookies to be ready before starting scraping...');
+  
+  while (Date.now() - startTime < maxWaitTime) {
+    try {
+      const cookies = await loadCookiesFromFile();
+      
+      if (cookies && cookies.length > 0) {
+        // Check if cookies are recent (within last 30 minutes)
+        const cookiesFile = path.join(process.cwd(), COOKIES_FILE);
+        const stats = await fs.stat(cookiesFile);
+        const fileAge = Date.now() - stats.mtime.getTime();
+        const maxAge = 30 * 60 * 1000; // 30 minutes
+        
+        if (fileAge <= maxAge) {
+          console.log(`Cookies are ready! Found ${cookies.length} valid cookies (file age: ${Math.round(fileAge / 1000)}s)`);
+          return true;
+        } else {
+          console.log(`Cookies file is too old (${Math.round(fileAge / 60000)} minutes), waiting for refresh...`);
+        }
+      } else {
+        console.log('No valid cookies found, waiting for cookie refresh service...');
+      }
+    } catch (error) {
+      console.log(`Error checking cookies: ${error.message}, retrying...`);
+    }
+    
+    // Wait before next check
+    await new Promise(resolve => setTimeout(resolve, checkInterval));
+  }
+  
+  console.warn(`Timeout waiting for cookies after ${maxWaitTime / 1000} seconds`);
+  return false;
+}
+
+/**
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
 async function refreshCookies(eventId, proxy = null) {
@@ -828,6 +871,7 @@ export {
   refreshCookies,
   loadCookiesFromFile,
   saveCookiesToFile,
+  waitForCookiesReady,
   cleanup,
   handleTicketmasterChallenge,
   checkForTicketmasterChallenge,
