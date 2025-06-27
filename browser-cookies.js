@@ -12,7 +12,7 @@ const iphone13 = devices["iPhone 13"];
 // Constants
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
-  COOKIE_REFRESH_INTERVAL: 55 * 60 * 1000, // 20 minutes (standardized timing)
+  COOKIE_REFRESH_INTERVAL: 15 * 60 * 1000, // 20 minutes (standardized timing)
   PAGE_TIMEOUT: 45000,
   MAX_RETRIES: 5,
   RETRY_DELAY: 10000,
@@ -529,13 +529,25 @@ async function loadCookiesFromFile() {
     const fileData = await fs.readFile(cookiesFile, 'utf8');
     const cookies = JSON.parse(fileData);
     
-    if (!Array.isArray(cookies) || cookies.length === 0) {
-      console.log("Invalid or empty cookies file");
+    // Handle both direct array format and nested cookieSets format
+    let cookieArray;
+    if (Array.isArray(cookies)) {
+      cookieArray = cookies;
+    } else if (cookies.cookieSets && Array.isArray(cookies.cookieSets) && cookies.cookieSets.length > 0) {
+      // Extract cookies from the first cookieSet
+      cookieArray = cookies.cookieSets[0].cookies || [];
+    } else {
+      console.log("Invalid or empty cookies file - no valid cookie data found");
       return null;
     }
-    
-    console.log(`Loaded ${cookies.length} cookies from file`);
-    return cookies;
+
+    if (cookieArray.length === 0) {
+      console.log("No cookies found in file");
+      return null;
+    }
+
+    console.log(`Loaded ${cookieArray.length} cookies from file`);
+    return cookieArray;
   } catch (error) {
     console.error(`Error loading cookies from file: ${error.message}`);
     return null;

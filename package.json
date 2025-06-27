@@ -6,9 +6,14 @@
   "scripts": {
     "start": "node app.js",
     "start-scraper": "node app.js --start-scraper",
+    "start-cookie-refresh": "node app.js --cookie-refresh-only",
     "dev": "node --watch app.js",
     "process-csv": "node processInventory.js process",
-    "test-sync": "node testSyncService.js"
+    "test-sync": "node testSyncService.js",
+    "pm2:start-all": "pm2 start ecosystem.config.js",
+    "pm2:stop-all": "pm2 stop ecosystem.config.js",
+    "pm2:restart-all": "pm2 restart ecosystem.config.js",
+    "pm2:delete-all": "pm2 delete ecosystem.config.js"
   },
   "keywords": [],
   "author": "",

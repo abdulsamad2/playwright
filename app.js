@@ -106,6 +106,20 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
         console.error("Scraper manager or startContinuousScraping method is not available.");
       }
     }
+
+    // Check for --cookie-refresh-only argument
+    if (process.argv.includes('--cookie-refresh-only')) {
+      console.log('Command-line argument --cookie-refresh-only detected. Starting cookie refresh service...');
+      // Import and start cookie refresh service
+      import('./scraper.js').then(({ refreshCookiesPeriodically }) => {
+        refreshCookiesPeriodically().catch(error => {
+          console.error('Error in cookie refresh service:', error);
+        });
+        console.log('Cookie refresh service started successfully.');
+      }).catch(error => {
+        console.error('Failed to import cookie refresh service:', error);
+      });
+    }
   });
 
   server.on('error', (err) => {

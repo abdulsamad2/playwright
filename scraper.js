@@ -413,44 +413,103 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       return cookieManager.capturedState;
     }
 
-    // Use our new module to refresh cookies with circuit breaker protection
-    try {
-      const result = await cookieRefreshCircuitBreaker.execute(async () => {
-        return await refreshCookies(eventIdToUse, proxyToUse);
-      });
+    // Check if this instance should handle cookie refresh
+    const shouldRefreshCookies = () => {
+      // If --cookie-refresh-only flag is present, this instance handles cookie refresh
+      if (process.argv.includes('--cookie-refresh-only')) {
+        return true;
+      }
       
-      if (result && result.cookies) {
-        // Update captured state with the new cookies and fingerprint
+      // If --start-scraper flag is present, this instance should NOT refresh cookies
+      if (process.argv.includes('--start-scraper')) {
+        return false;
+      }
+      
+      // For backward compatibility, allow regular instances to handle it
+      return true;
+    };
+
+    if (shouldRefreshCookies()) {
+      // Use our new module to refresh cookies with circuit breaker protection
+      try {
+        const result = await cookieRefreshCircuitBreaker.execute(async () => {
+          return await refreshCookies(eventIdToUse, proxyToUse);
+        });
+        
+        if (result && result.cookies) {
+          // Update captured state with the new cookies and fingerprint
+          cookieManager.capturedState = {
+            cookies: result.cookies,
+            fingerprint: result.fingerprint,
+            lastRefresh: Date.now(),
+            proxy: cookieManager.capturedState.proxy || proxyToUse,
+          };
+          
+          clearTimeout(globalTimeoutId);
+          await cleanupRefreshProcess();
+          return cookieManager.capturedState;
+        } else {
+          console.error("Failed to get cookies from refreshCookies");
+          throw new Error("Failed to get cookies");
+        }
+      } catch (error) {
+        console.error("Error refreshing cookies:", error.message);
+        
+        // Generate fallback headers since we couldn't get cookies
+        const fallbackHeaders = generateFallbackHeaders();
         cookieManager.capturedState = {
-          cookies: result.cookies,
-          fingerprint: result.fingerprint,
+          cookies: null,
+          fingerprint: BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
-          proxy: cookieManager.capturedState.proxy || proxyToUse,
+          headers: fallbackHeaders,
+          proxy: cookieManager.capturedState.proxy || proxyToUse
         };
         
         clearTimeout(globalTimeoutId);
         await cleanupRefreshProcess();
         return cookieManager.capturedState;
-      } else {
-        console.error("Failed to get cookies from refreshCookies");
-        throw new Error("Failed to get cookies");
       }
-    } catch (error) {
-      console.error("Error refreshing cookies:", error.message);
+    } else {
+      // This instance should not refresh cookies, load from file instead
+      console.log('This instance is configured to load cookies from file only (--start-scraper flag detected)');
       
-      // Generate fallback headers since we couldn't get cookies
-      const fallbackHeaders = generateFallbackHeaders();
-      cookieManager.capturedState = {
-        cookies: null,
-        fingerprint: BrowserFingerprint.generate(),
-        lastRefresh: Date.now(),
-        headers: fallbackHeaders,
-        proxy: cookieManager.capturedState.proxy || proxyToUse
-      };
-      
-      clearTimeout(globalTimeoutId);
-      await cleanupRefreshProcess();
-      return cookieManager.capturedState;
+      try {
+        const cookiesFromFile = await loadCookiesFromFile();
+        
+        if (cookiesFromFile && cookiesFromFile.length > 0) {
+          console.log(`Loaded ${cookiesFromFile.length} cookies from file for scraper instance`);
+          
+          cookieManager.capturedState = {
+            cookies: cookiesFromFile,
+            fingerprint: cookieManager.capturedState.fingerprint || BrowserFingerprint.generate(),
+            lastRefresh: Date.now(),
+            proxy: cookieManager.capturedState.proxy || proxyToUse,
+          };
+          
+          clearTimeout(globalTimeoutId);
+          await cleanupRefreshProcess();
+          return cookieManager.capturedState;
+        } else {
+          console.warn('No cookies found in file, using fallback headers');
+          throw new Error('No cookies available in file');
+        }
+      } catch (error) {
+        console.error('Error loading cookies from file:', error.message);
+        
+        // Generate fallback headers since we couldn't load cookies
+        const fallbackHeaders = generateFallbackHeaders();
+        cookieManager.capturedState = {
+          cookies: null,
+          fingerprint: BrowserFingerprint.generate(),
+          lastRefresh: Date.now(),
+          headers: fallbackHeaders,
+          proxy: cookieManager.capturedState.proxy || proxyToUse
+        };
+        
+        clearTimeout(globalTimeoutId);
+        await cleanupRefreshProcess();
+        return cookieManager.capturedState;
+      }
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
@@ -1882,8 +1941,25 @@ async function refreshCookiesPeriodically() {
   throw lastError; // Re-throw to be handled by the interval
 }
 
-// Start the periodic refresh when the module is loaded
-startPeriodicCookieRefresh().catch(error => {
-  console.error('Failed to start periodic cookie refresh:', error);
-  isPeriodicRefreshStarted = false; // Reset the flag on startup failure
-});
+// Check if this instance should handle cookie refresh
+const shouldHandleCookieRefresh = () => {
+  // If --cookie-refresh-only flag is present, this instance handles cookie refresh
+  if (process.argv.includes('--cookie-refresh-only')) {
+    return true;
+  }
+  
+  // If no instances have --cookie-refresh-only flag, allow regular instances to handle it
+  // This maintains backward compatibility for single instance setups
+  return !process.argv.includes('--start-scraper');
+};
+
+// Start the periodic refresh when the module is loaded (only if this instance should handle it)
+if (shouldHandleCookieRefresh()) {
+  console.log('This instance will handle cookie refresh.');
+  startPeriodicCookieRefresh().catch(error => {
+    console.error('Failed to start periodic cookie refresh:', error);
+    isPeriodicRefreshStarted = false; // Reset the flag on startup failure
+  });
+} else {
+  console.log('Cookie refresh disabled for this instance. Another instance should handle it.');
+}
