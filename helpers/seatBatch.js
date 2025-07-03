@@ -259,7 +259,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
       notes: "-tnow -tmplus -stub",
       tags: "AWS",
       offerId: data?.offerId,
-      splitType: "NEVERLEAVEONE",
+      splitType: offer?.inventoryType?.toLowerCase() === "resale" ? "DEFAULT": "NEVERLEAVEONE" ,
       publicNotes: "xfer" + allDescriptions,
       listPrice: totalCost,
       customSplit: getSplitType(data?.seats, offer),
