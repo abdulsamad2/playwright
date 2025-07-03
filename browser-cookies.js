@@ -12,7 +12,7 @@ const iphone13 = devices["iPhone 13"];
 // Constants
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
-  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
+  COOKIE_REFRESH_INTERVAL: 55 * 60 * 1000, // 20 minutes (standardized timing)
   PAGE_TIMEOUT: 45000,
   MAX_RETRIES: 5,
   RETRY_DELAY: 10000,

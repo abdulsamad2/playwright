@@ -29,7 +29,6 @@ export const getStats = async (req, res) => {
           successCount: scraperManager.successCount,
           failedCount: scraperManager.failedEvents.size,
           activeJobs: Array.from(scraperManager.activeJobs.keys()),
-          retryQueueSize: scraperManager.retryQueue.length,
         },
       },
     });

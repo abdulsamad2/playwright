@@ -33,8 +33,7 @@ class ScraperLogger {
         `   Runtime: ${Math.floor(runningTime.asHours())}h ${runningTime.minutes()}m ${runningTime.seconds()}s\n` +
         `   Active: ${this.state.activeJobs.size}/${config.CONCURRENT_LIMIT}, ` +
         `Success: ${this.state.successCount}, ` +
-        `Failed: ${this.state.failedEvents.size}, ` +
-        `Retry Queue: ${this.state.retryQueue.length}`
+        `Failed: ${this.state.failedEvents.size}`
       );
     } else {
       console.log(`${statusEmoji} [${formattedTime}] ${message}`);
@@ -80,4 +79,4 @@ class ScraperLogger {
   }
 }
 
-export default ScraperLogger; 
+export default ScraperLogger;

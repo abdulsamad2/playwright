@@ -122,6 +122,10 @@ export class ScraperManager {
     this.processingLocks = new Map(); // Track events that are locked for processing
     this.headerRefreshTimestamps = new Map(); // Track when headers were last refreshed
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
+    this.eventFailureCount = new Map(); // Track failure count per event
+    this.eventLastFailureTime = new Map(); // Track last failure time per event
+    this.eventQuarantineUntil = new Map(); // Track quarantine end time per event
+    // System circuit breaker removed
     this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
     this.eventFailureCounts = new Map(); // Track consecutive failures per event
     this.eventFailureTimes = new Map(); // Track when failures happened
@@ -141,13 +145,7 @@ export class ScraperManager {
     // New: Data caching and API error handling
     this.headerRotationPool = []; // Pool of working headers
     this.proxySuccessRates = new Map(); // Track success rates per proxy
-    this.apiCircuitBreaker = {
-      failures: 0,
-      threshold: 10,
-      resetTimeout: 30000,
-      lastTripped: null,
-      tripped: false,
-    };
+    // API circuit breaker removed
     this.headerSuccessRates = new Map(); // Track which headers work better
 
     // Event processing
@@ -291,6 +289,11 @@ export class ScraperManager {
       
       // Start cookie rotation
       this.forcePeriodicCookieRotation();
+      
+      // Start failure tracking cleanup (every 10 minutes)
+      setInterval(() => {
+        this.cleanupFailureTracking();
+      }, 600000);
       
       // Retry queue cleanup removed
       
@@ -1082,14 +1085,9 @@ export class ScraperManager {
             const quantityChanged =
               Number(existingData.quantity) !== Number(newData.quantity);
 
-            if (!seatsChanged && !priceChanged) {
-              newData.groupData.inventory.inventoryId =
-                existingData.inventoryId;
-            } else {
-            }
-
-            // If seats or price DID change, inventoryId is NOT preserved here,
-            // and a new one will be generated for the item when it's processed/saved.
+            // Always preserve the existing inventory ID for updates
+            // Only generate new inventory IDs for truly new inventory or deleted/re-added rows
+            newData.groupData.inventory.inventoryId = existingData.inventoryId;
 
             // Now, decide if the DB record needs an update for any of these fields
             if (seatsChanged || priceChanged || quantityChanged) {
@@ -1568,10 +1566,7 @@ export class ScraperManager {
       pauseTime += 20;
     }
 
-    // Circuit breaker adds minimal pause
-    if (this.apiCircuitBreaker.tripped) {
-      pauseTime += 100;
-    }
+    // Circuit breaker logic removed
 
     return Math.min(pauseTime, 200); // Cap at 200ms max
   }
@@ -1589,32 +1584,7 @@ export class ScraperManager {
 
     // Handle rate limiting and access denied errors
     if (is403Error || is429Error || is400Error) {
-      // Increment API circuit breaker counter
-      this.apiCircuitBreaker.failures++;
-
-      // If we've hit the threshold, trip the circuit breaker
-      if (this.apiCircuitBreaker.failures >= this.apiCircuitBreaker.threshold) {
-        if (!this.apiCircuitBreaker.tripped) {
-          this.logWithTime(
-            `Circuit breaker tripped after ${this.apiCircuitBreaker.failures} API errors`,
-            "error"
-          );
-          this.apiCircuitBreaker.tripped = true;
-
-          // Reset after timeout
-          setTimeout(() => {
-            this.logWithTime(
-              `Circuit breaker reset after ${
-                this.apiCircuitBreaker.resetTimeout / 1000
-              }s timeout`,
-              "info"
-            );
-            this.apiCircuitBreaker.tripped = false;
-            this.apiCircuitBreaker.failures = 0;
-          }, this.apiCircuitBreaker.resetTimeout);
-        }
-        return true; // Error was handled by circuit breaker
-      }
+      // API circuit breaker logic removed
 
       // Try rotating proxy (just get a new one, no blocking)
       if (this.proxyManager.getAvailableProxyCount() > 1) {
@@ -1757,9 +1727,6 @@ export class ScraperManager {
     // Count failed events
     const failedEventsCount = this.failedEvents.size;
     
-    // Count retry queue size
-    const retryQueueSize = this.retryQueue.length;
-    
     // Count processing queue size
     const processingQueueSize = this.eventProcessingQueue.length;
     
@@ -1768,9 +1735,9 @@ export class ScraperManager {
     const successRate = totalAttempts > 0 ? (this.successCount / totalAttempts * 100).toFixed(1) : 0;
     
     // Log health status if there are issues
-    if (stuckEvents > 0 || failedEventsCount > 10 || retryQueueSize > 50) {
+    if (stuckEvents > 0 || failedEventsCount > 10) {
       this.logWithTime(
-        `🏥 Health Check: ${stuckEvents} stuck events, ${failedEventsCount} failed, ${retryQueueSize} in retry queue, ${processingQueueSize} processing, ${successRate}% success rate`,
+        `🏥 Health Check: ${stuckEvents} stuck events, ${failedEventsCount} failed, ${processingQueueSize} processing, ${successRate}% success rate`,
         "warning"
       );
     } else {
@@ -2185,13 +2152,76 @@ export class ScraperManager {
   }
   
   /**
-   * Handle event failure without retry logic
+   * Handle event failure with intelligent quarantine system
    */
   async handleEventFailure(eventId, retryCount) {
-    // Simply log the failure without adding to retry queue
-    this.logWithTime(`⏭️ Event ${eventId} failed, moving to next event`, "warning");
+    // Track failure count and timing
+    const currentFailures = this.eventFailureCount.get(eventId) || 0;
+    const newFailureCount = currentFailures + 1;
+    const now = Date.now();
+    
+    this.eventFailureCount.set(eventId, newFailureCount);
+    this.eventLastFailureTime.set(eventId, now);
+    
+    // System circuit breaker removed
+    
+    // Implement quarantine for repeatedly failing events
+    if (newFailureCount >= 3) {
+      const quarantineTime = Math.min(newFailureCount * 60000, 300000); // Max 5 minutes
+      this.eventQuarantineUntil.set(eventId, now + quarantineTime);
+      
+      this.logWithTime(
+        `🚫 Event ${eventId} quarantined for ${Math.round(quarantineTime/1000)}s after ${newFailureCount} failures`,
+        "warning"
+      );
+    } else {
+      this.logWithTime(
+        `⚠️ Event ${eventId} failed (${newFailureCount} failures), applying backoff`,
+        "warning"
+      );
+    }
+    
     this.incrementFailureCount(eventId);
   }
+
+  /**
+   * Reset failure tracking when an event succeeds
+   */
+  resetEventFailureTracking(eventId) {
+    this.eventFailureCount.delete(eventId);
+    this.eventLastFailureTime.delete(eventId);
+    this.eventQuarantineUntil.delete(eventId);
+  }
+
+  /**
+    * Clean up expired quarantines and reset failure counts for old failures
+    */
+   cleanupFailureTracking() {
+     const now = Date.now();
+     const oneHourAgo = now - 3600000; // 1 hour
+     
+     // Clean up old failure times (reset after 1 hour)
+     for (const [eventId, lastFailureTime] of this.eventLastFailureTime.entries()) {
+       if (lastFailureTime < oneHourAgo) {
+         this.eventFailureCount.delete(eventId);
+         this.eventLastFailureTime.delete(eventId);
+       }
+     }
+     
+     // Clean up expired quarantines
+     for (const [eventId, quarantineUntil] of this.eventQuarantineUntil.entries()) {
+       if (now > quarantineUntil) {
+         this.eventQuarantineUntil.delete(eventId);
+       }
+     }
+     
+     // Circuit breaker cleanup removed
+   }
+
+   /**
+    * Update system circuit breaker based on recent failures
+    */
+   // updateSystemCircuitBreaker method removed
   
   /**
    * Refresh the event queue with new events
@@ -2306,6 +2336,9 @@ export class ScraperManager {
       // Success tracking
       this.successCount++;
       this.lastSuccessTime = moment();
+      
+      // Reset failure tracking on success
+      this.resetEventFailureTracking(eventId);
 
       // FIX: Always update eventUpdateTimestamps with moment object (not Date)
       this.eventUpdateTimestamps.set(eventId, moment());
@@ -3607,13 +3640,7 @@ export class ScraperManager {
         );
       }
 
-      // 5. Reset circuit breaker if tripped
-      if (this.apiCircuitBreaker.tripped) {
-        this.logWithTime("Resetting API circuit breaker", "warning");
-        this.apiCircuitBreaker.tripped = false;
-        this.apiCircuitBreaker.failures = 0;
-        this.apiCircuitBreaker.lastTripped = null;
-      }
+      // 5. API circuit breaker reset logic removed
 
       // 6. Reset global error counters
       this.globalConsecutiveErrors = 0;
@@ -3815,9 +3842,6 @@ export class ScraperManager {
     this.headersCache.delete(eventId);
     this.headerRefreshTimestamps.delete(eventId);
 
-    // Remove from retry queue
-    this.retryQueue = this.retryQueue.filter((job) => job.eventId !== eventId);
-
     // Remove from processing queue
     this.eventProcessingQueue = this.eventProcessingQueue.filter(
       (item) => (typeof item === "string" ? item : item.eventId) !== eventId
@@ -3912,7 +3936,7 @@ export class ScraperManager {
   }
 
   /**
-   * Get events to process in priority order
+   * Get events to process in priority order with intelligent failure handling
    * @returns {Promise<string[]>} Array of event IDs to process
    */
   async getEvents() {
@@ -3939,8 +3963,12 @@ export class ScraperManager {
       // Get current time
       const currentTime = now.valueOf();
 
+      // Process up to 100 events normally
+      let maxEventsToProcess = 100;
+      
       // Calculate priority for each event and filter those needing updates
       const eventsNeedingUpdate = [];
+      const quarantinedEvents = [];
 
       for (const event of events) {
         const eventId = event.Event_ID;
@@ -3956,6 +3984,26 @@ export class ScraperManager {
         // Also check processing lock to avoid duplicate processing
         if (this.processingEvents.has(eventId)) {
           continue;
+        }
+
+        // INTELLIGENT FAILURE HANDLING: Check if event is in failure quarantine
+        const failureCount = this.eventFailureCount.get(eventId) || 0;
+        const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
+        const timeSinceLastFailure = Date.now() - lastFailureTime;
+        
+        // Quarantine events with multiple recent failures
+        if (failureCount >= 3 && timeSinceLastFailure < 300000) { // 5 minutes quarantine
+          quarantinedEvents.push({
+            eventId,
+            failureCount,
+            quarantineTimeLeft: Math.max(0, 300000 - timeSinceLastFailure)
+          });
+          continue; // Skip quarantined events
+        }
+        
+        // Apply exponential backoff for failed events
+        if (failureCount > 0 && timeSinceLastFailure < (failureCount * 60000)) {
+          continue; // Skip events in backoff period
         }
 
         const lastUpdated = event.Last_Updated
@@ -4007,8 +4055,22 @@ export class ScraperManager {
       // Sort by priority (highest first)
       eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
 
-      // Return all events that need updating
-      return eventsNeedingUpdate.map((event) => event.eventId);
+      // Log quarantined events for monitoring
+      if (quarantinedEvents.length > 0) {
+        this.logWithTime(
+          `🚫 ${quarantinedEvents.length} events in failure quarantine: ${quarantinedEvents.map(e => `${e.eventId}(${e.failureCount} failures, ${Math.round(e.quarantineTimeLeft/1000)}s left)`).slice(0, 5).join(', ')}${quarantinedEvents.length > 5 ? '...' : ''}`,
+          "warning"
+        );
+      }
+
+      // Return events that need updating, limited to maxEventsToProcess
+      const eventsToReturn = eventsNeedingUpdate.map((event) => event.eventId);
+      
+      if (eventsToReturn.length > maxEventsToProcess) {
+        return eventsToReturn.slice(0, maxEventsToProcess);
+      }
+      
+      return eventsToReturn;
     } catch (error) {
       console.error("Error getting events to process:", error);
       return [];

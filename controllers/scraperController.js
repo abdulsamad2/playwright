@@ -9,7 +9,6 @@ export const getScraperStatus = (req, res) => {
     activeJobs: Array.from(scraperManager.activeJobs.keys()),
     successCount: scraperManager.successCount,
     failedEvents: Array.from(scraperManager.failedEvents),
-    retryQueueSize: scraperManager.retryQueue.length,
   });
 };
 

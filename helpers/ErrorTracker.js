@@ -10,7 +10,6 @@ class ErrorTracker {
     this.failedEvents = new Set(); // Set of event IDs that have failed
     this.eventFailureCounts = new Map(); // Track consecutive failures per event
     this.eventFailureTimes = new Map(); // Track when failures happened
-    this.retryQueue = []; // Queue of events to retry
     this.globalConsecutiveErrors = 0; // Track consecutive errors across all events
   }
 
@@ -97,37 +96,17 @@ class ErrorTracker {
     }
 
 
-    const cooldownUntil = moment().add(backoffTime, "milliseconds");
-
-    // Always add to retry queue with optimized retry count
-    const maxRetries = isApiError ? config.MAX_RETRIES + 2 : config.MAX_RETRIES; // Extra retries for API errors
-    if (retryCount < maxRetries) {
-      this.addToRetryQueue(eventId, retryCount + 1, cooldownUntil);
-
+    // Failed events will be handled in the next processing cycle
+    // No retry queue - events are processed based on their natural update schedule
+    
+    // Clear failure count after a cooldown period to give event a fresh start
+    setTimeout(() => {
+      this.clearFailureCount(eventId);
       this.logger.logWithTime(
-        `Queued for retry: ${eventId} (after ${backoffTime / 1000}s cooldown)`,
-        "warning"
+        `Cleared failure history for ${eventId} - ready for fresh attempts`,
+        "info"
       );
-    } else {
-      this.logger.logWithTime(
-        `Max retries exceeded for ${eventId} - will retry with fresh session later`,
-        "warning"
-      );
-
-
-
-      // Clear failure count to give event a fresh start after cooldown
-      setTimeout(() => {
-        this.clearFailureCount(eventId);
-        this.logger.logWithTime(
-          `Cleared failure history for ${eventId} - ready for fresh attempts`,
-          "info"
-        );
-      }, 5 * 60 * 1000); // Clear after 5 minutes
-
-      // Still schedule next update to prevent urgent flags
-      scheduler.scheduleNextUpdate(eventId);
-    }
+    }, 5 * 60 * 1000); // Clear after 5 minutes
 
     return {
       backoffTime,
@@ -136,35 +115,7 @@ class ErrorTracker {
     };
   }
 
-  /**
-   * Add an event to the retry queue
-   */
-  addToRetryQueue(eventId, retryCount, retryAfter) {
-    this.retryQueue.push({
-      eventId,
-      retryCount,
-      retryAfter,
-    });
-  }
 
-  /**
-   * Get events ready for retry
-   */
-  getEventsReadyForRetry() {
-    const now = moment();
-
-    // Filter the retry queue to only include items ready for retry
-    const readyForRetry = this.retryQueue.filter(
-      (job) => !job.retryAfter || now.isAfter(job.retryAfter)
-    );
-
-    // Update retry queue to remove items we're processing
-    this.retryQueue = this.retryQueue.filter(
-      (job) => job.retryAfter && now.isBefore(job.retryAfter)
-    );
-
-    return readyForRetry;
-  }
 
   /**
    * Clear old failure data to prevent permanent penalties
@@ -206,7 +157,6 @@ class ErrorTracker {
   getFailureStats() {
     return {
       failedEventCount: this.failedEvents.size,
-      retryQueueLength: this.retryQueue.length,
       globalConsecutiveErrors: this.globalConsecutiveErrors,
     };
   }

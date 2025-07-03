@@ -4,7 +4,7 @@ import moment from "moment";
 
 // Global Filters
 const GLOBAL_FILTERS = {
-  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket",], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket","resale"], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
 
 
   inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
@@ -16,6 +16,8 @@ const GLOBAL_FILTERS = {
     "GA Lawn",
     "General Admission Standing",
     "Standard Admission",
+    "Reserved",
+    "Reserved Ticket"
     
   ], // e.g., ['obstructed view', 'aisle'] - empty means no filter, strings to check for (case-insensitive)
   accessibility: [
@@ -183,10 +185,10 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     isNameAdded = true;
   }
 
-  if (offer?.name.toLowerCase().includes("limited/obstructed")) {
+  if (offer?.name?.toLowerCase().includes("limited/obstructed")) {
     allDescriptions += ", Limted/Obstructed View";
     isNameAdded = true;
-  } else if (offer?.name.toLowerCase().includes("limited view")) {
+  } else if (offer?.name?.toLowerCase().includes("limited view")) {
     allDescriptions += ", Limited View";
     isNameAdded = true;
   }
@@ -434,10 +436,10 @@ export const AttachRowSection = (
             )) ||
             // Check offer name for accessibility terms
             (offerGet && offerGet.name && (
-              offerGet.name.toLowerCase().includes('wheelchair') ||
-              offerGet.name.toLowerCase().includes('accessible') ||
-              offerGet.name.toLowerCase().includes('ada') ||
-              offerGet.name.toLowerCase().includes('handicap')
+              offerGet.name?.toLowerCase().includes('wheelchair') ||
+              offerGet.name?.toLowerCase().includes('accessible') ||
+              offerGet.name?.toLowerCase().includes('ada') ||
+              offerGet.name?.toLowerCase().includes('handicap')
             ))
           );
           
