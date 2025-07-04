@@ -2095,82 +2095,247 @@ export class ScraperManager {
   // Helper method for retry events removed
 
   /**
-   * Start concurrent processing of events
+   * Start concurrent processing of events with natural behavior patterns
    */
   async startConcurrentProcessing() {
+    let consecutiveFailures = 0;
+    let lastSuccessfulBatch = Date.now();
+    
     while (this.isRunning) {
       try {
         // Get events that need processing
         const eventsToProcess = await this.getEvents();
         
         if (eventsToProcess.length > 0) {
-          // Process events in batches for better throughput
-          const batchSize = Math.min(config.CONCURRENT_LIMIT, eventsToProcess.length);
+          // Check if we should use parallel batch processing for high throughput
+          if (eventsToProcess.length >= 9 && consecutiveFailures === 0) {
+            // Use parallel batch processing for 9+ events with good success rate
+            const maxParallelBatches = Math.min(3, Math.floor(eventsToProcess.length / 3));
+            
+            this.logWithTime(`Using parallel batch processing for ${eventsToProcess.length} events`, "info");
+            
+            const parallelResult = await this.processMultipleBatches(eventsToProcess, maxParallelBatches);
+            
+            if (parallelResult) {
+              // Update tracking based on parallel processing results
+              if (parallelResult.successRate > 0.7) {
+                consecutiveFailures = 0;
+                lastSuccessfulBatch = Date.now();
+              } else {
+                consecutiveFailures++;
+              }
+              
+              // Process remaining events if any
+              if (parallelResult.remainingEvents && parallelResult.remainingEvents.length > 0) {
+                this.logWithTime(`${parallelResult.remainingEvents.length} events remaining for next cycle`, "info");
+              }
+              
+              // Shorter delay after parallel processing
+              const parallelDelay = parallelResult.successRate > 0.8 ? 300 : 800;
+              await setTimeout(parallelDelay + Math.random() * 200);
+              continue; // Skip regular batch processing
+            }
+          }
+          
+          // Regular batch processing for smaller numbers or when parallel processing isn't suitable
+          const optimalBatchSize = 3;
+          let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
+          
+          // Adaptive batch sizing based on recent success rate
+          if (consecutiveFailures > 2) {
+            // Reduce to single event processing if having issues
+            batchSize = 1;
+            this.logWithTime(`Reducing batch size to 1 due to recent failures`, "warning");
+          } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
+            // Increase to 6 events if we're doing well and have many events
+            batchSize = Math.min(6, eventsToProcess.length);
+            this.logWithTime(`Increasing batch size to ${batchSize} for better throughput`, "info");
+          }
+          
           const batch = eventsToProcess.slice(0, batchSize);
           
-          // Process batch concurrently
-          const processingPromises = batch.map(async (eventId) => {
+          this.logWithTime(`Processing regular batch of ${batch.length} events (${eventsToProcess.length} total available)`, "info");
+          
+          // Optimized jitter for fast batch processing
+          const jitterDelay = Math.random() * 500; // Reduced to 0-500ms for faster processing
+          await setTimeout(jitterDelay);
+          
+          // Process batch with optimized staggered starts for 3-event batches
+          const processingPromises = batch.map(async (eventId, index) => {
             if (this.processingEvents.has(eventId)) {
               return null; // Skip if already processing
             }
             
+            // Optimized stagger timing for fast batch processing
+            let staggerDelay = 0;
+            if (batchSize <= 3) {
+              // For 3 or fewer events, minimal stagger (50-150ms)
+              staggerDelay = index * (50 + Math.random() * 100);
+            } else {
+              // For larger batches, slightly more stagger (100-300ms)
+              staggerDelay = index * (100 + Math.random() * 200);
+            }
+            await setTimeout(staggerDelay);
+            
             try {
               this.processingEvents.add(eventId);
-              const result = await this.scrapeEvent(eventId, 0, null);
+              
+              // Add processing timeout to prevent stuck events
+              const processingTimeout = config.SCRAPE_TIMEOUT + 10000; // Extra 10s buffer
+              
+              const result = await Promise.race([
+                this.scrapeEventWithNaturalBehavior(eventId),
+                setTimeout(processingTimeout).then(() => {
+                  throw new Error(`Processing timeout after ${processingTimeout}ms`);
+                })
+              ]);
               
               if (result) {
                 this.eventLastProcessedTime.set(eventId, Date.now());
+                this.resetEventFailureTracking(eventId);
                 this.logWithTime(`✅ Successfully processed event ${eventId}`, "success");
+                return { eventId, success: true };
               } else {
-                await this.handleEventFailure(eventId, 0);
+                await this.handleEventFailureGracefully(eventId);
+                return { eventId, success: false };
               }
               
-              return { eventId, success: !!result };
             } catch (error) {
               this.logWithTime(`❌ Error processing event ${eventId}: ${error.message}`, "error");
-              await this.handleEventFailure(eventId, 0);
+              await this.handleEventFailureGracefully(eventId);
               return { eventId, success: false, error: error.message };
             } finally {
               this.processingEvents.delete(eventId);
+              
+              // Optimized post-processing delay for fast batches
+              if (batchSize <= 3) {
+                // Minimal delay for small batches (25-75ms)
+                await setTimeout(25 + Math.random() * 50);
+              } else {
+                // Standard delay for larger batches (50-100ms)
+                await setTimeout(50 + Math.random() * 50);
+              }
             }
           });
           
           // Wait for all concurrent operations to complete
-          await Promise.allSettled(processingPromises);
+          const results = await Promise.allSettled(processingPromises);
           
-          // Short pause between batches
-          await setTimeout(config.PROCESSING_INTERVAL);
+          // Analyze batch results for adaptive behavior
+          const successfulResults = results.filter(r => 
+            r.status === 'fulfilled' && r.value?.success
+          ).length;
+          
+          const batchSuccessRate = successfulResults / batch.length;
+          
+          if (batchSuccessRate > 0.7) {
+            consecutiveFailures = 0;
+            lastSuccessfulBatch = Date.now();
+          } else {
+            consecutiveFailures++;
+          }
+          
+          // Optimized adaptive delay for fast 3-event batch processing
+          let nextBatchDelay = config.PROCESSING_INTERVAL;
+          
+          if (batchSuccessRate < 0.3) {
+            // Poor success rate - moderate slowdown for 3-event batches
+            nextBatchDelay = config.PROCESSING_INTERVAL * 2;
+            this.logWithTime(`Poor success rate (${Math.round(batchSuccessRate * 100)}%), slowing down moderately`, "warning");
+          } else if (batchSuccessRate < 0.6) {
+            // Moderate success rate - slight slowdown
+            nextBatchDelay = config.PROCESSING_INTERVAL * 1.5;
+          } else if (batchSuccessRate >= 0.8 && batchSize <= 3) {
+            // Excellent success rate with small batches - speed up
+            nextBatchDelay = Math.max(200, config.PROCESSING_INTERVAL * 0.5);
+            this.logWithTime(`Excellent success rate (${Math.round(batchSuccessRate * 100)}%), speeding up batch processing`, "success");
+          }
+          
+          // Reduced jitter for faster processing
+          nextBatchDelay += Math.random() * 300;
+          
+          await setTimeout(nextBatchDelay);
+          
         } else {
           // No events to process, wait before checking again
-          await setTimeout(config.PROCESSING_INTERVAL * 2);
+          await setTimeout(config.PROCESSING_INTERVAL * 2 + Math.random() * 1000);
         }
+        
+        // Emergency slowdown if no successful batches for too long
+        if (Date.now() - lastSuccessfulBatch > 300000) { // 5 minutes
+          this.logWithTime("No successful batches for 5 minutes, implementing emergency slowdown", "error");
+          await setTimeout(10000); // 10 second pause
+          consecutiveFailures = Math.max(consecutiveFailures, 5);
+        }
+        
       } catch (error) {
         this.logWithTime(`Concurrent processing error: ${error.message}`, "error");
-        await setTimeout(config.PROCESSING_INTERVAL * 4); // Wait longer on error
+        consecutiveFailures++;
+        
+        // Exponential backoff on errors
+        const errorDelay = Math.min(30000, config.PROCESSING_INTERVAL * Math.pow(2, Math.min(consecutiveFailures, 5)));
+        await setTimeout(errorDelay);
       }
     }
   }
   
   /**
-   * Handle event failure with intelligent backoff system
+   * Handle event failure with graceful backoff and natural behavior
+   */
+  async handleEventFailureGracefully(eventId) {
+    try {
+      // Track failure count and timing
+      const currentFailures = this.eventFailureCount.get(eventId) || 0;
+      const newFailureCount = currentFailures + 1;
+      const now = Date.now();
+      
+      this.eventFailureCount.set(eventId, newFailureCount);
+      this.eventLastFailureTime.set(eventId, now);
+      
+      // More forgiving failure thresholds
+      const baseDelay = 2000; // Start with 2 seconds
+      const maxDelay = 120000; // Max 2 minutes
+      
+      // Gentler exponential backoff with jitter
+      let backoffDelay = Math.min(maxDelay, baseDelay * Math.pow(1.4, newFailureCount));
+      
+      // Add random jitter (±30%) to prevent synchronized retries
+      const jitter = backoffDelay * 0.3 * (Math.random() - 0.5);
+      backoffDelay = Math.max(1000, backoffDelay + jitter);
+      
+      // Reset failure count if it's been a while since last failure
+      const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
+      if (now - lastFailureTime > 900000) { // 15 minutes
+        this.eventFailureCount.set(eventId, 1);
+        backoffDelay = baseDelay;
+        this.logWithTime(`Resetting failure count for event ${eventId} due to time gap`, "info");
+      }
+      
+      // Don't give up - allow more retries with longer delays
+      if (newFailureCount >= 20) {
+        this.logWithTime(`Event ${eventId} has failed ${newFailureCount} times, using maximum delay but continuing`, "warning");
+        backoffDelay = maxDelay;
+      }
+      
+      this.logWithTime(
+        `⚠️ Event ${eventId} failed (${newFailureCount} failures), backing off for ${Math.round(backoffDelay/1000)}s`,
+        "warning"
+      );
+      
+      // Add to cooldown with natural timing
+      this.cooldownEvents.set(eventId, now + backoffDelay);
+      this.incrementFailureCount(eventId);
+      
+    } catch (error) {
+      this.logWithTime(`Error in graceful failure handling for ${eventId}: ${error.message}`, "error");
+    }
+  }
+
+  /**
+   * Handle event failure with intelligent backoff system (legacy compatibility)
    */
   async handleEventFailure(eventId, retryCount) {
-    // Track failure count and timing
-    const currentFailures = this.eventFailureCount.get(eventId) || 0;
-    const newFailureCount = currentFailures + 1;
-    const now = Date.now();
-    
-    this.eventFailureCount.set(eventId, newFailureCount);
-    this.eventLastFailureTime.set(eventId, now);
-    
-    // System circuit breaker removed
-    
-    this.logWithTime(
-      `⚠️ Event ${eventId} failed (${newFailureCount} failures), applying backoff`,
-      "warning"
-    );
-    
-    this.incrementFailureCount(eventId);
+    return this.handleEventFailureGracefully(eventId);
   }
 
   /**
@@ -2232,7 +2397,329 @@ export class ScraperManager {
   // processEventBatch method removed - using sequential processing
 
   /**
-   * Optimized scrape event method for parallel processing
+   * Process multiple batches of 3 events in parallel for maximum throughput
+   */
+  async processMultipleBatches(allEvents, maxParallelBatches = 2) {
+    if (allEvents.length <= 3) {
+      // Single batch, use regular processing
+      return null;
+    }
+    
+    const batchSize = 3;
+    const batches = [];
+    
+    // Split events into batches of 3
+    for (let i = 0; i < allEvents.length; i += batchSize) {
+      batches.push(allEvents.slice(i, i + batchSize));
+    }
+    
+    // Limit parallel batches to prevent overwhelming
+    const parallelBatches = Math.min(maxParallelBatches, batches.length);
+    
+    this.logWithTime(`Processing ${parallelBatches} parallel batches of 3 events each (${allEvents.length} total events)`, "info");
+    
+    const batchPromises = [];
+    
+    for (let i = 0; i < parallelBatches; i++) {
+      const batch = batches[i];
+      if (batch && batch.length > 0) {
+        batchPromises.push(this.processSingleBatch(batch, i));
+      }
+    }
+    
+    try {
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      let totalSuccessful = 0;
+      let totalProcessed = 0;
+      
+      batchResults.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value) {
+          totalSuccessful += result.value.successful;
+          totalProcessed += result.value.processed;
+        }
+      });
+      
+      const overallSuccessRate = totalProcessed > 0 ? totalSuccessful / totalProcessed : 0;
+      
+      this.logWithTime(
+        `Parallel batch processing completed: ${totalSuccessful}/${totalProcessed} successful (${Math.round(overallSuccessRate * 100)}%)`,
+        overallSuccessRate > 0.7 ? "success" : "warning"
+      );
+      
+      return {
+        successful: totalSuccessful,
+        processed: totalProcessed,
+        successRate: overallSuccessRate,
+        remainingEvents: allEvents.slice(parallelBatches * batchSize)
+      };
+      
+    } catch (error) {
+      this.logWithTime(`Error in parallel batch processing: ${error.message}`, "error");
+      return null;
+    }
+  }
+  
+  /**
+   * Process a single batch of 3 events with optimized timing
+   */
+  async processSingleBatch(batch, batchIndex = 0) {
+    const startTime = Date.now();
+    
+    // Add small stagger between parallel batches
+    if (batchIndex > 0) {
+      await setTimeout(batchIndex * 100);
+    }
+    
+    const processingPromises = batch.map(async (eventId, index) => {
+      if (this.processingEvents.has(eventId)) {
+        return { eventId, success: false, reason: 'already_processing' };
+      }
+      
+      // Minimal stagger within batch
+      const staggerDelay = index * 75; // 75ms between events in batch
+      await setTimeout(staggerDelay);
+      
+      try {
+        this.processingEvents.add(eventId);
+        
+        const result = await Promise.race([
+          this.scrapeEventWithNaturalBehavior(eventId),
+          setTimeout(config.SCRAPE_TIMEOUT + 5000).then(() => {
+            throw new Error(`Batch processing timeout`);
+          })
+        ]);
+        
+        if (result) {
+          this.eventLastProcessedTime.set(eventId, Date.now());
+          this.resetEventFailureTracking(eventId);
+          return { eventId, success: true };
+        } else {
+          await this.handleEventFailureGracefully(eventId);
+          return { eventId, success: false, reason: 'scrape_failed' };
+        }
+        
+      } catch (error) {
+        await this.handleEventFailureGracefully(eventId);
+        return { eventId, success: false, reason: error.message };
+      } finally {
+        this.processingEvents.delete(eventId);
+      }
+    });
+    
+    const results = await Promise.allSettled(processingPromises);
+    
+    const successful = results.filter(r => 
+      r.status === 'fulfilled' && r.value?.success
+    ).length;
+    
+    const processed = results.length;
+    const processingTime = Date.now() - startTime;
+    
+    this.logWithTime(
+      `Batch ${batchIndex + 1} completed: ${successful}/${processed} successful in ${processingTime}ms`,
+      successful === processed ? "success" : "warning"
+    );
+    
+    return { successful, processed, processingTime };
+  }
+
+  /**
+   * Enhanced scrape event method with natural behavior patterns
+   */
+  async scrapeEventWithNaturalBehavior(eventId) {
+    const startTime = Date.now();
+    let proxyAgent = null;
+    let proxy = null;
+    
+    try {
+      // Add natural pre-processing delay (human-like behavior)
+      const preDelay = 200 + Math.random() * 800; // 200-1000ms
+      await setTimeout(preDelay);
+      
+      // Check if we should skip due to recent processing
+      const lastProcessed = this.eventLastProcessedTime.get(eventId);
+      const minInterval = 45000 + Math.random() * 15000; // 45-60 seconds
+      if (lastProcessed && Date.now() - lastProcessed < minInterval) {
+        this.logWithTime(`Skipping event ${eventId} - processed recently`, "info");
+        return true;
+      }
+      
+      // Check cooldown with some tolerance
+      const cooldownEnd = this.cooldownEvents.get(eventId);
+      if (cooldownEnd && Date.now() < cooldownEnd) {
+        const remainingCooldown = Math.round((cooldownEnd - Date.now()) / 1000);
+        this.logWithTime(`Event ${eventId} still in cooldown for ${remainingCooldown}s`, "info");
+        return false;
+      }
+      
+      // Get proxy with retry logic
+      let proxyAttempts = 0;
+      const maxProxyAttempts = 3;
+      
+      while (proxyAttempts < maxProxyAttempts && !proxy) {
+        try {
+          const proxyData = this.proxyManager.getProxyForEvent(eventId);
+          if (proxyData) {
+            const proxyAgentData = this.proxyManager.createProxyAgent(proxyData);
+            proxyAgent = proxyAgentData.proxyAgent;
+            proxy = proxyAgentData.proxy;
+            this.proxyManager.assignProxyToEvent(eventId, proxy.proxy);
+            break;
+          }
+        } catch (proxyError) {
+          proxyAttempts++;
+          this.logWithTime(`Proxy attempt ${proxyAttempts} failed for ${eventId}: ${proxyError.message}`, "warning");
+          if (proxyAttempts < maxProxyAttempts) {
+            await setTimeout(1000 * proxyAttempts); // Progressive delay
+          }
+        }
+      }
+      
+      // Get headers with natural retry behavior
+      let headers = null;
+      let headerAttempts = 0;
+      const maxHeaderAttempts = 3;
+      
+      while (headerAttempts < maxHeaderAttempts && !headers) {
+        try {
+          const randomEventId = await this.getRandomEventId(eventId);
+          headers = await this.refreshEventHeaders(randomEventId, false);
+          
+          if (headers) {
+            // Add natural headers and identifiers
+            if (headers.headers) {
+              headers.headers["X-Event-ID"] = eventId;
+              headers.headers["X-Session-ID"] = `natural-${eventId}-${Date.now()}`;
+              headers.headers["X-Request-ID"] = `req-${Math.random().toString(36).substring(2)}`;
+              headers.headers["X-Processing-Time"] = Date.now().toString();
+              headers.headers["X-Natural-Timing"] = "true";
+              
+              // Add realistic user-agent rotation
+              if (Math.random() < 0.1) { // 10% chance to vary user agent
+                headers.headers["User-Agent"] = this.getRandomUserAgent();
+              }
+            }
+            break;
+          }
+        } catch (headerError) {
+          headerAttempts++;
+          this.logWithTime(`Header attempt ${headerAttempts} failed for ${eventId}: ${headerError.message}`, "warning");
+          if (headerAttempts < maxHeaderAttempts) {
+            await setTimeout(2000 * headerAttempts); // Progressive delay
+          }
+        }
+      }
+      
+      if (!headers) {
+        throw new Error("Failed to obtain headers after multiple attempts");
+      }
+      
+      // Create event object with natural session data
+      const eventWithNaturalSession = {
+        eventId: eventId,
+        headers: headers,
+        sessionId: `natural-${eventId}-${Date.now()}`,
+        proxyId: proxy?.proxy || "default",
+        processingStart: startTime,
+        naturalBehavior: true
+      };
+      
+      // Add natural pre-scrape delay
+      const preScrapeDelay = 300 + Math.random() * 700; // 300-1000ms
+      await setTimeout(preScrapeDelay);
+      
+      // Perform scrape with extended timeout for natural behavior
+      const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000; // Extra 5s
+      
+      const result = await Promise.race([
+        this.throttledScrapeEvent(eventWithNaturalSession, proxyAgent, proxy),
+        setTimeout(extendedTimeout).then(() => {
+          throw new Error(`Natural scrape timeout after ${extendedTimeout}ms`);
+        })
+      ]);
+      
+      // Validate result with more lenient criteria
+      if (!result) {
+        throw new Error("No result returned from scrape");
+      }
+      
+      if (Array.isArray(result) && result.length === 0) {
+        // Empty results should be treated as failures
+        throw new Error("Event returned empty results - treating as failed");
+      }
+      
+      // Add natural post-processing delay
+      const postDelay = 100 + Math.random() * 400; // 100-500ms
+      await setTimeout(postDelay);
+      
+      // Update metadata and tracking
+      await this.updateEventMetadataAsync(eventId, result);
+      
+      // Success tracking with natural timing
+      this.successCount++;
+      this.lastSuccessTime = moment();
+      this.resetEventFailureTracking(eventId);
+      this.eventUpdateTimestamps.set(eventId, moment());
+      
+      // Update database with natural timing
+      try {
+        await Event.updateOne(
+          { Event_ID: eventId },
+          { $set: { Last_Updated: new Date() } }
+        );
+      } catch (dbError) {
+        this.logWithTime(`DB update warning for ${eventId}: ${dbError.message}`, "warning");
+      }
+      
+      // Update processed time with jitter to prevent synchronization
+      const jitteredTime = Date.now() + Math.random() * 5000; // 0-5s jitter
+      this.eventLastProcessedTime.set(eventId, jitteredTime);
+      
+      this.failedEvents.delete(eventId);
+      this.clearFailureCount(eventId);
+      
+      // Release proxy with success flag
+      if (proxy) {
+        this.proxyManager.releaseProxy(eventId, true);
+      }
+      
+      const processingTime = Date.now() - startTime;
+      this.logWithTime(`✅ Natural processing completed for ${eventId} in ${processingTime}ms`, "success");
+      
+      return result;
+      
+    } catch (error) {
+      // Enhanced error handling with context
+      const processingTime = Date.now() - startTime;
+      this.logWithTime(`❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`, "error");
+      
+      // Release proxy on failure
+      if (proxy) {
+        this.proxyManager.releaseProxy(eventId, false);
+      }
+      
+      // Don't immediately fail - let the graceful handler decide
+      return false;
+    }
+  }
+
+  /**
+   * Get a random user agent for natural behavior
+   */
+  getRandomUserAgent() {
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
+    ];
+    return userAgents[Math.floor(Math.random() * userAgents.length)];
+  }
+
+  /**
+   * Optimized scrape event method for parallel processing (legacy compatibility)
    */
   async scrapeEvent(eventId, retryCount = 0, sharedHeaders = null) {
     // Check if we should skip
