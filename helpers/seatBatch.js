@@ -4,7 +4,7 @@ import moment from "moment";
 
 // Global Filters
 const GLOBAL_FILTERS = {
-  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket",], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket","resale"], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
 
 
   inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
