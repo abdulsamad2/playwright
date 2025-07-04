@@ -500,5 +500,255 @@ export default {
       username: "yRC6EF7OtY",
       password: "0iRT9kZnVC",
     },
+    {
+      proxy: "137.155.30.6:12656",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.10.231:7781",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.10.150:7700",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.17.23:9358",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.17.182:9517",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.30.146:12796",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.10.227:7777",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.24.142:11262",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.11.163:7968",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.23.7:10872",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.11.32:7837",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.11.25:7830",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.138:9218",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.139:9219",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.140:9220",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.141:9221",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.142:9222",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.143:9223",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.16.144:9224",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.169:10524",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.170:10525",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.171:10526",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.172:10527",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.173:10528",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.174:10529",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.175:10530",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.176:10531",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.177:10532",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.178:10533",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.179:10534",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.180:10535",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.21.181:10536",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.136:12021",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.137:12022",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.138:12023",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.139:12024",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.140:12025",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.2.168:5678",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.2.169:5679",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.2.170:5680",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.2.171:5681",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.2.172:5682",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.20.37:10137",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.20.38:10138",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.20.39:10139",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.20.40:10140",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.20.41:10141",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.141:12026",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.142:12027",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
+    {
+      proxy: "137.155.27.143:12028",
+      username: "PJQcG6KTJf",
+      password: "JCwIy9UzNi",
+    },
   ],
 };

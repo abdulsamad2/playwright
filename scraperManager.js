@@ -124,7 +124,7 @@ export class ScraperManager {
     this.cooldownEvents = new Map(); // Events that need to cool down before retry
     this.eventFailureCount = new Map(); // Track failure count per event
     this.eventLastFailureTime = new Map(); // Track last failure time per event
-    this.eventQuarantineUntil = new Map(); // Track quarantine end time per event
+
     // System circuit breaker removed
     this.eventUpdateSchedule = new Map(); // Tracks when each event needs to be updated next
     this.eventFailureCounts = new Map(); // Track consecutive failures per event
@@ -2152,7 +2152,7 @@ export class ScraperManager {
   }
   
   /**
-   * Handle event failure with intelligent quarantine system
+   * Handle event failure with intelligent backoff system
    */
   async handleEventFailure(eventId, retryCount) {
     // Track failure count and timing
@@ -2165,21 +2165,10 @@ export class ScraperManager {
     
     // System circuit breaker removed
     
-    // Implement quarantine for repeatedly failing events
-    if (newFailureCount >= 3) {
-      const quarantineTime = Math.min(newFailureCount * 60000, 300000); // Max 5 minutes
-      this.eventQuarantineUntil.set(eventId, now + quarantineTime);
-      
-      this.logWithTime(
-        `🚫 Event ${eventId} quarantined for ${Math.round(quarantineTime/1000)}s after ${newFailureCount} failures`,
-        "warning"
-      );
-    } else {
-      this.logWithTime(
-        `⚠️ Event ${eventId} failed (${newFailureCount} failures), applying backoff`,
-        "warning"
-      );
-    }
+    this.logWithTime(
+      `⚠️ Event ${eventId} failed (${newFailureCount} failures), applying backoff`,
+      "warning"
+    );
     
     this.incrementFailureCount(eventId);
   }
@@ -2190,11 +2179,10 @@ export class ScraperManager {
   resetEventFailureTracking(eventId) {
     this.eventFailureCount.delete(eventId);
     this.eventLastFailureTime.delete(eventId);
-    this.eventQuarantineUntil.delete(eventId);
   }
 
   /**
-    * Clean up expired quarantines and reset failure counts for old failures
+    * Clean up old failure tracking data
     */
    cleanupFailureTracking() {
      const now = Date.now();
@@ -2208,12 +2196,7 @@ export class ScraperManager {
        }
      }
      
-     // Clean up expired quarantines
-     for (const [eventId, quarantineUntil] of this.eventQuarantineUntil.entries()) {
-       if (now > quarantineUntil) {
-         this.eventQuarantineUntil.delete(eventId);
-       }
-     }
+
      
      // Circuit breaker cleanup removed
    }
@@ -3968,7 +3951,6 @@ export class ScraperManager {
       
       // Calculate priority for each event and filter those needing updates
       const eventsNeedingUpdate = [];
-      const quarantinedEvents = [];
 
       for (const event of events) {
         const eventId = event.Event_ID;
@@ -3986,20 +3968,10 @@ export class ScraperManager {
           continue;
         }
 
-        // INTELLIGENT FAILURE HANDLING: Check if event is in failure quarantine
+        // INTELLIGENT FAILURE HANDLING: Apply exponential backoff for failed events
         const failureCount = this.eventFailureCount.get(eventId) || 0;
         const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
         const timeSinceLastFailure = Date.now() - lastFailureTime;
-        
-        // Quarantine events with multiple recent failures
-        if (failureCount >= 3 && timeSinceLastFailure < 300000) { // 5 minutes quarantine
-          quarantinedEvents.push({
-            eventId,
-            failureCount,
-            quarantineTimeLeft: Math.max(0, 300000 - timeSinceLastFailure)
-          });
-          continue; // Skip quarantined events
-        }
         
         // Apply exponential backoff for failed events
         if (failureCount > 0 && timeSinceLastFailure < (failureCount * 60000)) {
@@ -4055,13 +4027,7 @@ export class ScraperManager {
       // Sort by priority (highest first)
       eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
 
-      // Log quarantined events for monitoring
-      if (quarantinedEvents.length > 0) {
-        this.logWithTime(
-          `🚫 ${quarantinedEvents.length} events in failure quarantine: ${quarantinedEvents.map(e => `${e.eventId}(${e.failureCount} failures, ${Math.round(e.quarantineTimeLeft/1000)}s left)`).slice(0, 5).join(', ')}${quarantinedEvents.length > 5 ? '...' : ''}`,
-          "warning"
-        );
-      }
+
 
       // Return events that need updating, limited to maxEventsToProcess
       const eventsToReturn = eventsNeedingUpdate.map((event) => event.eventId);

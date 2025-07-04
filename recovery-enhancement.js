@@ -1,11 +1,11 @@
 // Enhanced Recovery System for ScraperManager
 // This file contains the optimized recovery methods to be integrated into scraperManager.js
 
-// Recovery Configuration Constants - Optimized for 1000+ events
-const CRITICAL_RECOVERY_INTERVAL = 15000; // 15 seconds - optimized for higher throughput
-const AGGRESSIVE_RECOVERY_INTERVAL = 30000; // 30 seconds - increased frequency
-const STANDARD_RECOVERY_INTERVAL = 60000; // 1 minute for standard recovery
-const AUTO_STOP_CHECK_INTERVAL = 50000; // 1 minute for auto-stop checks
+// Recovery Configuration Constants - Maximized for speed
+const CRITICAL_RECOVERY_INTERVAL = 5000; // 5 seconds - maximum speed recovery
+const AGGRESSIVE_RECOVERY_INTERVAL = 10000; // 10 seconds - increased frequency
+const STANDARD_RECOVERY_INTERVAL = 20000; // 20 seconds for standard recovery
+const AUTO_STOP_CHECK_INTERVAL = 30000; // 30 seconds for auto-stop checks
 
 // Enhanced batch processing for 1000+ events
 const RECOVERY_BATCH_SIZE = 50; // Optimized for higher throughput
@@ -17,9 +17,9 @@ const CRITICAL_THRESHOLD = 120000; // 2 minutes - faster than 3 minutes
 const STALE_THRESHOLD = 180000; // 3 minutes - maximum allowed
 const AUTO_STOP_THRESHOLD = 600000; // 10 minutes - auto-stop threshold
 
-// Enhanced cooldown settings
-const SHORT_RECOVERY_COOLDOWN = 5000; // 5 seconds between recovery attempts
-const LONG_RECOVERY_COOLDOWN = 15000; // 15 seconds for persistent failures
+// Enhanced cooldown settings - optimized for speed
+const SHORT_RECOVERY_COOLDOWN = 2000; // 2 seconds between recovery attempts
+const LONG_RECOVERY_COOLDOWN = 5000; // 5 seconds for persistent failures
 
 /**
  * Start recovery monitoring intervals for aggressive stale event handling
