@@ -2110,7 +2110,7 @@ export class ScraperManager {
           // Check if we should use parallel batch processing for high throughput
           if (eventsToProcess.length >= 9 && consecutiveFailures === 0) {
             // Use parallel batch processing for 9+ events with good success rate
-            const maxParallelBatches = Math.min(3, Math.floor(eventsToProcess.length / 3));
+            const maxParallelBatches = Math.min(5, Math.floor(eventsToProcess.length / 3)); // Increased max parallel batches
             
             this.logWithTime(`Using parallel batch processing for ${eventsToProcess.length} events`, "info");
             
@@ -2138,16 +2138,17 @@ export class ScraperManager {
           }
           
           // Regular batch processing for smaller numbers or when parallel processing isn't suitable
-          const optimalBatchSize = 3;
-          let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
-          
-          // Adaptive batch sizing based on recent success rate
-          if (consecutiveFailures > 2) {
-            // Reduce to single event processing if having issues
-            batchSize = 1;
-            this.logWithTime(`Reducing batch size to 1 due to recent failures`, "warning");
-          } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
-            // Increase to 6 events if we're doing well and have many events
+          const optimalBatchSize = 5; // Increased optimal batch size for better throughput
+            let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
+            
+            // Adaptive batch sizing based on recent success rate
+            if (consecutiveFailures > 2) {
+              // Instead of reducing to 1, maintain a minimum batch size (e.g., 2 or 3) or implement a more sophisticated backoff.
+              // For now, let's ensure it's at least 2.
+              batchSize = Math.max(2, optimalBatchSize);
+              this.logWithTime(`Maintaining minimum batch size of ${batchSize} due to recent failures`, "warning");
+            } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
+              // Increase to 6 events if we're doing well and have many events
             batchSize = Math.min(6, eventsToProcess.length);
             this.logWithTime(`Increasing batch size to ${batchSize} for better throughput`, "info");
           }
@@ -2325,6 +2326,11 @@ export class ScraperManager {
       // Add to cooldown with natural timing
       this.cooldownEvents.set(eventId, now + backoffDelay);
       this.incrementFailureCount(eventId);
+
+      // Invalidate the session for this event to force a new session on retry
+      if (this.sessionManager) {
+        this.sessionManager.invalidateSessionForEvent(eventId);
+      }
       
     } catch (error) {
       this.logWithTime(`Error in graceful failure handling for ${eventId}: ${error.message}`, "error");

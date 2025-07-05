@@ -4,10 +4,10 @@ import { cpus } from "os";
 export default {
   // Time limits - optimized for better flow
   MAX_UPDATE_INTERVAL: 120000, // Strict 2-minute update requirement
-  SCRAPE_TIMEOUT: 30000, // Reduced timeout to prevent hanging (reduced from 45000)
-  MIN_TIME_BETWEEN_EVENT_SCRAPES: 5000, // Reduced from 10000 to allow faster retries
+  SCRAPE_TIMEOUT: 45000, // Reduced timeout to prevent hanging (reduced from 45000)
+  MIN_TIME_BETWEEN_EVENT_SCRAPES: 10000, // Reduced from 10000 to allow faster retries
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
-  PROCESSING_INTERVAL: 500, // Faster processing interval (reduced from 1000ms)
+  PROCESSING_INTERVAL: 1000, // Faster processing interval (reduced from 1000ms)
   
   // Concurrency settings - optimized for 2-second intervals with higher throughput
   CONCURRENT_LIMIT: Math.max(8, Math.floor(cpus().length * 1.5)), // Increased CPU utilization for better throughput

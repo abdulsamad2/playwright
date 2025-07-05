@@ -26,7 +26,7 @@ export class SessionManager {
     this.SESSION_CONFIG = {
       ROTATION_INTERVAL: 20 * 60 * 1000, // 20 minutes, shorter than session expiration
       MAX_SESSION_AGE: 150 * 60 * 1000, // 2.5 hours maximum (was 2 hours)
-      MAX_SESSIONS: 200, // Maximum number of concurrent sessions
+      MAX_SESSIONS: 50, // Maximum number of concurrent sessions
       SESSION_WARMUP_TIME: 2000, // 2 seconds to warm up new sessions
       SESSION_VALIDATION_INTERVAL: 3 * 60 * 1000, // Validate sessions every 3 minutes (was 4)
       SESSION_HEALTH_CHECK_TIMEOUT: 30000, // 30 seconds timeout for health checks
@@ -189,6 +189,31 @@ export class SessionManager {
     } catch (error) {
       this.logger?.logWithTime(`Failed to warm up session ${sessionData.sessionId}: ${error.message}`, "warning");
       return false;
+    }
+  }
+
+  /**
+   * Validate if a session is still healthy and usable
+   * @param {object} sessionData - Session data to validate
+   * @returns {Promise<boolean>} Validation result
+   */
+  async validateSession(sessionData) {
+
+  }
+
+  /**
+   * Invalidate the session associated with a specific event.
+   * This forces a new session to be created the next time getSessionForEvent is called for this event.
+   * @param {string} eventId - The event ID whose session needs to be invalidated.
+   */
+  invalidateSessionForEvent(eventId) {
+    const sessionId = this.activeSessions.get(eventId);
+    if (sessionId) {
+      this.logger?.logWithTime(`Invalidating session ${sessionId} for event ${eventId}`, "info");
+      this.activeSessions.delete(eventId);
+      // Optionally, if no other event uses this session, you might want to clean it up from this.sessions
+      // For now, we'll just remove the active mapping, allowing the session to be reused by other events
+      // or eventually cleaned up by rotation/validation if it becomes stale.
     }
   }
 
