@@ -13,16 +13,21 @@ class ProxyManager {
     this.eventToProxy = new Map(); // Maps eventId to assigned proxy
     this.MAX_EVENTS_PER_PROXY = 1; // Increased from 1 to allow more events per proxy
     this.BATCH_SIZE = 50; // Significantly increased for maximum batch throughput
-    this.proxies = [...proxyArray.proxies];
+    // Share the live array reference (mutated in place by loadProxies). This
+    // avoids a race where ProxyManager is constructed before loadProxies()
+    // resolves and would otherwise hold a permanent snapshot of an empty list.
+    this.proxies = proxyArray.proxies;
     this.lastAssignedProxyIndex = -1;
     this.proxyLastUsed = new Map(); // Track when proxies were last used
-    
-    // Initialize usage counts
+
+    // Lazy-init usage counts: getProxyForEvent reads with `?? new Set()` so
+    // entries are created on first use. Safe whether the array is currently
+    // empty or already populated.
     this.proxies.forEach(proxy => {
-      this.proxyUsage.set(proxy.proxy, new Set());
+      if (!this.proxyUsage.has(proxy.proxy)) this.proxyUsage.set(proxy.proxy, new Set());
     });
-    
-    this.log("ProxyManager initialized with " + this.proxies.length + " proxies");
+
+    this.log("ProxyManager initialized with " + this.proxies.length + " proxies (live reference)");
   }
   
   /**
