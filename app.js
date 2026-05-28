@@ -11,7 +11,6 @@ import eventRoutes from "./routes/eventRoutes.js";
 import statsRoutes from "./routes/statsRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import cookieRefreshRoutes from "./routes/cookieRefreshRoutes.js";
-import adminRoutes from "./routes/adminRoutes.js";
 
 // Import global setup
 import setupGlobals from "./setup.js";
@@ -22,10 +21,10 @@ import { cleanup as cleanupBrowsers, cleanupApiBrowser } from "./browser-cookies
 import { connectRedis, closeRedis } from "./config/redis.js";
 import redisLiveStore from "./helpers/RedisLiveStore.js";
 
-dotenv.config();
+// Proxy loader (MongoDB-backed, replaces hardcoded list)
+import { loadProxies, startProxyRefresh, stopProxyRefresh } from "./helpers/proxy.js";
 
-// Initialize global components (including ProxyManager)
-setupGlobals();
+dotenv.config();
 
 const app = express();
 const initialPort = parseInt(process.env.PORT, 10) || 3000; // Renamed and parsed
@@ -68,6 +67,13 @@ const SKIP_REDIS = process.env.SKIP_REDIS === "true";
     // 1. MongoDB first (RedisLiveStore hydration reads from MongoDB)
     await connectDB();
 
+    // 1b. Load proxies from MongoDB BEFORE setupGlobals (ProxyManager reads them at construction)
+    await loadProxies();
+    startProxyRefresh();
+
+    // 1c. Initialize global components (ProxyManager now sees the loaded list)
+    setupGlobals();
+
     if (SKIP_REDIS) {
       console.log("[Startup] SKIP_REDIS=true — running in MongoDB-only mode (no Redis)");
     } else {
@@ -101,7 +107,6 @@ app.use("/api/scraper", scraperRoutes);
 app.use("/api/events", eventRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/cookies", cookieRefreshRoutes);
-app.use("/api/admin", adminRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -199,6 +204,9 @@ async function gracefulShutdown(signal) {
       // No processes to kill, that's fine
     }
   }
+
+  // 2b. Stop proxy refresh timer
+  stopProxyRefresh();
 
   // 3. Flush pending Redis writes to MongoDB & close Redis
   if (!SKIP_REDIS) {
