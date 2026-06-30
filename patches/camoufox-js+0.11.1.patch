@@ -1,0 +1,18 @@
+diff --git a/node_modules/camoufox-js/dist/ip.js b/node_modules/camoufox-js/dist/ip.js
+index 03e3dbd..10fe95d 100644
+--- a/node_modules/camoufox-js/dist/ip.js
++++ b/node_modules/camoufox-js/dist/ip.js
+@@ -57,10 +57,10 @@ export function validateIP(ip) {
+ }
+ export async function publicIP(proxy) {
+     const URLS = [
+-        "https://api.ipify.org",
+-        "https://checkip.amazonaws.com",
++        "http://api.ipify.org",
++        "http://checkip.amazonaws.com",
+         "https://ipinfo.io/ip",
+-        "https://icanhazip.com",
++        "http://icanhazip.com",
+         "https://ifconfig.co/ip",
+         "https://ipecho.net/plain",
+     ];

@@ -11,8 +11,11 @@ export default {
   
   // Concurrency settings — optimized for 30 PM2 instances sharing 1000+ events
   // Each instance handles ~33 events; 3 pool pages × 10 events/batch = 30 events per cycle
-  CONCURRENT_LIMIT: Math.max(40, Math.floor(cpus().length * 5)), // Lower per-instance — 30 instances total
-  BATCH_SIZE: 30, // 3 pool pages × 10 events/batch = all pages utilized in parallel
+  // Dialed DOWN for the per-proxy pool: only ~3 proxies run at once, so 90 concurrent
+  // hammered + burned them. Keep concurrency near pool capacity. Tune via env without
+  // code edits, e.g. CONCURRENT_LIMIT=10 BATCH_SIZE=10.
+  CONCURRENT_LIMIT: parseInt(process.env.CONCURRENT_LIMIT, 2) || 3,
+  BATCH_SIZE: parseInt(process.env.BATCH_SIZE, 2) || 1,
   
   // Retry settings - optimized for resilience
   MAX_RETRIES: 8, // Increased from 5 for better persistence

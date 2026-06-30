@@ -2,9 +2,18 @@ import {devices } from "patchright";
 import fs from "fs/promises";
 import path from "path";
 import { chromium } from 'patchright'
+import { Camoufox } from "camoufox-js";
 
 import { BrowserFingerprint } from "./browserFingerprint.js";
 import proxyArray from "./helpers/proxy.js";
+
+// Browser engine: "camoufox" (stealth Firefox — passes EPS HEADLESS, no xvfb) or
+// "chrome" (real headed Chrome via patchright — needs a display/xvfb). Camoufox is
+// the default because it's the only thing that beats EPS's headless detection.
+const BROWSER_ENGINE = (process.env.BROWSER_ENGINE || "camoufox").toLowerCase();
+const USE_CAMOUFOX = BROWSER_ENGINE === "camoufox";
+// NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
+// build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
 const iphone13 = devices["iPhone 13"];
 
@@ -28,6 +37,14 @@ const CONFIG = {
 
 let browser = null;
 
+// DIRECT_MODE: run with NO proxy — scrape straight from this host's (clean) IP.
+// A clean residential IP + headed real Chrome returns 200 with full facet data; the
+// proxies were the CAUSE of the blocks (their IPs were burned), not the fix. Set
+// DIRECT_MODE=1 (or NO_PROXY=1) to bypass all proxy logic. NOTE: a single IP has an
+// EPS rate limit — keep volume moderate (throttle / longer intervals) or it will get
+// flagged like any other IP. Good for low/medium volume; high volume needs many IPs.
+const DIRECT_MODE = process.env.DIRECT_MODE === "1" || process.env.NO_PROXY === "1";
+
 // Tri-state cache for whether the real Chrome channel is usable on this host.
 // null = not yet attempted, true = available, false = fall back to bundled Chromium.
 let _chromeChannelOk = null;
@@ -44,6 +61,26 @@ let _chromeChannelOk = null;
  * to force the bundled build.
  */
 async function launchChromium(launchOptions = {}) {
+  // CAMOUFOX (default): stealth Firefox that passes EPS HEADLESS (Chrome headless is
+  // blocked by EPS; Camoufox isn't). Ignores Chromium args; takes its own options.
+  if (USE_CAMOUFOX) {
+    const opts = {
+      // Camoufox passes EPS HEADLESS — default true regardless of the Chrome-oriented
+      // launchOptions.headless. Override to headed for debugging with CAMOUFOX_HEADED=1.
+      headless: process.env.CAMOUFOX_HEADED !== "1",
+      geoip: true,        // align timezone/locale to the (proxy) IP
+      humanize: true,     // human-like cursor movement
+    };
+    if (launchOptions.proxy) opts.proxy = launchOptions.proxy; // {server,username,password}
+    if (_chromeChannelOk === null) {
+      _chromeChannelOk = true;
+      console.log(`[browser] Using Camoufox (stealth Firefox, headless=${opts.headless}) — EPS-safe`);
+    }
+    return await Camoufox(opts);
+  }
+
+  // CHROME engine: real installed Google Chrome (channel:'chrome'), must be HEADED on
+  // a server (xvfb). EPS blocks bundled Chromium + all headless, so this is fallback.
   const channel = (process.env.BROWSER_CHANNEL ?? "chrome").trim();
   const wantChannel = channel && channel !== "chromium" && channel !== "none";
 
@@ -66,6 +103,28 @@ async function launchChromium(launchOptions = {}) {
   }
 
   return await chromium.launch(launchOptions);
+}
+
+/**
+ * Make a TM API GET (facets / map) using the browser CONTEXT's request client.
+ * This carries the context's cookies + a browser-consistent TLS, but is NOT a
+ * document fetch — so it bypasses CORS entirely (required for Firefox/Camoufox,
+ * which has no --disable-web-security). Works for both engines.
+ * Returns { success, status, data?, error? }.
+ */
+async function apiGet(page, url, headers = {}) {
+  try {
+    const resp = await page.context().request.get(url, { headers, timeout: 20000 });
+    const status = resp.status();
+    if (status < 200 || status >= 400) {
+      return { success: false, status, error: `HTTP ${status}` };
+    }
+    const data = await resp.json().catch(() => null);
+    if (data == null) return { success: false, status, error: "Non-JSON / empty body" };
+    return { success: true, status, data };
+  } catch (e) {
+    return { success: false, status: 0, error: e.message };
+  }
 }
 
 /**
@@ -261,123 +320,45 @@ async function initBrowser(proxy) {
         } catch (error) {
           throw new Error(`Invalid proxy configuration, cannot refresh cookies without proxy: ${error.message}`);
         }
-      } else {
+      } else if (!DIRECT_MODE) {
         throw new Error('Cannot refresh cookies without a valid proxy');
-      }
+      } // DIRECT_MODE: no proxy needed — refresh straight from this host's IP.
 
       // Launch browser (real Chrome channel when available — EPS blocks bundled Chromium)
             browser = await launchChromium(launchOptions);
     }
     
-    // Create new context with enhanced fingerprinting and stealth
+    // Create context — clean, CONSISTENT real-Chrome desktop fingerprint.
+    // Previously this emulated an iPhone *Safari* UA on the *Chrome* engine and then
+    // hand-faked window.chrome / navigator.plugins — a glaring mismatch EPS flags
+    // (Safari UA but Chrome-only objects present). With real Chrome (channel:'chrome')
+    // + patchright, the native fingerprint is already genuine and self-consistent, so
+    // we override NOTHING (no UA, no headers, no init scripts). Just locale/tz/geo.
+    const res = [
+      { w: 1920, h: 1080 }, { w: 1680, h: 1050 }, { w: 1536, h: 864 }, { w: 1440, h: 900 },
+    ][Math.floor(Math.random() * 4)];
     context = await browser.newContext({
-      ...iphone13,
-      userAgent: getRealisticIphoneUserAgent(),
       locale: location.locale,
-      colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
       timezoneId: location.timezone,
       geolocation: {
         latitude: location.latitude,
         longitude: location.longitude,
         accuracy: 100 * Math.random() + 50,
       },
-      permissions: [
-        "geolocation",
-        "notifications",
-        "microphone",
-        "camera",
-      ],
-      deviceScaleFactor: 2 + Math.random() * 0.5,
-      hasTouch: true,
-      isMobile: true,
+      permissions: ["geolocation", "notifications"],
+      viewport: USE_CAMOUFOX ? null : { width: res.w, height: res.h },
       javaScriptEnabled: true,
       acceptDownloads: true,
       ignoreHTTPSErrors: true,
       bypassCSP: true,
-      extraHTTPHeaders: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Accept-Language": `${location.locale},en;q=0.9`,
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "DNT": Math.random() > 0.5 ? "1" : "0",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0"
-      },
-      viewport: {
-        width: [375, 390, 414][Math.floor(Math.random() * 3)],
-        height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
-      }
     });
     
-    // Add stealth scripts to mask automation (Patchright compatible)
-    await context.addInitScript(() => {
-      // Override navigator.webdriver
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined
-      });
-      
-      // Remove automation indicators
-      try {
-        delete navigator.__proto__.webdriver;
-      } catch (e) {}
-      
-      // Override plugins to look real
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5]
-      });
-      
-      // Override languages
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
-      });
-      
-      // Mock chrome object
-      window.chrome = {
-        runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
-        app: {}
-      };
-      
-      // Override permissions
-      const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-          Promise.resolve({ state: Notification.permission }) :
-          originalQuery(parameters)
-      );
-      
-      // Add realistic connection info
-      Object.defineProperty(navigator, 'connection', {
-        get: () => ({
-          effectiveType: '4g',
-          rtt: 50,
-          downlink: 10,
-          saveData: false
-        })
-      });
-      
-      // Mock battery API
-      Object.defineProperty(navigator, 'getBattery', {
-        get: () => async () => ({
-          charging: Math.random() > 0.5,
-          chargingTime: 0,
-          dischargingTime: Infinity,
-          level: 0.5 + Math.random() * 0.5
-        })
-      });
-      
-      // Mock touch events for mobile
-      window.ontouchstart = null;
-      document.ontouchstart = null;
-      
-      // Add realistic screen properties
-      Object.defineProperty(screen, 'availWidth', { get: () => window.innerWidth });
-      Object.defineProperty(screen, 'availHeight', { get: () => window.innerHeight });
-    });
+    // No manual stealth init scripts. patchright already neutralizes the automation
+    // tells (navigator.webdriver etc.), and real Chrome provides genuine, consistent
+    // navigator.plugins / languages / window.chrome / connection / battery / screen.
+    // The old hand-rolled fakes (plugins:[1,2,3,4,5], a fabricated window.chrome —
+    // which under the former Safari UA was an outright contradiction) were detectable
+    // inconsistencies, so they are removed in favor of the real browser's own values.
     
     // Create a new page and simulate human behavior
     const page = await context.newPage();
@@ -641,7 +622,7 @@ async function loadCookiesFromFile() {
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
 async function refreshCookies(eventId, proxy = null) {
-  if (!proxy || !proxy.proxy) {
+  if ((!proxy || !proxy.proxy) && !DIRECT_MODE) {
     throw new Error('Cannot refresh cookies without a valid proxy');
   }
   let retryCount = 0;
@@ -713,10 +694,28 @@ async function refreshCookies(eventId, proxy = null) {
             throw initError || new Error("Failed to initialize browser");
           }
 
-          // Navigate to event page
+          // STEP 1 — land on the HOMEPAGE first (like a real visitor), pick up the
+          // initial seed cookies, dwell + interact, THEN navigate to the event page
+          // carrying those cookies. Going straight to /event cold looks more bot-like
+          // and skips the cookies TM sets on the landing page.
+          console.log('Seeding cookies from homepage first...');
+          try {
+            await page.goto('https://www.ticketmaster.com/', {
+              waitUntil: 'domcontentloaded',
+              timeout: CONFIG.PAGE_TIMEOUT,
+            });
+            await page.waitForTimeout(2000 + Math.random() * 2500);
+            await simulateMobileInteractions(page);
+            const homeCookies = (await page.context().cookies()).filter(c => c.domain.includes('ticketmaster'));
+            console.log(`Homepage seeded ${homeCookies.length} cookies: [${homeCookies.map(c => c.name).join(', ')}]`);
+          } catch (e) {
+            console.warn(`Homepage seed nav failed (continuing to event): ${e.message}`);
+          }
+
+          // STEP 2 — now navigate to the event page (carries the homepage cookies)
           const url = `https://www.ticketmaster.com/event/${eventId}`;
           console.log(`Navigating to ${url}`);
-          
+
           await page.goto(url, {
             waitUntil: "domcontentloaded",
             timeout: CONFIG.PAGE_TIMEOUT
@@ -922,9 +921,13 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
   try {
     const location = getRandomLocation();
     const fingerprint = BrowserFingerprint.generate('desktop');
-    
+
     const launchOptions = {
-      headless: true,
+      // EPS blocks HEADLESS Chrome (event page 403, cookies never mint) even with
+      // channel:'chrome'. The cookie-refresh path runs headed and works; the scrape
+      // API context MUST run headed too. On a headless server, run under a virtual
+      // display (xvfb-run). Verified: headed=200/1352, headless=403 on the same IP.
+      headless: false,
       args: [
         '--disable-blink-features=AutomationControlled',
         '--disable-features=IsolateOrigins,site-per-process',
@@ -979,44 +982,36 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
     // Launch browser for API requests (real Chrome channel when available — EPS blocks bundled Chromium)
     apiBrowser = await launchChromium(launchOptions);
     
-    // Create desktop context (better for API requests)
+    // Create desktop context (better for API requests).
+    // NO userAgent override: let real Chrome present its native UA + matching
+    // Sec-CH-UA client hints + navigator.platform. A hardcoded Windows/Chrome-133
+    // string on a Mac/Linux/Chrome-149 binary is a fingerprint mismatch EPS detects.
     apiContext = await apiBrowser.newContext({
-      userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36`,
       locale: location.locale,
       timezoneId: location.timezone,
-      viewport: { width: 1920, height: 1080 },
-      deviceScaleFactor: 1,
-      hasTouch: false,
-      isMobile: false,
+      viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 },
+      // deviceScaleFactor/hasTouch/isMobile are invalid with viewport:null (Firefox);
+      // Camoufox manages its own window + device metrics, so omit them there.
+      ...(USE_CAMOUFOX ? {} : { deviceScaleFactor: 1, hasTouch: false, isMobile: false }),
       javaScriptEnabled: true,
       ignoreHTTPSErrors: true,
       bypassCSP: true,
-      extraHTTPHeaders: {
+      // Let Camoufox/Firefox send its own native headers; the explicit Accept:json
+      // here would wrongly tag page navigations. Only set for Chrome.
+      ...(USE_CAMOUFOX ? {} : { extraHTTPHeaders: {
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-      }
+      } })
     });
 
-    // Add stealth scripts to mask automation indicators
-    await apiContext.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      try { delete navigator.__proto__.webdriver; } catch (e) {}
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
-      const origQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (p) => (
-        p.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission })
-          : origQuery(p)
-      );
-      Object.defineProperty(navigator, 'connection', {
-        get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false })
-      });
-    });
+    // NO manual stealth init scripts here. patchright already masks automation
+    // (webdriver, etc.) natively, and real Chrome supplies real plugins/chrome/
+    // connection objects. The old fakes (plugins:[1,2,3,4,5], a hand-rolled
+    // window.chrome, webdriver override) are detectable INCONSISTENCIES against a
+    // real headed Chrome — removing them makes the fingerprint genuinely real.
 
     // Add cookies if provided
     if (cookies && cookies.length > 0) {
@@ -1089,39 +1084,8 @@ async function browserApiRequest(url, headers = {}, proxy = null, cookies = null
       throw new Error('Failed to get API browser context');
     }
 
-    // Make request using page.evaluate with fetch (uses browser's TLS stack)
-    const result = await page.evaluate(async ({ url, headers }) => {
-      try {
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: headers,
-          credentials: 'include',
-          mode: 'cors',
-        });
-        
-        const status = response.status;
-        const statusText = response.statusText;
-        
-        if (!response.ok) {
-          return { 
-            success: false, 
-            status, 
-            statusText,
-            error: `HTTP ${status}: ${statusText}` 
-          };
-        }
-        
-        const data = await response.json();
-        return { success: true, data, status };
-        
-      } catch (error) {
-        return { 
-          success: false, 
-          error: error.message,
-          status: 0 
-        };
-      }
-    }, { url, headers });
+    // Make request via the context request client (bypasses CORS; carries cookies).
+    const result = await apiGet(page, url, headers);
 
     if (!result.success) {
       const error = new Error(result.error || `Request failed with status ${result.status}`);
@@ -1271,23 +1235,11 @@ class RequestBatcher {
     }
 
     try {
-      const results = await page.evaluate(async (reqs) => {
-        return Promise.all(reqs.map(async ({ url, headers }) => {
-          try {
-            const r = await fetch(url, {
-              method: 'GET',
-              headers,
-              credentials: 'include',
-              mode: 'cors'
-            });
-            if (!r.ok) return { success: false, status: r.status, error: `HTTP ${r.status}` };
-            const d = await r.json();
-            return { success: true, data: d, status: r.status };
-          } catch (e) {
-            return { success: false, error: e.message, status: 0 };
-          }
-        }));
-      }, allRequests);
+      // Fetch all requests via the page's CONTEXT request client (bypasses CORS;
+      // required for Firefox/Camoufox, works for Chrome too). Carries the context cookies.
+      const results = await Promise.all(
+        allRequests.map(({ url, headers }) => apiGet(page, url, headers))
+      );
 
       this.pool.release(page);
 
@@ -1365,6 +1317,96 @@ class BrowserPagePool {
     this._initEventId = null;
     // Deferred requests queue (filled during restart)
     this._deferredQueue = [];
+    // Per-page proxy isolation: each pool page lives in its OWN context with its
+    // OWN proxy, so a batch's fetches spread across N IPs instead of hammering one.
+    this._contexts = [];                 // all contexts (for cleanup)
+    this._pageMeta = new Map();          // page -> { context, proxy }
+    this._usedProxies = new Set();       // proxy strings currently assigned to a page
+  }
+
+  // Pick a proxy not already assigned to another pool page (falls back to any).
+  _pickUnusedProxy() {
+    const all = (proxyArray && proxyArray.proxies) || [];
+    if (!all.length) return null;
+    // Key on a unique id when present (IPRoyal sticky sessions all share one
+    // host:port but differ by session id); fall back to host:port for static lists.
+    const keyOf = (p) => p.id || p.proxy;
+    const free = all.filter((p) => p && p.proxy && !this._usedProxies.has(keyOf(p)));
+    const pool = free.length ? free : all;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  // Create one pool page in its OWN context bound to its OWN proxy, seeded on an
+  // event page and validated with a real facets call. Returns {page,context,proxy}
+  // or null if no working proxy could be found within `attempts`.
+  async _createProxyPage(eventId, attempts = 4) {
+    const seedId = eventId || this._initEventId;
+    const tries = DIRECT_MODE ? 1 : attempts;
+    for (let a = 0; a < tries; a++) {
+      // DIRECT_MODE: no proxy — page goes straight out this host's IP.
+      const proxy = DIRECT_MODE ? null : this._pickUnusedProxy();
+      if (!DIRECT_MODE && !proxy) return null;
+      let context = null;
+      try {
+        const ctxOpts = {
+          viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 },
+          ignoreHTTPSErrors: true,
+          bypassCSP: true,
+        };
+        if (proxy) {
+          const [host, portStr] = String(proxy.proxy).split(':');
+          ctxOpts.proxy = { server: `http://${host}:${parseInt(portStr, 10) || 80}`, username: proxy.username, password: proxy.password };
+        }
+        context = await this._browser.newContext(ctxOpts);
+        const page = await context.newPage();
+        // Warm up like a real visitor: homepage first (seed cookies), then the event
+        // page carrying them — instead of hitting /event cold.
+        await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+        await page.waitForTimeout(1500 + Math.random() * 1500);
+        const url = seedId ? `https://www.ticketmaster.com/event/${seedId}` : 'https://www.ticketmaster.com/';
+        let status = 0;
+        for (let r = 0; r < 2; r++) {
+          const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+          status = resp ? resp.status() : 0;
+          if (status === 200) break;
+          await new Promise((t) => setTimeout(t, 1500));
+        }
+        // Wait for the EPS `tmpt` token to mint BEFORE validating. Through a
+        // residential proxy the challenge JS needs time (~6-18s); without tmpt the
+        // facets call always 403s — and the event PAGE may stay 401 even when the
+        // facets API will succeed, so tmpt (not page status) is the real signal.
+        if (seedId) {
+          for (let w = 0; w < 8; w++) {
+            const names = (await context.cookies()).map((c) => c.name);
+            if (names.includes('tmpt')) break;
+            await new Promise((t) => setTimeout(t, 1500));
+          }
+        }
+        // True validation: does a real facets call succeed? Use the FULL header set
+        // the scraper sends — minimal headers return 400 even on a GOOD session, which
+        // would wrongly reject working IPs. tmps-correlation-id + x-request-id flip it.
+        let facetStatus = 0;
+        if (seedId) {
+          const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+          const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
+          facetStatus = vr.status || 0;
+        }
+        const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
+        if (facetStatus === 200 || (!seedId && status === 200)) {
+          if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
+          this._contexts.push(context);
+          this._pageMeta.set(page, { context, proxy });
+          console.log(`[PagePool] page bound to ${label} (page=${status}, facets=${facetStatus}) ✓`);
+          return { page, context, proxy };
+        }
+        console.log(`[PagePool] ${label} blocked (page=${status}, facets=${facetStatus}) — ${DIRECT_MODE ? 'retrying' : 'trying another'}`);
+        await context.close().catch(() => {});
+      } catch (e) {
+        console.warn(`[PagePool] ${proxy ? proxy.proxy : 'direct'} setup failed: ${e.message}`);
+        if (context) await context.close().catch(() => {});
+      }
+    }
+    return null;
   }
 
   async init(proxy = null, cookies = null, eventId = null) {
@@ -1389,12 +1431,20 @@ class BrowserPagePool {
       await this.cleanup();
     }
 
+    // DIRECT_MODE: ignore any passed proxy — seed + all pages go out this host's IP.
+    if (DIRECT_MODE) proxy = null;
+
     // Save init params for browser restart
     this._initProxy = proxy;
     this._initCookies = cookies;
     this._initEventId = eventId;
 
-    console.log(`[PagePool] Initial proxy: ${proxy?.proxy || 'none'}`);
+    // Reset per-page proxy tracking for this (re)init
+    this._contexts = [];
+    this._pageMeta = new Map();
+    this._usedProxies = new Set();
+
+    console.log(`[PagePool] Initial proxy: ${DIRECT_MODE ? 'DIRECT (no proxy)' : (proxy?.proxy || 'none')}`);
 
     // initApiBrowserContext launches browser, creates context with stealth scripts,
     // creates an apiPage, and navigates it to ticketmaster.com — this seeds initial
@@ -1430,11 +1480,17 @@ class BrowserPagePool {
     const seedPage = await context.newPage();
     try {
       await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await new Promise(r => setTimeout(r, 2000));
+      // Wait for the EPS `tmpt` token to mint (IP-bound; residential hop needs time).
+      let hasTmpt = false;
+      for (let w = 0; w < 12; w++) {
+        const names = (await context.cookies()).map((c) => c.name);
+        if (names.includes('tmpt')) { hasTmpt = true; break; }
+        await new Promise((t) => setTimeout(t, 1500));
+      }
 
       const allCookies = await context.cookies();
       const tmCookies = allCookies.filter(c => c.domain.includes('ticketmaster'));
-      console.log(`[PagePool] ${tmCookies.length} TM cookies seeded`);
+      console.log(`[PagePool] ${tmCookies.length} TM cookies seeded (tmpt=${hasTmpt ? 'YES' : 'no'})`);
 
       if (tmCookies.length === 0) {
         console.warn('[PagePool] WARNING: No TM cookies found after page load!');
@@ -1445,29 +1501,37 @@ class BrowserPagePool {
       throw e;
     }
 
-    // The seed page becomes pool page #1
+    // The seed page becomes pool page #1 (on the init proxy / context #1)
     this.pages.push(seedPage);
     this.available.push(seedPage);
+    this._contexts.push(context);
+    this._pageMeta.set(seedPage, { context, proxy });
+    if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
 
-    // Create remaining pool pages (they share cookies via context)
-    for (let i = 1; i < this.size; i++) {
-      try {
-        const page = await context.newPage();
-        // Navigate to about:blank is fine — cookies are in the context, not the page
-        // But navigate to TM domain so fetch origin is correct
-        await page.goto('https://www.ticketmaster.com/', {
-          waitUntil: 'domcontentloaded',
-          timeout: 30000
-        });
-        this.pages.push(page);
-        this.available.push(page);
-      } catch (e) {
-        console.warn(`[PagePool] Extra page ${i + 1} creation failed: ${e.message}`);
+    // Create remaining pool pages — EACH in its OWN context bound to its OWN
+    // proxy, so the batcher spreads a batch's fetches across many IPs instead of
+    // hammering one (EPS rate-flags a single hammered IP). Each candidate proxy
+    // is validated with a real facets call before the page joins the pool.
+    // Validate candidate pages in PARALLEL — with rotating residential sessions
+    // ~60% are flagged, so sequential validation (each waiting on tmpt + facets)
+    // makes init take minutes. Filling concurrently cuts that to one round.
+    const fillResults = await Promise.all(
+      Array.from({ length: this.size - 1 }, () => this._createProxyPage(eventId))
+    );
+    for (const made of fillResults) {
+      if (made) {
+        this.pages.push(made.page);
+        this.available.push(made.page);
+      } else {
+        console.warn(`[PagePool] Could not bind a working proxy for a page`);
       }
     }
+    console.log(`[PagePool] ${this.pages.length}/${this.size} pages ready, each on its own proxy (${this._usedProxies.size} distinct IPs)`);
 
     // Batcher: 20 events/batch × pages, flush every 100ms
-    this._batcher = new RequestBatcher(this, 20, 100);
+    // Smaller batches = smaller per-IP burst (6 events = 12 fetches/proxy/batch
+    // instead of 40) so EPS's per-IP rate limit isn't tripped on residential IPs.
+    this._batcher = new RequestBatcher(this, 6, 150);
 
     this._lastCookieRefresh = Date.now();
     this._consecutiveErrors = 0;
@@ -1554,22 +1618,26 @@ class BrowserPagePool {
       apiContext = null;
       apiPage = null;
 
-      // 6. Pick a fresh random proxy for the new browser
+      // 6. Reset per-page proxy tracking + pick a fresh proxy for context #1
+      this._contexts = [];
+      this._pageMeta = new Map();
+      this._usedProxies = new Set();
       const allProxies = proxyArray.proxies;
-      const newProxy = allProxies.length > 0
-        ? allProxies[Math.floor(Math.random() * allProxies.length)]
-        : this._initProxy;
+      const newProxy = DIRECT_MODE
+        ? null
+        : (allProxies.length > 0
+            ? allProxies[Math.floor(Math.random() * allProxies.length)]
+            : this._initProxy);
       this._initProxy = newProxy;
-      console.log(`[PagePool] Rotated proxy to ${newProxy?.proxy || 'none'}`);
+      console.log(`[PagePool] Rotated context #1 proxy to ${DIRECT_MODE ? 'DIRECT (no proxy)' : (newProxy?.proxy || 'none')}`);
 
-      // 7. Relaunch browser + context + pages
+      // 7. Relaunch browser + context #1
       const { browser, context } = await initApiBrowserContext(newProxy, this._initCookies);
       this._browser = browser;
       this._context = context;
 
-      // Seed cookies with one page navigation
-      const seedPage = await context.newPage();
-      let seedUrl = 'https://www.ticketmaster.com/';
+      // Determine a seed event (for cookie minting + per-proxy validation)
+      let seedEventId = this._initEventId || null;
       try {
         const { Event } = await import('./models/index.js');
         const randomEvents = await Event.aggregate([
@@ -1577,11 +1645,14 @@ class BrowserPagePool {
           { $sample: { size: 1 } },
           { $project: { Event_ID: 1 } }
         ]);
-        if (randomEvents?.length > 0) {
-          seedUrl = `https://www.ticketmaster.com/event/${randomEvents[0].Event_ID}`;
-        }
+        if (randomEvents?.length > 0) seedEventId = randomEvents[0].Event_ID;
       } catch (e) { /* fall back to homepage */ }
+      const seedUrl = seedEventId
+        ? `https://www.ticketmaster.com/event/${seedEventId}`
+        : 'https://www.ticketmaster.com/';
 
+      // Seed cookies on page #1 (context #1 / newProxy)
+      const seedPage = await context.newPage();
       await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await new Promise(r => setTimeout(r, 2000));
 
@@ -1590,24 +1661,25 @@ class BrowserPagePool {
 
       this.pages.push(seedPage);
       this.available.push(seedPage);
+      this._contexts.push(context);
+      this._pageMeta.set(seedPage, { context, proxy: newProxy });
+      if (newProxy?.proxy) this._usedProxies.add(newProxy.proxy);
 
-      // Create remaining pool pages
+      // Remaining pool pages — each on its OWN validated proxy
       for (let i = 1; i < this.size; i++) {
-        try {
-          const page = await context.newPage();
-          await page.goto('https://www.ticketmaster.com/', {
-            waitUntil: 'domcontentloaded',
-            timeout: 30000
-          });
-          this.pages.push(page);
-          this.available.push(page);
-        } catch (e) {
-          console.warn(`[PagePool] Restart: extra page ${i + 1} failed: ${e.message}`);
+        const made = await this._createProxyPage(seedEventId);
+        if (made) {
+          this.pages.push(made.page);
+          this.available.push(made.page);
+        } else {
+          console.warn(`[PagePool] Restart: could not bind a working proxy for page ${i + 1}`);
         }
       }
 
       // 7. Create new batcher and mark ready
-      this._batcher = new RequestBatcher(this, 20, 100);
+      // Smaller batches = smaller per-IP burst (6 events = 12 fetches/proxy/batch
+    // instead of 40) so EPS's per-IP rate limit isn't tripped on residential IPs.
+    this._batcher = new RequestBatcher(this, 6, 150);
       this._lastCookieRefresh = Date.now();
       this._consecutiveErrors = 0;
       this._requestsSinceRotation = 0;
@@ -1733,24 +1805,23 @@ class BrowserPagePool {
     idx = this.available.indexOf(page);
     if (idx !== -1) this.available.splice(idx, 1);
 
-    // Create replacement page and navigate before adding to pool
-    if (this._context) {
-      this._context.newPage().then(async (p) => {
-        try {
-          await p.goto('https://www.ticketmaster.com/', {
-            waitUntil: 'domcontentloaded',
-            timeout: 45000
-          });
-          if (p.url().includes('ticketmaster.com')) {
-            this.pages.push(p);
-            this.release(p);
-            console.log(`[PagePool] Replaced dead page, pool: ${this.pages.length}`);
-          } else {
-            p.close().catch(() => {});
-          }
-        } catch (e) {
-          console.warn(`[PagePool] Replacement page failed: ${e.message}`);
-          p.close().catch(() => {});
+    // Tear down this page's OWN context and free its proxy
+    const meta = this._pageMeta.get(page);
+    if (meta) {
+      this._pageMeta.delete(page);
+      if (meta.proxy?.proxy) this._usedProxies.delete(meta.proxy.proxy);
+      const ci = this._contexts.indexOf(meta.context);
+      if (ci !== -1) this._contexts.splice(ci, 1);
+      meta.context.close().catch(() => {});
+    }
+
+    // Replace it with a fresh page on a NEW validated proxy (best-effort)
+    if (this._browser?.isConnected() && !this._isRestarting && this.pages.length < this.size) {
+      this._createProxyPage(this._initEventId).then((made) => {
+        if (made) {
+          this.pages.push(made.page);
+          this.release(made.page);
+          console.log(`[PagePool] Replaced dead page on fresh proxy ${made.proxy.proxy}, pool: ${this.pages.length}`);
         }
       }).catch(() => {});
     }
@@ -1778,8 +1849,12 @@ class BrowserPagePool {
     this._deferredQueue = [];
 
     await Promise.allSettled(this.pages.map(p => p.close().catch(() => {})));
+    await Promise.allSettled(this._contexts.map(c => c.close().catch(() => {})));
     this.pages = [];
     this.available = [];
+    this._contexts = [];
+    this._pageMeta = new Map();
+    this._usedProxies = new Set();
     this.initialized = false;
     this._initPromise = null;
     this._isRestarting = false;

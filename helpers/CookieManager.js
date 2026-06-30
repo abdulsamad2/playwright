@@ -57,24 +57,29 @@ export class CookieManager {
   };
 
   // Essential cookies that must be present
+  // Updated 2026-06-30 to TM's CURRENT cookie names, verified against a real browser
+  // on an event page. The OLD names (TMPS / TM_TKTS / SESSION / audit / CMPS / CMID /
+  // MUID / au_id / aud / tmTrackID / TapAd_DID / uid) are NO LONGER set by TM — only
+  // TMUO survived. The session/anti-bot token is now `tmpt`; TMUO/SID/tmp_id identify
+  // the TM session.
   static ESSENTIAL_COOKIES = [
+    "tmpt",
     "TMUO",
-    "TMPS",
-    "TM_TKTS",
-    "SESSION",
-    "audit",
-    "CMPS",
-    "CMID",
-    "MUID",
-    "au_id",
-    "aud",
-    "tmTrackID",
-    "TapAd_DID",
-    "uid",
+    "SID",
+    "tmp_id",
+    "tmdl",
+    "NDMA",
+    "LANGUAGE",
+    "seerid",
+    "seerses",
+    "TM_PIXEL",
+    "ARTIST",
+    "VENUE",
   ];
 
-  // Authentication cookies that are critical
-  static AUTH_COOKIES = ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"];
+  // Cookies that indicate a valid TM session. `tmpt` is the EPS session token (the
+  // single most important one); tmp_id/TMUO/SID accompany an established session.
+  static AUTH_COOKIES = ["tmpt", "tmp_id", "TMUO", "SID"];
 
   /**
    * Get headers for an event, using session management
@@ -325,7 +330,9 @@ export class CookieManager {
       (name) => cookieMap.has(name) && cookieMap.get(name).length > 0
     );
 
-    return authCookiesPresent.length >= 3;
+    // A valid session has at least `tmpt` + `tmp_id` (a real browser also carries
+    // TMUO/SID). Old code required >=3 of names TM no longer sets, so it ALWAYS failed.
+    return authCookiesPresent.length >= 2;
   }
 
   async saveCookiesToFile(cookies) {
