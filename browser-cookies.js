@@ -68,7 +68,6 @@ async function launchChromium(launchOptions = {}) {
       // Camoufox passes EPS HEADLESS — default true regardless of the Chrome-oriented
       // launchOptions.headless. Override to headed for debugging with CAMOUFOX_HEADED=1.
       headless: process.env.CAMOUFOX_HEADED !== "1",
-      geoip: true,        // align timezone/locale to the (proxy) IP
       humanize: true,     // human-like cursor movement
     };
     if (launchOptions.proxy) opts.proxy = launchOptions.proxy; // {server,username,password}
@@ -76,7 +75,24 @@ async function launchChromium(launchOptions = {}) {
       _chromeChannelOk = true;
       console.log(`[browser] Using Camoufox (stealth Firefox, headless=${opts.headless}) — EPS-safe`);
     }
-    return await Camoufox(opts);
+    // geoip aligns timezone/locale to the proxy IP (better stealth) — but Camoufox
+    // fetches the proxy's public IP at launch to do it, and that lookup fails on
+    // hosts/networks that can't reach the IP endpoints (e.g. cloud egress through a
+    // residential proxy), ABORTING the whole launch. So try with geoip, and if the
+    // lookup fails, fall back to launching without it. CAMOUFOX_GEOIP=0 forces off.
+    if (process.env.CAMOUFOX_GEOIP === "0") {
+      return await Camoufox({ ...opts, geoip: false });
+    }
+    try {
+      return await Camoufox({ ...opts, geoip: true });
+    } catch (e) {
+      const msg = e?.message || "";
+      if (/public proxy IP|geoip|IP address/i.test(msg)) {
+        console.warn(`[browser] geoip IP-lookup failed (${msg.slice(0, 60)}) — relaunching without geoip`);
+        return await Camoufox({ ...opts, geoip: false });
+      }
+      throw e;
+    }
   }
 
   // CHROME engine: real installed Google Chrome (channel:'chrome'), must be HEADED on
