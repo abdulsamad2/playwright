@@ -1894,9 +1894,10 @@ class BrowserPagePool {
   }
 }
 
-// Global page pool instance — 3 pages for parallel batching
-// 30 PM2 instances × 3 pages = 90 pages total, ~33 events/instance
-const browserPagePool = new BrowserPagePool(3);
+// Global page pool instance — each page = its own context + its own proxy, so
+// more pages = more proxies scraping in parallel = higher throughput. Default 3;
+// raise on big boxes with rotating proxies via POOL_SIZE (e.g. POOL_SIZE=10).
+const browserPagePool = new BrowserPagePool(parseInt(process.env.POOL_SIZE, 10) || 3);
 
 /**
  * Clean up browser resources

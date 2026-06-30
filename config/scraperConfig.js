@@ -9,13 +9,11 @@ export default {
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
   PROCESSING_INTERVAL: 500, // Faster processing interval (reduced to 500ms for better throughput)
   
-  // Concurrency settings — optimized for 30 PM2 instances sharing 1000+ events
-  // Each instance handles ~33 events; 3 pool pages × 10 events/batch = 30 events per cycle
-  // Dialed DOWN for the per-proxy pool: only ~3 proxies run at once, so 90 concurrent
-  // hammered + burned them. Keep concurrency near pool capacity. Tune via env without
-  // code edits, e.g. CONCURRENT_LIMIT=10 BATCH_SIZE=10.
-  CONCURRENT_LIMIT: parseInt(process.env.CONCURRENT_LIMIT, 2) || 3,
-  BATCH_SIZE: parseInt(process.env.BATCH_SIZE, 2) || 1,
+  // Concurrency — keep near pool capacity (POOL_SIZE pages = that many proxies at
+  // once). Tune via env WITHOUT code edits, e.g. CONCURRENT_LIMIT=16 BATCH_SIZE=16.
+  // NOTE: the 2nd parseInt arg is the RADIX (base 10) — the DEFAULT is after `||`.
+  CONCURRENT_LIMIT: parseInt(process.env.CONCURRENT_LIMIT, 10) || 12,
+  BATCH_SIZE: parseInt(process.env.BATCH_SIZE, 10) || 12,
   
   // Retry settings - optimized for resilience
   MAX_RETRIES: 8, // Increased from 5 for better persistence
