@@ -28,6 +28,46 @@ const CONFIG = {
 
 let browser = null;
 
+// Tri-state cache for whether the real Chrome channel is usable on this host.
+// null = not yet attempted, true = available, false = fall back to bundled Chromium.
+let _chromeChannelOk = null;
+
+/**
+ * Launch Chromium using the real installed Google Chrome (channel:'chrome') when available.
+ *
+ * Ticketmaster's EPS / "iamNotaRobot" anti-bot now fingerprints and blocks patchright's
+ * BUNDLED Chromium build with a hard `403 {"response":"block"}` — even from a clean
+ * residential IP. The real Chrome binary clears EPS (verified: event page 200, facets 200).
+ * Falls back to the bundled Chromium if Chrome isn't installed so the scraper still runs.
+ *
+ * Override with BROWSER_CHANNEL: "chrome" (default), "chrome-beta", or "chromium"/"none"
+ * to force the bundled build.
+ */
+async function launchChromium(launchOptions = {}) {
+  const channel = (process.env.BROWSER_CHANNEL ?? "chrome").trim();
+  const wantChannel = channel && channel !== "chromium" && channel !== "none";
+
+  if (wantChannel && _chromeChannelOk !== false) {
+    try {
+      const launched = await chromium.launch({ ...launchOptions, channel });
+      if (_chromeChannelOk === null) {
+        _chromeChannelOk = true;
+        console.log(`[browser] Using real Chrome channel "${channel}" (EPS-safe)`);
+      }
+      return launched;
+    } catch (err) {
+      _chromeChannelOk = false;
+      console.warn(
+        `[browser] Chrome channel "${channel}" unavailable (${err.message.split("\n")[0]}). ` +
+          `Falling back to bundled Chromium — EPS will likely block. ` +
+          `Install Google Chrome on this host or set BROWSER_CHANNEL.`
+      );
+    }
+  }
+
+  return await chromium.launch(launchOptions);
+}
+
 /**
  * Gets a random location for browser fingerprinting
  */
@@ -162,7 +202,7 @@ async function initBrowser(proxy) {
     if (!browser || !browser.isConnected()) {
       // Launch options with enhanced stealth
       const launchOptions = {
-        headless: true,
+        headless: false,
         args: [
           '--disable-blink-features=AutomationControlled',
           '--disable-features=IsolateOrigins,site-per-process',
@@ -225,8 +265,8 @@ async function initBrowser(proxy) {
         throw new Error('Cannot refresh cookies without a valid proxy');
       }
 
-      // Launch browser
-            browser = await chromium.launch(launchOptions);
+      // Launch browser (real Chrome channel when available — EPS blocks bundled Chromium)
+            browser = await launchChromium(launchOptions);
     }
     
     // Create new context with enhanced fingerprinting and stealth
@@ -936,8 +976,8 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
       }
     }
 
-    // Launch browser for API requests
-    apiBrowser = await chromium.launch(launchOptions);
+    // Launch browser for API requests (real Chrome channel when available — EPS blocks bundled Chromium)
+    apiBrowser = await launchChromium(launchOptions);
     
     // Create desktop context (better for API requests)
     apiContext = await apiBrowser.newContext({
