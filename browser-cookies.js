@@ -1320,8 +1320,11 @@ class BrowserPagePool {
     this._batcher = null;
     // Cookie refresh via full browser restart
     this._lastCookieRefresh = Date.now();
-    this._cookieRefreshInterval = 8 * 60 * 1000; // 8 minutes — well before 10-15m expiry
+    // 8 min default — well before 10-15m cookie expiry. Tunable via COOKIE_REFRESH_MIN
+    // (raise it to cut re-mint churn, which is what burns proxies; keep < ~10m expiry).
+    this._cookieRefreshInterval = (parseInt(process.env.COOKIE_REFRESH_MIN, 10) || 8) * 60 * 1000;
     this._isRestarting = false;
+    this._isRefreshing = false; // rolling refresh in progress (browser stays alive)
     this._refreshTimer = null;
     this._consecutiveErrors = 0;
     // Proxy rotation after N requests
@@ -1425,6 +1428,29 @@ class BrowserPagePool {
     return null;
   }
 
+  // Attach a crash-recovery handler to a launched browser. If it dies OUTSIDE a
+  // controlled restart, immediately mark the pool busy (_isRestarting=true) so
+  // racing init()/submit calls can't spawn dueling _doInit's that close each
+  // other's browser and burn the pool; then trigger ONE restart — unless an init
+  // is already handling recovery (_initPromise set) or the pool already recovered.
+  _attachCrashHandler(browser) {
+    browser.on('disconnected', () => {
+      if (this._isRestarting) return; // a controlled restart/refresh already owns this
+      this._isRestarting = true;      // block init()/submit/other restarts right now
+      console.error('[PagePool] Browser disconnected unexpectedly — scheduling auto-restart');
+      this.initialized = false;
+      this.pages = [];
+      this.available = [];
+      setTimeout(() => {
+        this._isRestarting = false; // release the guard so the restart can acquire it
+        if (this.initialized || this._initPromise) return; // already recovered / an init is on it
+        this._restartBrowser('browser-crash').catch((err) => {
+          console.error(`[PagePool] Auto-restart after crash failed: ${err.message}`);
+        });
+      }, 2000);
+    });
+  }
+
   async init(proxy = null, cookies = null, eventId = null) {
     // Already initialized and browser alive — nothing to do
     if (this.initialized && this._browser?.isConnected()) return;
@@ -1432,12 +1458,23 @@ class BrowserPagePool {
     // Another caller is already initializing — piggyback on their promise
     if (this._initPromise) return this._initPromise;
 
+    // A restart / crash-recovery is in flight — do NOT start a competing _doInit.
+    // Racing them spawns concurrent inits that cleanup() (close) each other's
+    // browser → 0 pages → frantic pool-wide rebind that burns every proxy (the
+    // 8-min-restart collapse). Wait for it to finish, then re-check.
+    if (this._isRestarting) {
+      for (let i = 0; i < 200 && this._isRestarting; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      if (this.initialized && this._browser?.isConnected()) return;
+      if (this._initPromise) return this._initPromise;
+    }
+
     this._initPromise = this._doInit(proxy, cookies, eventId);
     try {
       await this._initPromise;
-    } catch (e) {
-      this._initPromise = null;
-      throw e;
+    } finally {
+      this._initPromise = null; // always clear so future re-inits aren't blocked by a stale promise
     }
   }
 
@@ -1470,22 +1507,7 @@ class BrowserPagePool {
     this._context = context;
 
     // Auto-recover if browser process crashes unexpectedly
-    browser.on('disconnected', () => {
-      if (this._isRestarting) return; // Already handling it
-      console.error('[PagePool] Browser disconnected unexpectedly — scheduling auto-restart');
-      this.initialized = false;
-      this._initPromise = null;
-      this.pages = [];
-      this.available = [];
-      // Restart after a brief pause to avoid tight loops
-      setTimeout(() => {
-        if (!this._isRestarting && !this.initialized) {
-          this._restartBrowser('browser-crash').catch(err => {
-            console.error(`[PagePool] Auto-restart after crash failed: ${err.message}`);
-          });
-        }
-      }, 2000);
-    });
+    this._attachCrashHandler(browser);
 
     // Navigate one seed page to a real event page to get full cookies
     const eventUrl = eventId
@@ -1569,10 +1591,88 @@ class BrowserPagePool {
     if (this._refreshTimer) clearInterval(this._refreshTimer);
 
     this._refreshTimer = setInterval(async () => {
-      if (this._isRestarting) return;
-      console.log(`[PagePool] Scheduled browser restart (cookies age: ${Math.round((Date.now() - this._lastCookieRefresh) / 60000)}min)`);
-      await this._restartBrowser('scheduled');
+      if (this._isRestarting || this._isRefreshing) return;
+      console.log(`[PagePool] Scheduled rolling refresh (cookies age: ${Math.round((Date.now() - this._lastCookieRefresh) / 60000)}min)`);
+      await this._rollingRefresh();
     }, this._cookieRefreshInterval);
+  }
+
+  /**
+   * Rolling refresh — the burn-safe, crash-safe alternative to a full restart.
+   * Keeps the ONE warmed-up browser alive (a just-launched Camoufox is unstable
+   * while spinning up several contexts — that's what crashed the full restart)
+   * and swaps pages ONE AT A TIME on fresh proxies: build a new page, add it,
+   * retire the old one. The pool keeps serving throughout (no downtime, no
+   * deferred-queue stampede), and if a slot can't bind a clean proxy the old
+   * page is kept rather than lost.
+   */
+  async _rollingRefresh() {
+    if (this._isRestarting || this._isRefreshing) return;
+    if (!this._browser?.isConnected()) return; // dead browser → crash handler owns recovery
+    this._isRefreshing = true;
+    const start = Date.now();
+    console.log('[PagePool] Rolling refresh starting…');
+    try {
+      // Seed event for minting/validation (same source the full restart used)
+      let seedEventId = this._initEventId || null;
+      try {
+        const { Event } = await import('./models/index.js');
+        const sample = await Event.aggregate([
+          { $match: { Skip_Scraping: { $ne: true } } },
+          { $sample: { size: 1 } },
+          { $project: { Event_ID: 1 } },
+        ]);
+        if (sample?.length > 0) seedEventId = sample[0].Event_ID;
+      } catch (e) { /* fall back to _initEventId/homepage */ }
+
+      // Reset the used-proxy set but keep proxies of pages we're NOT replacing yet,
+      // so _pickUnusedProxy hands out genuinely fresh IPs.
+      this._usedProxies = new Set();
+      for (const meta of this._pageMeta.values()) {
+        if (meta?.proxy) this._usedProxies.add(meta.proxy.id || meta.proxy.proxy);
+      }
+
+      const oldPages = [...this.pages];
+      let refreshed = 0;
+      for (const oldPage of oldPages) {
+        if (!this._browser?.isConnected()) break; // bail if the browser dies mid-refresh
+        const made = await this._createProxyPage(seedEventId);
+        if (!made) {
+          console.warn('[PagePool] Rolling refresh: no fresh proxy for a slot — keeping current page');
+          continue;
+        }
+        this.pages.push(made.page);
+        this.available.push(made.page);
+        this._retirePage(oldPage); // remove + close the stale page/context
+        refreshed++;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      this._lastCookieRefresh = Date.now();
+      this._consecutiveErrors = 0;
+      console.log(`[PagePool] Rolling refresh complete in ${Date.now() - start}ms — refreshed ${refreshed}/${oldPages.length}, ${this.pages.length} page(s) live`);
+    } catch (e) {
+      console.error(`[PagePool] Rolling refresh error: ${e.message}`);
+    } finally {
+      this._isRefreshing = false;
+    }
+  }
+
+  /** Remove a page from the pool and close its page + context. */
+  _retirePage(page) {
+    const ai = this.available.indexOf(page);
+    if (ai !== -1) this.available.splice(ai, 1);
+    const pi = this.pages.indexOf(page);
+    if (pi !== -1) this.pages.splice(pi, 1);
+    const meta = this._pageMeta.get(page);
+    this._pageMeta.delete(page);
+    page.close().catch(() => {});
+    const ctx = meta?.context;
+    if (ctx) {
+      const ci = this._contexts.indexOf(ctx);
+      if (ci !== -1) this._contexts.splice(ci, 1);
+      ctx.close().catch(() => {});
+    }
   }
 
   /**
@@ -1651,6 +1751,7 @@ class BrowserPagePool {
       const { browser, context } = await initApiBrowserContext(newProxy, this._initCookies);
       this._browser = browser;
       this._context = context;
+      this._attachCrashHandler(browser); // keep crash-recovery alive after a restart too
 
       // Determine a seed event (for cookie minting + per-proxy validation)
       let seedEventId = this._initEventId || null;
