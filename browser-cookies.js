@@ -130,10 +130,39 @@ async function launchChromium(launchOptions = {}) {
  * which has no --disable-web-security). Works for both engines.
  * Returns { success, status, data?, error? }.
  */
+// ── Bandwidth accounting (residential proxies bill by the GB) ───────────────
+// Sums OVER-THE-WIRE bytes (compressed, from Content-Length) per category so we
+// can SEE where proxy MB actually go before changing scrape behavior. Reports a
+// running total every ~2min. Disable with BW_LOG=0.
+const _bw = { facets: 0, map: 0, api: 0, nav: 0, n: { facets: 0, map: 0, api: 0, nav: 0 } };
+function _bwCat(url) {
+  if (url.includes('/facets')) return 'facets';
+  if (url.includes('mapsapi') || url.includes('/map')) return 'map';
+  return 'api';
+}
+function bwAdd(url, bytes, isNav = false) {
+  if (process.env.BW_LOG === '0' || !bytes) return;
+  const cat = isNav ? 'nav' : _bwCat(url);
+  _bw[cat] += bytes;
+  _bw.n[cat]++;
+}
+function bwReport() {
+  const total = _bw.facets + _bw.map + _bw.api + _bw.nav;
+  if (!total) return;
+  const mb = (n) => (n / 1048576).toFixed(1);
+  console.log(`[BW] total=${mb(total)}MB | facets=${mb(_bw.facets)}MB(${_bw.n.facets}) map=${mb(_bw.map)}MB(${_bw.n.map}) api=${mb(_bw.api)}MB(${_bw.n.api}) nav≈${mb(_bw.nav)}MB(${_bw.n.nav})`);
+}
+if (process.env.BW_LOG !== '0') {
+  const _t = setInterval(bwReport, 120000);
+  _t.unref?.();
+}
+
 async function apiGet(page, url, headers = {}) {
   try {
     const resp = await page.context().request.get(url, { headers, timeout: 20000 });
     const status = resp.status();
+    const _cl = parseInt(resp.headers()['content-length'], 10);
+    bwAdd(url, Number.isFinite(_cl) ? _cl : 0);
     if (status < 200 || status >= 400) {
       return { success: false, status, error: `HTTP ${status}` };
     }
@@ -1176,6 +1205,14 @@ const BLOCKED_HOSTS = [
 
 async function blockHeavyResources(page) {
   if (process.env.BLOCK_ASSETS === "0") return;
+  // Count bytes that actually load during navigation (aborted requests fire no
+  // response, so they're correctly excluded) — bucketed as 'nav' for the BW report.
+  try {
+    page.on('response', (resp) => {
+      const cl = parseInt(resp.headers()['content-length'] || '0', 10);
+      if (cl) bwAdd(resp.url(), cl, true);
+    });
+  } catch { /* best-effort */ }
   try {
     await page.route('**/*', (route) => {
       const req = route.request();
