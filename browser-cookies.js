@@ -1048,10 +1048,11 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
 
     // Create a page for requests
     apiPage = await apiContext.newPage();
-    
+    await blockHeavyResources(apiPage); // drop CSS/img/media/font + trackers on the init nav
+
     // Navigate to ticketmaster initially to establish session
     try {
-      await apiPage.goto('https://www.ticketmaster.com/', { 
+      await apiPage.goto('https://www.ticketmaster.com/', {
         waitUntil: 'domcontentloaded',
         timeout: 30000 
       });
@@ -1158,12 +1159,33 @@ function isApiBrowserAvailable() {
  * Scripts + stylesheets are left alone so the bot challenge still executes.
  * Disable with BLOCK_ASSETS=0 if a challenge ever depends on a blocked asset.
  */
+// Third-party analytics/ads/tracking/RUM hosts that load on TM pages but are pure
+// bandwidth waste for our headless flow. Blocked entirely (every resource type,
+// including their scripts). TM first-party + the Imperva/EPS challenge scripts are
+// deliberately NOT here, so `tmpt` still mints. Residential proxies bill by the GB,
+// so every one of these blocked is money saved on each bind/warmup navigation.
+const BLOCKED_HOSTS = [
+  'google-analytics.com', 'googletagmanager.com', 'doubleclick.net',
+  'googlesyndication.com', 'googleadservices.com', 'adservice.google',
+  'scorecardresearch.com', 'connect.facebook.net', 'branch.io', 'tealium',
+  'tiktok.com', 'bat.bing.com', 'demdex.net', 'omtrdc.net', 'krxd.net',
+  'quantserve.com', 'nr-data.net', 'newrelic.com', 'optimizely.com',
+  'mpulse.net', 'adnxs.com', 'criteo', 'pinterest', 'snapchat',
+  'clarity.ms', 'hotjar', 'segment.com', 'amplitude', 'cdn.cookielaw.org',
+];
+
 async function blockHeavyResources(page) {
   if (process.env.BLOCK_ASSETS === "0") return;
   try {
     await page.route('**/*', (route) => {
-      const t = route.request().resourceType();
-      if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+      const req = route.request();
+      const t = req.resourceType();
+      // Render-only assets: never needed headless. Stylesheets included — the EPS
+      // challenge is JS, not CSS, so blocking CSS is safe and cuts real bytes.
+      if (t === 'image' || t === 'media' || t === 'font' || t === 'stylesheet') return route.abort();
+      // Third-party trackers/ads/RUM: pure waste, block every type (incl. scripts).
+      const url = req.url();
+      if (BLOCKED_HOSTS.some((h) => url.includes(h))) return route.abort();
       return route.continue();
     });
   } catch { /* routing is best-effort; never block the flow on it */ }
