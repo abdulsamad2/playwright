@@ -68,7 +68,9 @@ async function launchChromium(launchOptions = {}) {
       // Camoufox passes EPS HEADLESS — default true regardless of the Chrome-oriented
       // launchOptions.headless. Override to headed for debugging with CAMOUFOX_HEADED=1.
       headless: process.env.CAMOUFOX_HEADED !== "1",
-      humanize: true,     // human-like cursor movement
+      // human-like cursor movement. The API flow does NO clicking/typing, so profiling
+      // shows ~0 benefit here — default OFF for speed. Set CAMOUFOX_HUMANIZE=1 to enable.
+      humanize: process.env.CAMOUFOX_HUMANIZE === "1",
     };
     if (launchOptions.proxy) opts.proxy = launchOptions.proxy; // {server,username,password}
     if (_chromeChannelOk === null) {
@@ -1149,6 +1151,24 @@ function isApiBrowserAvailable() {
   return apiBrowser && apiBrowser.isConnected() && apiContext && apiPage;
 }
 
+/**
+ * Abort heavy assets (images, media, fonts) on a page BEFORE navigation. We only
+ * need the EPS challenge JS to run and the cookies to mint — not the rendered page.
+ * Cuts proxy bandwidth (cost) and browser memory, with negligible latency change.
+ * Scripts + stylesheets are left alone so the bot challenge still executes.
+ * Disable with BLOCK_ASSETS=0 if a challenge ever depends on a blocked asset.
+ */
+async function blockHeavyResources(page) {
+  if (process.env.BLOCK_ASSETS === "0") return;
+  try {
+    await page.route('**/*', (route) => {
+      const t = route.request().resourceType();
+      if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+      return route.continue();
+    });
+  } catch { /* routing is best-effort; never block the flow on it */ }
+}
+
 // ====================================================
 // RequestBatcher: Groups requests from MANY events into mega-batches.
 // Instead of 1 page per event (2 fetches), 1 page handles 20 events
@@ -1375,27 +1395,39 @@ class BrowserPagePool {
         }
         context = await this._browser.newContext(ctxOpts);
         const page = await context.newPage();
+        await blockHeavyResources(page);
+        const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         // Warm up like a real visitor: homepage first (seed cookies), then the event
         // page carrying them — instead of hitting /event cold.
         await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
-        await page.waitForTimeout(1500 + Math.random() * 1500);
+        // Brief settle. Profiling: no benefit past ~300ms (was 1500-3000ms of pure wait).
+        await page.waitForTimeout(300 + Math.random() * 300);
         const url = seedId ? `https://www.ticketmaster.com/event/${seedId}` : 'https://www.ticketmaster.com/';
         let status = 0;
         for (let r = 0; r < 2; r++) {
           const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
           status = resp ? resp.status() : 0;
-          if (status === 200) break;
-          await new Promise((t) => setTimeout(t, 1500));
+          // 200/401 → proceed (401 can still yield working facets); 403 → hard block, bail;
+          // 0 → transient nav failure, retry once.
+          if (status === 200 || status === 401 || status === 403) break;
+          await new Promise((t) => setTimeout(t, 700));
         }
-        // Wait for the EPS `tmpt` token to mint BEFORE validating. Through a
-        // residential proxy the challenge JS needs time (~6-18s); without tmpt the
-        // facets call always 403s — and the event PAGE may stay 401 even when the
-        // facets API will succeed, so tmpt (not page status) is the real signal.
+        // FAIL FAST: a hard 403 on the event page = burned/blocked IP. tmpt won't mint
+        // and facets will 403 — skip the ~7s tmpt poll + validation and free this proxy
+        // immediately. This is the single biggest churn win when most proxies are flagged.
+        if (status === 403) {
+          console.log(`[PagePool] ${label} hard-blocked (page=403) — skipping fast, trying another`);
+          await context.close().catch(() => {});
+          continue;
+        }
+        // Wait for the EPS `tmpt` token to mint BEFORE validating. Profiling: tmpt mints
+        // ~3s; poll at 500ms (detects ~1.5s sooner than the old 1500ms interval) and cap
+        // at ~7s — if it hasn't minted by then the session is bad, so stop wasting time.
         if (seedId) {
-          for (let w = 0; w < 8; w++) {
+          for (let w = 0; w < 14; w++) {
             const names = (await context.cookies()).map((c) => c.name);
             if (names.includes('tmpt')) break;
-            await new Promise((t) => setTimeout(t, 1500));
+            await new Promise((t) => setTimeout(t, 500));
           }
         }
         // True validation: does a real facets call succeed? Use the FULL header set
@@ -1407,7 +1439,6 @@ class BrowserPagePool {
           const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
           facetStatus = vr.status || 0;
         }
-        const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         if (facetStatus === 200 || (!seedId && status === 200)) {
           if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
           this._contexts.push(context);
@@ -1495,13 +1526,15 @@ class BrowserPagePool {
     console.log(`[PagePool] Seeding cookies via: ${eventUrl}`);
     const seedPage = await context.newPage();
     try {
+      await blockHeavyResources(seedPage);
       await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       // Wait for the EPS `tmpt` token to mint (IP-bound; residential hop needs time).
+      // Poll 500ms up to ~7s (tmpt mints ~3s) instead of 1500ms×12 (~18s).
       let hasTmpt = false;
-      for (let w = 0; w < 12; w++) {
+      for (let w = 0; w < 14; w++) {
         const names = (await context.cookies()).map((c) => c.name);
         if (names.includes('tmpt')) { hasTmpt = true; break; }
-        await new Promise((t) => setTimeout(t, 1500));
+        await new Promise((t) => setTimeout(t, 500));
       }
 
       const allCookies = await context.cookies();
@@ -1669,8 +1702,13 @@ class BrowserPagePool {
 
       // Seed cookies on page #1 (context #1 / newProxy)
       const seedPage = await context.newPage();
+      await blockHeavyResources(seedPage);
       await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await new Promise(r => setTimeout(r, 2000));
+      // Poll for tmpt (500ms up to ~7s) instead of a blind fixed 2s wait.
+      for (let w = 0; w < 14; w++) {
+        if ((await context.cookies()).some(c => c.name === 'tmpt')) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
 
       const tmCookies = (await context.cookies()).filter(c => c.domain.includes('ticketmaster'));
       console.log(`[PagePool] Restart: ${tmCookies.length} TM cookies after seed`);
@@ -1681,14 +1719,18 @@ class BrowserPagePool {
       this._pageMeta.set(seedPage, { context, proxy: newProxy });
       if (newProxy?.proxy) this._usedProxies.add(newProxy.proxy);
 
-      // Remaining pool pages — each on its OWN validated proxy
-      for (let i = 1; i < this.size; i++) {
-        const made = await this._createProxyPage(seedEventId);
+      // Remaining pool pages — each on its OWN validated proxy. Fill in PARALLEL
+      // (matches _doInit): sequential binding stalled every 8-min restart, especially
+      // when many proxies are flagged (each dead one cost seconds one after another).
+      const restartFill = await Promise.all(
+        Array.from({ length: this.size - 1 }, () => this._createProxyPage(seedEventId))
+      );
+      for (const made of restartFill) {
         if (made) {
           this.pages.push(made.page);
           this.available.push(made.page);
         } else {
-          console.warn(`[PagePool] Restart: could not bind a working proxy for page ${i + 1}`);
+          console.warn(`[PagePool] Restart: could not bind a working proxy for a page`);
         }
       }
 
