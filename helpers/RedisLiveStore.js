@@ -139,11 +139,24 @@ class RedisLiveStore {
       return;
     }
 
-    // Check if already hydrated (another instance finished before us)
+    // Check if already hydrated (another instance finished before us).
+    // GUARD: the `hydrated` flag can outlive the actual data — e.g. Redis was
+    // flushed/evicted, or a sync emptied evt:active — leaving the flag set but the
+    // active set / staleness queue empty. If we blindly trust the flag we skip
+    // hydration and the queue stays empty forever (claimEvents finds nothing →
+    // scraper freezes). So when the flag is set, verify the data is really there;
+    // if it's missing, clear the flag and re-hydrate.
     const alreadyDone = await this.redis.get(KEY.hydrated);
     if (alreadyDone) {
-      console.log("[RedisLiveStore] Already hydrated — skipping");
-      return;
+      const activeCount = await this.redis.scard(KEY.active);
+      const queueCount = await this.redis.zcard(KEY.staleness);
+      if (activeCount > 0 && queueCount > 0) {
+        console.log(`[RedisLiveStore] Already hydrated — skipping (${activeCount} active, ${queueCount} queued)`);
+        return;
+      }
+      console.warn(`[RedisLiveStore] 'hydrated' flag set but data missing (active=${activeCount}, queue=${queueCount}) — clearing flag and re-hydrating`);
+      await this.redis.del(KEY.hydrated);
+      // fall through to hydrate from MongoDB
     }
 
     // Try to acquire hydration lock (30s TTL — short, re-acquirable)
