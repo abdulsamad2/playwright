@@ -226,15 +226,21 @@ function generateIproyalProxies(n = IPROYAL_SESSIONS) {
   return list;
 }
 
-// Expand a MongoDB proxy row into one or more pool entries. An IPRoyal GATEWAY
-// credential (host contains "iproyal", password has no `_session-`) fans out into
-// N sticky residential sessions — this is how DB mode supports IPRoyal despite the
-// unique (ip,port) index: ONE stored credential → many sessions. A pre-baked sticky
-// row (password already has `_session-`) and static IP proxies map 1:1. A unique
-// `id` lets the pool tell sessions apart since they all share one host:port.
+// Expand a MongoDB proxy row into one or more pool entries. A rotating GATEWAY
+// credential fans out into N sticky residential sessions — this is how DB mode
+// supports rotating providers despite the unique (ip,port) index: ONE stored
+// credential → many sessions, each with its own `id` so the pool can tell the
+// sessions apart even though they all share one host:port. Two gateways are
+// recognized, differing in WHERE the rotation token lives:
+//   • IPRoyal      — host contains "iproyal", token in the PASSWORD
+//                    (`_session-<t>_lifetime-<l>`).
+//   • bartproxies  — host contains "bartproxies", token in the USERNAME
+//                    (`_ss-<t>`); password constant.
+// A pre-baked sticky row (token already present) and static IP proxies map 1:1.
 function expandDbProxy(d) {
   const host = `${d.ip}:${d.port}`;
   const pw = d.password || "";
+  const user = d.username || "";
   if (/iproyal/i.test(d.ip) && !/_session-/.test(pw)) {
     const list = [];
     for (let i = 0; i < IPROYAL_SESSIONS; i++) {
@@ -248,8 +254,25 @@ function expandDbProxy(d) {
     }
     return list;
   }
-  const sm = /_session-([^_]+)/.exec(pw);
-  return [{ id: sm ? `iproyal-${sm[1]}` : host, proxy: host, username: d.username, password: pw }];
+  // bartproxies gateway: rotation token lives in the USERNAME (`_ss-<token>`),
+  // password constant. Each `_ss-` token pins its own exit IP (proven distinct
+  // by scripts/bartSessions.mjs). Reuses IPROYAL_SESSIONS as the fan-out count.
+  if (/bartproxies/i.test(d.ip) && !/_ss-/.test(user)) {
+    const list = [];
+    for (let i = 0; i < IPROYAL_SESSIONS; i++) {
+      const session = Math.random().toString(36).slice(2, 10);
+      list.push({
+        id: `bart-${session}`,
+        proxy: host,
+        username: `${user}_ss-${session}`,
+        password: pw,
+      });
+    }
+    return list;
+  }
+  // Pre-baked sticky row (IPRoyal `_session-` or bartproxies `_ss-`) or static IP → 1:1.
+  const sm = /_session-([^_]+)/.exec(pw) || /_ss-([^_]+)/.exec(user);
+  return [{ id: sm ? `sticky-${sm[1]}` : host, proxy: host, username: d.username, password: pw }];
 }
 
 // Seed the live array with fresh sticky sessions immediately in IPRoyal mode.
