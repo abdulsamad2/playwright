@@ -6,6 +6,7 @@ import { Camoufox } from "camoufox-js";
 
 import { BrowserFingerprint } from "./browserFingerprint.js";
 import proxyArray, { getSeedProxy } from "./helpers/proxy.js";
+import mongoose from "mongoose";
 
 // Browser engine: "camoufox" (stealth Firefox — passes EPS HEADLESS, no xvfb) or
 // "chrome" (real headed Chrome via patchright — needs a display/xvfb). Camoufox is
@@ -23,6 +24,29 @@ const SEED_SPLIT = () => process.env.SEED_SPLIT === "1";
 // tmpt lives 60 min (read from the cookie's own `expires`). Re-seed at 50 min for
 // a safety margin; the 403-storm handler re-mints early if a session dies sooner.
 const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 50 * 60 * 1000;
+// SEED_FARM=1 → read ready-made jars from the shared `seed_jars` collection (kept
+// fresh by the separate cookie-farm service) instead of minting on bart in-process.
+// Off (default) = unchanged self-mint behaviour. See cookie-farm/README.md.
+const SEED_FARM = () => process.env.SEED_FARM === "1";
+// Tiny cache so we hit Mongo at most ~once/15s, while still rotating across the
+// farm's K jars over time to spread facets load.
+let _farmJarCache = { cookies: null, at: 0 };
+async function readFarmJar() {
+  if (_farmJarCache.cookies && Date.now() - _farmJarCache.at < 15000) return _farmJarCache.cookies;
+  try {
+    const jars = await mongoose.connection.db
+      .collection("seed_jars")
+      .find({ status: "healthy", expiresAt: { $gt: new Date() } })
+      .toArray();
+    if (!jars.length) return null;
+    const cookies = jars[Math.floor(Math.random() * jars.length)].cookies;
+    _farmJarCache = { cookies, at: Date.now() };
+    return cookies;
+  } catch (e) {
+    console.warn("[SeedFarm] read failed:", e.message);
+    return null;
+  }
+}
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
@@ -1363,6 +1387,13 @@ class BrowserPagePool {
   // TTL-cached; concurrent callers share one in-flight mint.
   async _ensureSeedJar(eventId) {
     if (!SEED_SPLIT()) return null;
+    // FARM MODE: read a ready jar from the shared store (minted by cookie-farm) —
+    // this instance never touches bart. Fall through to local mint only if the farm
+    // has nothing yet (bootstrap / farm down), so scraping still self-heals.
+    if (SEED_FARM()) {
+      const farmJar = await readFarmJar();
+      if (farmJar && farmJar.length) return farmJar;
+    }
     if (this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS()) return this._seedJar;
     if (this._seedInFlight) return this._seedInFlight;
     this._seedInFlight = this._mintSeedJar(eventId).finally(() => { this._seedInFlight = null; });
