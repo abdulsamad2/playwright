@@ -65,9 +65,10 @@ async function launchChromium(launchOptions = {}) {
   // blocked by EPS; Camoufox isn't). Ignores Chromium args; takes its own options.
   if (USE_CAMOUFOX) {
     const opts = {
-      // Camoufox passes EPS HEADLESS — default true regardless of the Chrome-oriented
-      // launchOptions.headless. Override to headed for debugging with CAMOUFOX_HEADED=1.
-      headless: process.env.CAMOUFOX_HEADED !== "1",
+      // HEADED by default (for now). Set CAMOUFOX_HEADLESS=1 to go back to headless.
+      // NOTE: headed needs a display — on a headless server run under xvfb
+      // (`xvfb-run -a node app.js --start-scraper`) or the launch will fail.
+      headless: process.env.CAMOUFOX_HEADLESS === "1",
       humanize: true,     // human-like cursor movement
     };
     if (launchOptions.proxy) opts.proxy = launchOptions.proxy; // {server,username,password}
