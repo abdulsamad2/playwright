@@ -20,7 +20,9 @@ const USE_CAMOUFOX = BROWSER_ENGINE === "camoufox";
 // Read at CALL time (not module-load) so .env values are picked up even though this
 // module is imported before app.js calls dotenv.config().
 const SEED_SPLIT = () => process.env.SEED_SPLIT === "1";
-const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 8 * 60 * 1000;
+// tmpt lives 60 min (read from the cookie's own `expires`). Re-seed at 50 min for
+// a safety margin; the 403-storm handler re-mints early if a session dies sooner.
+const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 50 * 60 * 1000;
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
@@ -1374,63 +1376,77 @@ class BrowserPagePool {
   async _mintSeedJar(eventId) {
     const seedId = eventId || this._initEventId;
     if (!seedId) return this._seedJar;
+    if (!getSeedProxy()) { console.warn('[Seed] bart not configured (set BART_* in .env)'); return this._seedJar; }
     const attempts = parseInt(process.env.BART_SEED_ATTEMPTS, 10) || 6;
+    const parallel = Math.max(1, parseInt(process.env.SEED_PARALLEL, 10) || 4);
     const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
-    for (let a = 0; a < attempts; a++) {
-      const bart = getSeedProxy();
-      if (!bart) { console.warn('[Seed] bart not configured (set BART_* in .env)'); return this._seedJar; }
-      let ctx = null;
-      try {
-        ctx = await this._browser.newContext({ viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 }, ignoreHTTPSErrors: true, bypassCSP: true, proxy: bart });
-        // BANDWIDTH: bart is metered by the GB and the seed loads full pages through
-        // it. The EPS/reCAPTCHA challenge that mints tmpt is JS-based, so abort the
-        // heavy assets (images/media/fonts/stylesheets) — tmpt still mints but page
-        // weight drops ~5-10×. Facets scraping runs on the cheap old proxies, not
-        // bart, so this is the only place bart burns data. Disable: SEED_BLOCK_ASSETS=0.
-        if (process.env.SEED_BLOCK_ASSETS !== '0') {
-          await ctx.route('**/*', (route) => {
-            const t = route.request().resourceType();
-            if (t === 'image' || t === 'media' || t === 'font' || t === 'stylesheet') return route.abort();
-            return route.continue();
-          }).catch(() => {});
-        }
-        const page = await ctx.newPage();
-        await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
-        await page.waitForTimeout(2500 + Math.random() * 1500);
-        for (let r = 0; r < 2; r++) {
-          const resp = await page.goto(`https://www.ticketmaster.com/event/${seedId}`, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
-          if ((resp ? resp.status() : 0) === 200) break;
-          await new Promise((t) => setTimeout(t, 1500));
-        }
-        // Fast-fail a flagged bart exit (EPS "Paused"/block screen) BEFORE spending
-        // the tmpt poll + settle + facets on it — saves time and a little data on the
-        // ~2/3 of sessions that are flagged.
-        const onBlockScreen = await page.evaluate(() => /paused|verified|interruption|identity/i.test(document.title)).catch(() => false);
-        if (onBlockScreen) {
-          console.log(`[Seed] bart attempt ${a + 1}/${attempts}: EPS block screen — next session`);
-          await ctx.close().catch(() => {});
-          continue;
-        }
-        let tmpt = false;
-        for (let w = 0; w < 40 && !tmpt; w++) { tmpt = (await ctx.cookies()).some((c) => c.name === 'tmpt'); if (!tmpt) await new Promise((t) => setTimeout(t, 750)); }
-        await page.waitForTimeout(3000); // let the page's own XHRs establish the services session
-        const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
-        if ((vr.status || 0) === 200) {
-          this._seedJar = await ctx.cookies();
-          this._seedJarAt = Date.now();
-          console.log(`[Seed] minted jar on bart (${this._seedJar.length} cookies, tmpt=${tmpt}) — facets 200 ✓`);
-          await ctx.close().catch(() => {});
-          return this._seedJar;
-        }
-        console.log(`[Seed] bart attempt ${a + 1}/${attempts}: tmpt=${tmpt} facets=${vr.status || 0} — trying another session`);
-        await ctx.close().catch(() => {});
-      } catch (e) {
-        console.warn(`[Seed] attempt ${a + 1} failed: ${e.message}`);
-        if (ctx) await ctx.close().catch(() => {});
+    // Bart exits pass only ~1/3 of the time, so run attempts in PARALLEL batches —
+    // sequential retries stall pool init for minutes. First facets-200 jar wins.
+    const t0 = Date.now();
+    let tried = 0;
+    while (tried < attempts) {
+      const batch = Math.min(parallel, attempts - tried);
+      const jars = await Promise.all(Array.from({ length: batch }, () => this._seedAttempt(seedId, vu)));
+      tried += batch;
+      const jar = jars.find((j) => j && j.length);
+      if (jar) {
+        this._seedJar = jar;
+        this._seedJarAt = Date.now();
+        console.log(`[Seed] minted jar on bart (${jar.length} cookies) — facets 200 ✓ in ${Math.round((Date.now() - t0) / 1000)}s (${tried} sessions tried)`);
+        return this._seedJar;
       }
+      console.log(`[Seed] batch of ${batch} bart sessions all flagged (${tried}/${attempts}) — retrying`);
     }
-    console.warn('[Seed] could not mint a fresh jar this round; using stale jar if present');
+    console.warn(`[Seed] could not mint a fresh jar in ${attempts} attempts; using stale jar if present`);
     return this._seedJar;
+  }
+
+  // One bart seed attempt on a fresh sticky session: homepage → event → wait tmpt
+  // → settle → validate facets. Returns the cookie jar (Array) on facets 200, else
+  // null. Owns its own context lifecycle so batches can run concurrently.
+  async _seedAttempt(seedId, vu) {
+    const bart = getSeedProxy();
+    if (!bart) return null;
+    let ctx = null;
+    try {
+      ctx = await this._browser.newContext({ viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 }, ignoreHTTPSErrors: true, bypassCSP: true, proxy: bart });
+      // BANDWIDTH: bart is metered by the GB. The reCAPTCHA challenge that mints tmpt
+      // is JS-based, so abort heavy assets (images/media/fonts) — tmpt still mints,
+      // page weight drops sharply. Keep CSS/scripts (safer for the reCAPTCHA score).
+      // Only the SEED touches bart; facets run on the cheap Mongo pool. SEED_BLOCK_ASSETS=0 disables.
+      if (process.env.SEED_BLOCK_ASSETS !== '0') {
+        await ctx.route('**/*', (route) => {
+          const t = route.request().resourceType();
+          if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+          return route.continue();
+        }).catch(() => {});
+      }
+      const page = await ctx.newPage();
+      await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+      await page.waitForTimeout(2000 + Math.random() * 1500);
+      for (let r = 0; r < 2; r++) {
+        const resp = await page.goto(`https://www.ticketmaster.com/event/${seedId}`, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+        if ((resp ? resp.status() : 0) === 200) break;
+        await new Promise((t) => setTimeout(t, 1200));
+      }
+      // Fast-fail a flagged exit sitting on the EPS block screen.
+      const onBlockScreen = await page.evaluate(() => /paused|verified|interruption|identity/i.test(document.title)).catch(() => false);
+      if (onBlockScreen) { await ctx.close().catch(() => {}); return null; }
+      let tmpt = false;
+      for (let w = 0; w < 30 && !tmpt; w++) { tmpt = (await ctx.cookies()).some((c) => c.name === 'tmpt'); if (!tmpt) await new Promise((t) => setTimeout(t, 750)); }
+      await page.waitForTimeout(2500); // let the page's own XHRs establish the services session
+      const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
+      if ((vr.status || 0) === 200) {
+        const jar = await ctx.cookies();
+        await ctx.close().catch(() => {});
+        return jar;
+      }
+      await ctx.close().catch(() => {});
+      return null;
+    } catch (e) {
+      if (ctx) await ctx.close().catch(() => {});
+      return null;
+    }
   }
 
   // Pick a proxy not already assigned to another pool page (falls back to any).
