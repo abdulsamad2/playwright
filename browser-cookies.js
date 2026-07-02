@@ -51,6 +51,24 @@ async function readFarmJar() {
   _farmJars.rr = (_farmJars.rr + 1) % _farmJars.list.length;
   return cookies;
 }
+
+// Health feedback: when a farm jar's facets return 403 (volume-flagged / dead), mark
+// its slot dead in seed_jars so the FARM re-mints it, and drop it from local rotation
+// immediately. Matched by the unique tmpt cookie value.
+async function markFarmJarDead(cookies) {
+  try {
+    const tmpt = (cookies.find((c) => c.name === "tmpt") || {}).value;
+    if (!tmpt) return;
+    _farmJars.list = _farmJars.list.filter((j) => (j.find((c) => c.name === "tmpt") || {}).value !== tmpt);
+    await mongoose.connection.db.collection("seed_jars").updateOne(
+      { cookies: { $elemMatch: { name: "tmpt", value: tmpt } } },
+      { $set: { status: "dead", updatedAt: new Date() } }
+    );
+    console.log("[SeedFarm] marked a jar dead (facets 403) — farm will re-mint");
+  } catch (e) {
+    console.warn("[SeedFarm] markDead failed:", e.message);
+  }
+}
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
@@ -104,10 +122,10 @@ async function launchChromium(launchOptions = {}) {
   // blocked by EPS; Camoufox isn't). Ignores Chromium args; takes its own options.
   if (USE_CAMOUFOX) {
     const opts = {
-      // HEADED by default (for now). Set CAMOUFOX_HEADLESS=1 to go back to headless.
-      // NOTE: headed needs a display — on a headless server run under xvfb
-      // (`xvfb-run -a node app.js --start-scraper`) or the launch will fail.
-      headless: process.env.CAMOUFOX_HEADLESS === "1",
+      // HEADLESS by default — Camoufox passes EPS headless (its whole advantage), and
+      // production servers have no display. Set CAMOUFOX_HEADED=1 ONLY on a machine
+      // with a display (local debugging) to watch the browser.
+      headless: process.env.CAMOUFOX_HEADED !== "1",
       humanize: true,     // human-like cursor movement
     };
     if (launchOptions.proxy) opts.proxy = launchOptions.proxy; // {server,username,password}
@@ -170,7 +188,7 @@ async function launchChromium(launchOptions = {}) {
  */
 async function apiGet(page, url, headers = {}) {
   try {
-    const resp = await page.context().request.get(url, { headers, timeout: 20000 });
+    const resp = await page.context().request.get(url, { headers, timeout: parseInt(process.env.API_TIMEOUT_MS, 10) || 8000 });
     const status = resp.status();
     if (status < 200 || status >= 400) {
       return { success: false, status, error: `HTTP ${status}` };
@@ -1392,11 +1410,16 @@ class BrowserPagePool {
   async _ensureSeedJar(eventId) {
     if (!SEED_SPLIT()) return null;
     // FARM MODE: read a ready jar from the shared store (minted by cookie-farm) —
-    // this instance never touches bart. Fall through to local mint only if the farm
-    // has nothing yet (bootstrap / farm down), so scraping still self-heals.
+    // this instance never touches bart.
     if (SEED_FARM()) {
       const farmJar = await readFarmJar();
       if (farmJar && farmJar.length) return farmJar;
+      // FLEET SAFETY: with the farm on, do NOT fall back to minting on bart in-process.
+      // 100 instances all stampeding bart when the farm briefly runs dry would flood
+      // and flag the residential range. Return null (page won't bind → retries) and
+      // wait for the farm to supply a jar. SEED_FARM_FALLBACK=1 re-enables local mint
+      // (single-instance bootstrap only).
+      if (process.env.SEED_FARM_FALLBACK !== "1") return null;
     }
     if (this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS()) return this._seedJar;
     if (this._seedInFlight) return this._seedInFlight;
@@ -1561,6 +1584,9 @@ class BrowserPagePool {
           const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
           const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
           facetStatus = vr.status || 0;
+          // Health feedback: an injected FARM jar that 403s here is volume-flagged/dead
+          // → mark its slot dead so the farm re-mints it (and stop handing it out).
+          if (SEED_FARM() && facetStatus === 403 && jar && jar.length) markFarmJarDead(jar).catch(() => {});
         }
         const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         if (facetStatus === 200 || (!seedId && status === 200)) {
