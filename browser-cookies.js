@@ -1985,13 +1985,15 @@ class BrowserPagePool {
       this._consecutiveErrors++;
       if (this._consecutiveErrors >= 5 && !this._isRestarting) {
         console.log(`[PagePool] ${this._consecutiveErrors} consecutive 403s — triggering browser restart`);
-        // COST: only re-mint the bart jar if it's NEAR EXPIRY. A 403 storm is
-        // usually rate-flagged DATACENTER IPs, not a dead jar — the same jar still
-        // returns facets 200 on fresh IPs — so invalidating a fresh jar just burns
-        // metered bart residential data re-seeding something that still works. The
-        // restart rotates the datacenter proxies; the jar is reused until its TTL.
+        // 5 consecutive 403s with ZERO successes in between means the shared jar's
+        // tmpt is no longer accepted — either it expired, or (the common one at
+        // scale) TM VOLUME-rate-flagged the token after too many facets calls went
+        // through one session. A live jar would have produced a 200 and reset this
+        // counter, so reaching the storm = the jar is dead → re-mint it. The 60s
+        // floor stops thrash: a brand-new jar is given time to work before a storm
+        // can discard it (and avoids re-minting on a transient single-IP blip).
         const jarAgeMs = this._seedJarAt ? Date.now() - this._seedJarAt : Infinity;
-        if (SEED_SPLIT() && jarAgeMs > 0.75 * SEED_TTL_MS()) { this._seedJar = null; this._seedJarAt = 0; }
+        if (SEED_SPLIT() && jarAgeMs > 60000) { this._seedJar = null; this._seedJarAt = 0; }
         this._restartBrowser('403-errors').catch(() => {});
       }
     } else if (status >= 200 && status < 400) {
