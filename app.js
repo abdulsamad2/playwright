@@ -18,7 +18,7 @@ import scraperManager from "./scraperManager.js"; // Added for command-line star
 import { cleanup as cleanupBrowsers, cleanupApiBrowser } from "./browser-cookies.js";
 
 // Redis imports
-import { connectRedis, closeRedis } from "./config/redis.js";
+import { connectRedis, closeRedis, isRedisReady } from "./config/redis.js";
 import redisLiveStore from "./helpers/RedisLiveStore.js";
 
 // Proxy loader (MongoDB-backed, replaces hardcoded list)
@@ -79,6 +79,17 @@ const SKIP_REDIS = process.env.SKIP_REDIS === "true";
     } else {
       // 2. Redis connection
       await connectRedis();
+      // connectRedis() returns null (doesn't throw) on failure, so verify it's
+      // actually ready — otherwise hydrate() silently skips and the event queue
+      // stays empty (scraper idles at 0 events with no obvious error).
+      if (!isRedisReady()) {
+        throw new Error(
+          "Redis did NOT connect — the scraper's event queue requires Redis. " +
+          "Set REDIS_HOST / REDIS_PORT / REDIS_PASSWORD in .env (they're currently " +
+          "unset → defaulting to localhost:6379), or run with SKIP_REDIS=true for " +
+          "MongoDB-only mode."
+        );
+      }
       console.log("Redis connected successfully.");
 
       // 3. Hydrate Redis from MongoDB (distributed-lock-protected, runs once across all instances)
