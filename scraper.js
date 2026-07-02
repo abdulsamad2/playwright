@@ -30,9 +30,55 @@ import {
   cleanupApiBrowser,
   browserPagePool
 } from './browser-cookies.js';
+import mongoose from 'mongoose';
 
 // Flag to control whether to use browser-based API requests (bypasses TLS fingerprinting)
 const USE_BROWSER_API = true;
+
+// --- Shared Map (geometry) cache ------------------------------------------------
+// The Map API (placeDetailNoKeys) is STATIC section geometry — it does not change
+// during a sale (new inventory shows up in FACETS, not the map). So cache it: fetch
+// the map from TM only ~once/MAP_CACHE_MS per event FLEET-WIDE (shared in the Mongo
+// `event_maps` collection) and pull only FACETS each cycle → roughly HALVES the
+// proxy/TM call volume (the real bottleneck). A tiny bounded in-memory layer avoids
+// re-reading the large blob from Mongo on every scrape. OFF by default — enable with
+// MAP_CACHE=1 after verifying on a test deployment.
+const MAP_CACHE_ON = () => process.env.MAP_CACHE === '1';
+const MAP_TTL_MS = () => parseInt(process.env.MAP_CACHE_MS, 10) || 30 * 60 * 1000;
+const MAP_MEM_MS = parseInt(process.env.MAP_MEM_MS, 10) || 5 * 60 * 1000;
+const MAP_MEM_MAX = parseInt(process.env.MAP_MEM_MAX, 10) || 40;
+const _mapMem = new Map(); // eventId -> { data, at }
+function _mapMemGet(eventId) {
+  const h = _mapMem.get(eventId);
+  return h && Date.now() - h.at < MAP_MEM_MS ? h.data : null;
+}
+function _mapMemSet(eventId, data) {
+  if (_mapMem.size >= MAP_MEM_MAX) _mapMem.delete(_mapMem.keys().next().value); // evict oldest
+  _mapMem.set(eventId, { data, at: Date.now() });
+}
+// Returns fresh cached map data, or null if a live TM fetch is needed.
+async function getCachedMap(eventId) {
+  const mem = _mapMemGet(eventId);
+  if (mem) return mem;
+  try {
+    const doc = await mongoose.connection.db.collection('event_maps').findOne({ _id: eventId });
+    if (doc?.data && doc.updatedAt && Date.now() - new Date(doc.updatedAt).getTime() < MAP_TTL_MS()) {
+      _mapMemSet(eventId, doc.data);
+      return doc.data;
+    }
+  } catch { /* fall through to live fetch */ }
+  return null;
+}
+async function storeCachedMap(eventId, data) {
+  _mapMemSet(eventId, data);
+  try {
+    await mongoose.connection.db.collection('event_maps').updateOne(
+      { _id: eventId },
+      { $set: { data, updatedAt: new Date() } },
+      { upsert: true }
+    );
+  } catch { /* best effort */ }
+}
 
 // Circuit breaker for cookie refresh operations
 class CookieRefreshCircuitBreaker {
@@ -969,16 +1015,29 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     // call, so 10 pages × 20 events = 200 events processed per cycle.
     if (browserPagePool.initialized) {
       try {
-        const batchResults = await browserPagePool.submitRequests([
-          { url: mapUrlWithParams, headers: filterForBrowser(safeMapHeader || safeFacetHeader) },
-          { url: facetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
-        ]);
+        const cachedMap = MAP_CACHE_ON() ? await getCachedMap(eventId) : null;
+        if (cachedMap) {
+          // Map is cached fleet-wide → only fetch FACETS from TM this cycle.
+          const batchResults = await browserPagePool.submitRequests([
+            { url: facetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
+          ]);
+          DataMap = cachedMap;
+          DataFacets = batchResults[0]?.success ? batchResults[0].data : null;
+          if (!batchResults[0]?.success) console.log(`Facet API failed for event ${eventId}: ${batchResults[0]?.error}`);
+        } else {
+          const batchResults = await browserPagePool.submitRequests([
+            { url: mapUrlWithParams, headers: filterForBrowser(safeMapHeader || safeFacetHeader) },
+            { url: facetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
+          ]);
 
-        DataMap = batchResults[0]?.success ? batchResults[0].data : null;
-        DataFacets = batchResults[1]?.success ? batchResults[1].data : null;
+          DataMap = batchResults[0]?.success ? batchResults[0].data : null;
+          DataFacets = batchResults[1]?.success ? batchResults[1].data : null;
 
-        if (!batchResults[0]?.success) console.log(`Map API failed for event ${eventId}: ${batchResults[0]?.error}`);
-        if (!batchResults[1]?.success) console.log(`Facet API failed for event ${eventId}: ${batchResults[1]?.error}`);
+          if (!batchResults[0]?.success) console.log(`Map API failed for event ${eventId}: ${batchResults[0]?.error}`);
+          if (!batchResults[1]?.success) console.log(`Facet API failed for event ${eventId}: ${batchResults[1]?.error}`);
+          // Cache the fresh map for the fleet (only when we actually got one).
+          if (MAP_CACHE_ON() && DataMap) storeCachedMap(eventId, DataMap).catch(() => {});
+        }
       } catch (batchError) {
         console.log(`Batch request failed for event ${eventId}: ${batchError.message}`);
         if (batchError.message?.includes('not initialized') ||
