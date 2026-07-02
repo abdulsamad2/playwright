@@ -2403,12 +2403,21 @@ async updateEventMetadata(eventId, scrapeResult) {
     let proxy = null;
 
     try {
-      // Fresh MongoDB check: authoritative source for Skip_Scraping.
-      // Redis may be stale if the frontend wrote directly to MongoDB.
-      const eventDoc = await Event.findOne(
-        { Event_ID: eventId },
-        { Skip_Scraping: 1 }
-      ).lean();
+      // Skip_Scraping is authoritative in MongoDB but changes rarely. A Mongo
+      // findOne on EVERY scrape is ~400 reads/min fleet-wide; cache the result for a
+      // short TTL (SKIP_SCRAPING_CACHE_MS, default 30s) so a stopped event is caught
+      // within that window while cutting the hot-path DB round-trips. Mongo stays the
+      // source of truth — this only debounces how often we ask it.
+      let eventDoc;
+      const _skipCache = (this._skipScrapingCache ||= new Map());
+      const _skipTtl = parseInt(process.env.SKIP_SCRAPING_CACHE_MS, 10) || 30000;
+      const _hit = _skipCache.get(eventId);
+      if (_hit && Date.now() - _hit.at < _skipTtl) {
+        eventDoc = _hit.doc;
+      } else {
+        eventDoc = await Event.findOne({ Event_ID: eventId }, { Skip_Scraping: 1 }).lean();
+        _skipCache.set(eventId, { doc: eventDoc, at: Date.now() });
+      }
       if (!eventDoc || eventDoc.Skip_Scraping) {
         this.logWithTime(
           `Event ${eventId} is stopped (Skip_Scraping=true) — skipping scrape`,
@@ -3335,6 +3344,7 @@ async updateEventMetadata(eventId, scrapeResult) {
     this.eventUpdateSchedule.delete(eventId);
     this.headersCache.delete(eventId);
     this.headerRefreshTimestamps.delete(eventId);
+    this._skipScrapingCache?.delete(eventId);
 
     // Remove from processing queue
     this.eventProcessingQueue = this.eventProcessingQueue.filter(
