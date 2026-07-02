@@ -28,24 +28,28 @@ const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 50 * 60 * 100
 // fresh by the separate cookie-farm service) instead of minting on bart in-process.
 // Off (default) = unchanged self-mint behaviour. See cookie-farm/README.md.
 const SEED_FARM = () => process.env.SEED_FARM === "1";
-// Tiny cache so we hit Mongo at most ~once/15s, while still rotating across the
-// farm's K jars over time to spread facets load.
-let _farmJarCache = { cookies: null, at: 0 };
+// Cache the LIST of healthy jars (~once/10s, cheap), but hand them out ROUND-ROBIN
+// per call — so each pool page gets a DIFFERENT token and facets load spreads evenly
+// across all K jars. (Random + a 15s cache used to funnel every page bound in the
+// same window onto ONE jar, burning it ~K× faster.)
+let _farmJars = { list: [], at: 0, rr: 0 };
 async function readFarmJar() {
-  if (_farmJarCache.cookies && Date.now() - _farmJarCache.at < 15000) return _farmJarCache.cookies;
-  try {
-    const jars = await mongoose.connection.db
-      .collection("seed_jars")
-      .find({ status: "healthy", expiresAt: { $gt: new Date() } })
-      .toArray();
-    if (!jars.length) return null;
-    const cookies = jars[Math.floor(Math.random() * jars.length)].cookies;
-    _farmJarCache = { cookies, at: Date.now() };
-    return cookies;
-  } catch (e) {
-    console.warn("[SeedFarm] read failed:", e.message);
-    return null;
+  if (!_farmJars.list.length || Date.now() - _farmJars.at > 10000) {
+    try {
+      const docs = await mongoose.connection.db
+        .collection("seed_jars")
+        .find({ status: "healthy", expiresAt: { $gt: new Date() } })
+        .sort({ slot: 1 })
+        .toArray();
+      _farmJars = { list: docs.map((d) => d.cookies), at: Date.now(), rr: _farmJars.rr };
+    } catch (e) {
+      console.warn("[SeedFarm] read failed:", e.message);
+    }
   }
+  if (!_farmJars.list.length) return null;
+  const cookies = _farmJars.list[_farmJars.rr % _farmJars.list.length];
+  _farmJars.rr = (_farmJars.rr + 1) % _farmJars.list.length;
+  return cookies;
 }
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
