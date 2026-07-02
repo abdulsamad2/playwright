@@ -5,13 +5,20 @@ import { chromium } from 'patchright'
 import { Camoufox } from "camoufox-js";
 
 import { BrowserFingerprint } from "./browserFingerprint.js";
-import proxyArray from "./helpers/proxy.js";
+import proxyArray, { getSeedProxy } from "./helpers/proxy.js";
 
 // Browser engine: "camoufox" (stealth Firefox — passes EPS HEADLESS, no xvfb) or
 // "chrome" (real headed Chrome via patchright — needs a display/xvfb). Camoufox is
 // the default because it's the only thing that beats EPS's headless detection.
 const BROWSER_ENGINE = (process.env.BROWSER_ENGINE || "camoufox").toLowerCase();
 const USE_CAMOUFOX = BROWSER_ENGINE === "camoufox";
+// SEED/SCRAPE SPLIT: mint the tmpt-carrying cookie jar on clean bart RESIDENTIAL
+// (the only IPs that pass reCAPTCHA/EPS at the event page), then INJECT that jar
+// into pool contexts on the cheap Mongo datacenter proxies for the facets calls.
+// facets validates the tmpt cookie and is IP-agnostic, so one seed serves the whole
+// pool. Enable with SEED_SPLIT=1 + BART_* creds in .env (see helpers/proxy.js).
+const SEED_SPLIT = process.env.SEED_SPLIT === "1";
+const SEED_TTL_MS = parseInt(process.env.SEED_TTL_MS, 10) || 8 * 60 * 1000;
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
@@ -1342,6 +1349,65 @@ class BrowserPagePool {
     this._contexts = [];                 // all contexts (for cleanup)
     this._pageMeta = new Map();          // page -> { context, proxy }
     this._usedProxies = new Set();       // proxy strings currently assigned to a page
+    // Seed/scrape split: shared cookie jar minted on bart, injected into scrape pages.
+    this._seedJar = null;                // Array<cookie> last minted on bart
+    this._seedJarAt = 0;                 // ms timestamp of the jar
+    this._seedInFlight = null;           // dedupe concurrent mints
+  }
+
+  // Ensure a fresh seed cookie jar exists (minted on bart). Returns the jar or null.
+  // TTL-cached; concurrent callers share one in-flight mint.
+  async _ensureSeedJar(eventId) {
+    if (!SEED_SPLIT) return null;
+    if (this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS) return this._seedJar;
+    if (this._seedInFlight) return this._seedInFlight;
+    this._seedInFlight = this._mintSeedJar(eventId).finally(() => { this._seedInFlight = null; });
+    return this._seedInFlight;
+  }
+
+  // Mint a tmpt-carrying cookie jar on clean bart residential using the FULL recipe
+  // (homepage → event → wait tmpt → settle → validate facets 200). Retries fresh
+  // bart sticky sessions until one passes (~1/3 hit rate). Returns the jar (or the
+  // previous stale jar if all attempts fail this round).
+  async _mintSeedJar(eventId) {
+    const seedId = eventId || this._initEventId;
+    if (!seedId) return this._seedJar;
+    const attempts = parseInt(process.env.BART_SEED_ATTEMPTS, 10) || 6;
+    const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+    for (let a = 0; a < attempts; a++) {
+      const bart = getSeedProxy();
+      if (!bart) { console.warn('[Seed] bart not configured (set BART_* in .env)'); return this._seedJar; }
+      let ctx = null;
+      try {
+        ctx = await this._browser.newContext({ viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 }, ignoreHTTPSErrors: true, bypassCSP: true, proxy: bart });
+        const page = await ctx.newPage();
+        await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+        await page.waitForTimeout(2500 + Math.random() * 1500);
+        for (let r = 0; r < 2; r++) {
+          const resp = await page.goto(`https://www.ticketmaster.com/event/${seedId}`, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+          if ((resp ? resp.status() : 0) === 200) break;
+          await new Promise((t) => setTimeout(t, 1500));
+        }
+        let tmpt = false;
+        for (let w = 0; w < 40 && !tmpt; w++) { tmpt = (await ctx.cookies()).some((c) => c.name === 'tmpt'); if (!tmpt) await new Promise((t) => setTimeout(t, 750)); }
+        await page.waitForTimeout(3000); // let the page's own XHRs establish the services session
+        const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
+        if ((vr.status || 0) === 200) {
+          this._seedJar = await ctx.cookies();
+          this._seedJarAt = Date.now();
+          console.log(`[Seed] minted jar on bart (${this._seedJar.length} cookies, tmpt=${tmpt}) — facets 200 ✓`);
+          await ctx.close().catch(() => {});
+          return this._seedJar;
+        }
+        console.log(`[Seed] bart attempt ${a + 1}/${attempts}: tmpt=${tmpt} facets=${vr.status || 0} — trying another session`);
+        await ctx.close().catch(() => {});
+      } catch (e) {
+        console.warn(`[Seed] attempt ${a + 1} failed: ${e.message}`);
+        if (ctx) await ctx.close().catch(() => {});
+      }
+    }
+    console.warn('[Seed] could not mint a fresh jar this round; using stale jar if present');
+    return this._seedJar;
   }
 
   // Pick a proxy not already assigned to another pool page (falls back to any).
@@ -1379,27 +1445,38 @@ class BrowserPagePool {
         }
         context = await this._browser.newContext(ctxOpts);
         const page = await context.newPage();
-        // Warm up like a real visitor: homepage first (seed cookies), then the event
-        // page carrying them — instead of hitting /event cold.
-        await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
-        await page.waitForTimeout(1500 + Math.random() * 1500);
-        const url = seedId ? `https://www.ticketmaster.com/event/${seedId}` : 'https://www.ticketmaster.com/';
         let status = 0;
-        for (let r = 0; r < 2; r++) {
-          const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
-          status = resp ? resp.status() : 0;
-          if (status === 200) break;
-          await new Promise((t) => setTimeout(t, 1500));
-        }
-        // Wait for the EPS `tmpt` token to mint BEFORE validating. Through a
-        // residential proxy the challenge JS needs time (~6-18s); without tmpt the
-        // facets call always 403s — and the event PAGE may stay 401 even when the
-        // facets API will succeed, so tmpt (not page status) is the real signal.
-        if (seedId) {
-          for (let w = 0; w < 8; w++) {
-            const names = (await context.cookies()).map((c) => c.name);
-            if (names.includes('tmpt')) break;
+        // SEED/SCRAPE SPLIT: this context runs on a cheap Mongo datacenter proxy that
+        // CANNOT mint tmpt (reCAPTCHA/EPS blocks datacenter IPs at the event page).
+        // Inject the bart-minted jar (tmpt + session cookies) so facets validates
+        // without any reCAPTCHA seed on this IP. facets is IP-agnostic once tmpt is
+        // valid, so one bart seed serves every scrape proxy.
+        const jar = SEED_SPLIT ? await this._ensureSeedJar(seedId) : null;
+        if (jar && jar.length) {
+          await context.addCookies(jar).catch((e) => console.warn('[PagePool] inject seed jar failed:', e.message));
+          status = 200; // session comes from the injected jar; page nav is unnecessary
+        } else {
+          // Fallback (split off, or no jar available): self-seed on this proxy —
+          // homepage first (seed cookies), then the event page carrying them.
+          await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+          await page.waitForTimeout(1500 + Math.random() * 1500);
+          const url = seedId ? `https://www.ticketmaster.com/event/${seedId}` : 'https://www.ticketmaster.com/';
+          for (let r = 0; r < 2; r++) {
+            const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+            status = resp ? resp.status() : 0;
+            if (status === 200) break;
             await new Promise((t) => setTimeout(t, 1500));
+          }
+          // Wait for the EPS `tmpt` token to mint BEFORE validating. Through a
+          // residential proxy the challenge JS needs time (~6-18s); without tmpt the
+          // facets call always 403s — and the event PAGE may stay 401 even when the
+          // facets API will succeed, so tmpt (not page status) is the real signal.
+          if (seedId) {
+            for (let w = 0; w < 8; w++) {
+              const names = (await context.cookies()).map((c) => c.name);
+              if (names.includes('tmpt')) break;
+              await new Promise((t) => setTimeout(t, 1500));
+            }
           }
         }
         // True validation: does a real facets call succeed? Use the FULL header set
@@ -1518,21 +1595,29 @@ class BrowserPagePool {
     console.log(`[PagePool] Seeding cookies via: ${eventUrl}`);
     const seedPage = await context.newPage();
     try {
-      await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      // Wait for the EPS `tmpt` token to mint (IP-bound; residential hop needs time).
-      let hasTmpt = false;
-      for (let w = 0; w < 12; w++) {
-        const names = (await context.cookies()).map((c) => c.name);
-        if (names.includes('tmpt')) { hasTmpt = true; break; }
-        await new Promise((t) => setTimeout(t, 1500));
-      }
+      const jar = SEED_SPLIT ? await this._ensureSeedJar(eventId) : null;
+      if (jar && jar.length) {
+        // Split mode: this shared context is on a datacenter proxy that can't mint
+        // tmpt — inject the bart-minted jar so page #1 scrapes like the rest.
+        await context.addCookies(jar).catch((e) => console.warn('[PagePool] seed inject failed:', e.message));
+        console.log(`[PagePool] seed page #1 using injected bart jar (${jar.length} cookies)`);
+      } else {
+        await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        // Wait for the EPS `tmpt` token to mint (IP-bound; residential hop needs time).
+        let hasTmpt = false;
+        for (let w = 0; w < 12; w++) {
+          const names = (await context.cookies()).map((c) => c.name);
+          if (names.includes('tmpt')) { hasTmpt = true; break; }
+          await new Promise((t) => setTimeout(t, 1500));
+        }
 
-      const allCookies = await context.cookies();
-      const tmCookies = allCookies.filter(c => c.domain.includes('ticketmaster'));
-      console.log(`[PagePool] ${tmCookies.length} TM cookies seeded (tmpt=${hasTmpt ? 'YES' : 'no'})`);
+        const allCookies = await context.cookies();
+        const tmCookies = allCookies.filter(c => c.domain.includes('ticketmaster'));
+        console.log(`[PagePool] ${tmCookies.length} TM cookies seeded (tmpt=${hasTmpt ? 'YES' : 'no'})`);
 
-      if (tmCookies.length === 0) {
-        console.warn('[PagePool] WARNING: No TM cookies found after page load!');
+        if (tmCookies.length === 0) {
+          console.warn('[PagePool] WARNING: No TM cookies found after page load!');
+        }
       }
     } catch (e) {
       console.error(`[PagePool] Seed page load failed: ${e.message}`);
@@ -1769,13 +1854,19 @@ class BrowserPagePool {
         ? `https://www.ticketmaster.com/event/${seedEventId}`
         : 'https://www.ticketmaster.com/';
 
-      // Seed cookies on page #1 (context #1 / newProxy)
+      // Seed cookies on page #1 (context #1 / newProxy). In split mode inject the
+      // bart-minted jar instead of self-seeding on the datacenter proxy.
       const seedPage = await context.newPage();
-      await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await new Promise(r => setTimeout(r, 2000));
-
-      const tmCookies = (await context.cookies()).filter(c => c.domain.includes('ticketmaster'));
-      console.log(`[PagePool] Restart: ${tmCookies.length} TM cookies after seed`);
+      const rjar = SEED_SPLIT ? await this._ensureSeedJar(seedEventId) : null;
+      if (rjar && rjar.length) {
+        await context.addCookies(rjar).catch((e) => console.warn('[PagePool] Restart seed inject failed:', e.message));
+        console.log(`[PagePool] Restart: seed page #1 using injected bart jar (${rjar.length} cookies)`);
+      } else {
+        await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await new Promise(r => setTimeout(r, 2000));
+        const tmCookies = (await context.cookies()).filter(c => c.domain.includes('ticketmaster'));
+        console.log(`[PagePool] Restart: ${tmCookies.length} TM cookies after seed`);
+      }
 
       this.pages.push(seedPage);
       this.available.push(seedPage);
@@ -1840,6 +1931,9 @@ class BrowserPagePool {
       this._consecutiveErrors++;
       if (this._consecutiveErrors >= 5 && !this._isRestarting) {
         console.log(`[PagePool] ${this._consecutiveErrors} consecutive 403s — triggering browser restart`);
+        // A 403 storm in split mode means the shared jar's tmpt has expired/burned —
+        // invalidate it so the restart re-mints a fresh one on bart.
+        if (SEED_SPLIT) { this._seedJar = null; this._seedJarAt = 0; }
         this._restartBrowser('403-errors').catch(() => {});
       }
     } else if (status >= 200 && status < 400) {

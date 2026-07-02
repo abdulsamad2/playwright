@@ -63,6 +63,35 @@ export function stopProxyRefresh() {
   }
 }
 
+// --- Seed proxies (bart rotating residential) ---------------------------------
+// The Mongo proxies above are cheap datacenter IPs used for the FACETS scraping
+// calls. They cannot MINT tmpt (reCAPTCHA/EPS blocks datacenter IPs at the event
+// page). So seeding runs on clean bart RESIDENTIAL: each call returns a fresh
+// sticky session (its own exit IP) so the seeder can retry until one passes.
+// Creds live in .env (BART_HOST/BART_PORT/BART_USER_PREFIX/BART_PASS).
+const BART_HOST = process.env.BART_HOST || "resipro.bartproxies.com";
+const BART_PORT = process.env.BART_PORT || "7778";
+const BART_USER_PREFIX = process.env.BART_USER_PREFIX || "";
+const BART_PASS = process.env.BART_PASS || "";
+
+function randSession(len = 12) {
+  const alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let s = "";
+  for (let i = 0; i < len; i++) s += alpha[Math.floor(Math.random() * alpha.length)];
+  return s;
+}
+
+// Returns a fresh bart sticky-session proxy { server, username, password } or null
+// if bart isn't configured. Each call = a new sticky session = a new exit IP.
+export function getSeedProxy() {
+  if (!BART_USER_PREFIX || !BART_PASS) return null;
+  return {
+    server: `http://${BART_HOST}:${BART_PORT}`,
+    username: `${BART_USER_PREFIX}${randSession()}`,
+    password: BART_PASS,
+  };
+}
+
 export default {
   proxies: proxies,
 };
