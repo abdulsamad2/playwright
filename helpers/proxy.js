@@ -69,11 +69,6 @@ export function stopProxyRefresh() {
 // page). So seeding runs on clean bart RESIDENTIAL: each call returns a fresh
 // sticky session (its own exit IP) so the seeder can retry until one passes.
 // Creds live in .env (BART_HOST/BART_PORT/BART_USER_PREFIX/BART_PASS).
-const BART_HOST = process.env.BART_HOST || "resipro.bartproxies.com";
-const BART_PORT = process.env.BART_PORT || "7778";
-const BART_USER_PREFIX = process.env.BART_USER_PREFIX || "";
-const BART_PASS = process.env.BART_PASS || "";
-
 function randSession(len = 12) {
   const alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let s = "";
@@ -83,12 +78,18 @@ function randSession(len = 12) {
 
 // Returns a fresh bart sticky-session proxy { server, username, password } or null
 // if bart isn't configured. Each call = a new sticky session = a new exit IP.
+// Reads env at CALL time (not module-load) so it works regardless of when
+// dotenv.config() runs relative to this module's import.
 export function getSeedProxy() {
-  if (!BART_USER_PREFIX || !BART_PASS) return null;
+  const host = process.env.BART_HOST || "resipro.bartproxies.com";
+  const port = process.env.BART_PORT || "7778";
+  const prefix = process.env.BART_USER_PREFIX || "";
+  const pass = process.env.BART_PASS || "";
+  if (!prefix || !pass) return null;
   return {
-    server: `http://${BART_HOST}:${BART_PORT}`,
-    username: `${BART_USER_PREFIX}${randSession()}`,
-    password: BART_PASS,
+    server: `http://${host}:${port}`,
+    username: `${prefix}${randSession()}`,
+    password: pass,
   };
 }
 

@@ -17,8 +17,10 @@ const USE_CAMOUFOX = BROWSER_ENGINE === "camoufox";
 // into pool contexts on the cheap Mongo datacenter proxies for the facets calls.
 // facets validates the tmpt cookie and is IP-agnostic, so one seed serves the whole
 // pool. Enable with SEED_SPLIT=1 + BART_* creds in .env (see helpers/proxy.js).
-const SEED_SPLIT = process.env.SEED_SPLIT === "1";
-const SEED_TTL_MS = parseInt(process.env.SEED_TTL_MS, 10) || 8 * 60 * 1000;
+// Read at CALL time (not module-load) so .env values are picked up even though this
+// module is imported before app.js calls dotenv.config().
+const SEED_SPLIT = () => process.env.SEED_SPLIT === "1";
+const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 8 * 60 * 1000;
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
@@ -1358,8 +1360,8 @@ class BrowserPagePool {
   // Ensure a fresh seed cookie jar exists (minted on bart). Returns the jar or null.
   // TTL-cached; concurrent callers share one in-flight mint.
   async _ensureSeedJar(eventId) {
-    if (!SEED_SPLIT) return null;
-    if (this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS) return this._seedJar;
+    if (!SEED_SPLIT()) return null;
+    if (this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS()) return this._seedJar;
     if (this._seedInFlight) return this._seedInFlight;
     this._seedInFlight = this._mintSeedJar(eventId).finally(() => { this._seedInFlight = null; });
     return this._seedInFlight;
@@ -1380,6 +1382,18 @@ class BrowserPagePool {
       let ctx = null;
       try {
         ctx = await this._browser.newContext({ viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 }, ignoreHTTPSErrors: true, bypassCSP: true, proxy: bart });
+        // BANDWIDTH: bart is metered by the GB and the seed loads full pages through
+        // it. The EPS/reCAPTCHA challenge that mints tmpt is JS-based, so abort the
+        // heavy assets (images/media/fonts/stylesheets) — tmpt still mints but page
+        // weight drops ~5-10×. Facets scraping runs on the cheap old proxies, not
+        // bart, so this is the only place bart burns data. Disable: SEED_BLOCK_ASSETS=0.
+        if (process.env.SEED_BLOCK_ASSETS !== '0') {
+          await ctx.route('**/*', (route) => {
+            const t = route.request().resourceType();
+            if (t === 'image' || t === 'media' || t === 'font' || t === 'stylesheet') return route.abort();
+            return route.continue();
+          }).catch(() => {});
+        }
         const page = await ctx.newPage();
         await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
         await page.waitForTimeout(2500 + Math.random() * 1500);
@@ -1387,6 +1401,15 @@ class BrowserPagePool {
           const resp = await page.goto(`https://www.ticketmaster.com/event/${seedId}`, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
           if ((resp ? resp.status() : 0) === 200) break;
           await new Promise((t) => setTimeout(t, 1500));
+        }
+        // Fast-fail a flagged bart exit (EPS "Paused"/block screen) BEFORE spending
+        // the tmpt poll + settle + facets on it — saves time and a little data on the
+        // ~2/3 of sessions that are flagged.
+        const onBlockScreen = await page.evaluate(() => /paused|verified|interruption|identity/i.test(document.title)).catch(() => false);
+        if (onBlockScreen) {
+          console.log(`[Seed] bart attempt ${a + 1}/${attempts}: EPS block screen — next session`);
+          await ctx.close().catch(() => {});
+          continue;
         }
         let tmpt = false;
         for (let w = 0; w < 40 && !tmpt; w++) { tmpt = (await ctx.cookies()).some((c) => c.name === 'tmpt'); if (!tmpt) await new Promise((t) => setTimeout(t, 750)); }
@@ -1451,7 +1474,7 @@ class BrowserPagePool {
         // Inject the bart-minted jar (tmpt + session cookies) so facets validates
         // without any reCAPTCHA seed on this IP. facets is IP-agnostic once tmpt is
         // valid, so one bart seed serves every scrape proxy.
-        const jar = SEED_SPLIT ? await this._ensureSeedJar(seedId) : null;
+        const jar = SEED_SPLIT() ? await this._ensureSeedJar(seedId) : null;
         if (jar && jar.length) {
           await context.addCookies(jar).catch((e) => console.warn('[PagePool] inject seed jar failed:', e.message));
           status = 200; // session comes from the injected jar; page nav is unnecessary
@@ -1595,7 +1618,7 @@ class BrowserPagePool {
     console.log(`[PagePool] Seeding cookies via: ${eventUrl}`);
     const seedPage = await context.newPage();
     try {
-      const jar = SEED_SPLIT ? await this._ensureSeedJar(eventId) : null;
+      const jar = SEED_SPLIT() ? await this._ensureSeedJar(eventId) : null;
       if (jar && jar.length) {
         // Split mode: this shared context is on a datacenter proxy that can't mint
         // tmpt — inject the bart-minted jar so page #1 scrapes like the rest.
@@ -1857,7 +1880,7 @@ class BrowserPagePool {
       // Seed cookies on page #1 (context #1 / newProxy). In split mode inject the
       // bart-minted jar instead of self-seeding on the datacenter proxy.
       const seedPage = await context.newPage();
-      const rjar = SEED_SPLIT ? await this._ensureSeedJar(seedEventId) : null;
+      const rjar = SEED_SPLIT() ? await this._ensureSeedJar(seedEventId) : null;
       if (rjar && rjar.length) {
         await context.addCookies(rjar).catch((e) => console.warn('[PagePool] Restart seed inject failed:', e.message));
         console.log(`[PagePool] Restart: seed page #1 using injected bart jar (${rjar.length} cookies)`);
@@ -1933,7 +1956,7 @@ class BrowserPagePool {
         console.log(`[PagePool] ${this._consecutiveErrors} consecutive 403s — triggering browser restart`);
         // A 403 storm in split mode means the shared jar's tmpt has expired/burned —
         // invalidate it so the restart re-mints a fresh one on bart.
-        if (SEED_SPLIT) { this._seedJar = null; this._seedJarAt = 0; }
+        if (SEED_SPLIT()) { this._seedJar = null; this._seedJarAt = 0; }
         this._restartBrowser('403-errors').catch(() => {});
       }
     } else if (status >= 200 && status < 400) {
