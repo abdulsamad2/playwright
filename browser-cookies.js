@@ -1596,6 +1596,18 @@ class BrowserPagePool {
   }
 
   async _doInit(proxy, cookies, eventId = null) {
+    // Serialize inits. A slow seed (~60-75s) let ~12 events each start their own
+    // _doInit, whose async fills piled pages into ONE array (the 15/3 over-spawn +
+    // extra datacenter hammering). Only one runs; the rest wait and reuse its pool.
+    if (this._isIniting) {
+      for (let i = 0; i < 400 && this._isIniting; i++) await new Promise((r) => setTimeout(r, 200));
+      if (this.initialized && this._browser?.isConnected()) return;
+    }
+    this._isIniting = true;
+    try {
+    // Honor POOL_SIZE from .env — read HERE (after dotenv has loaded); the
+    // constructor runs at import, before app.js calls dotenv.config(), so it can't.
+    this.size = parseInt(process.env.POOL_SIZE, 10) || this.size;
     // Only cleanup if there's something to clean up
     if (this.pages.length > 0 || this._browser) {
       await this.cleanup();
@@ -1706,6 +1718,9 @@ class BrowserPagePool {
     this.initialized = true;
     this._initPromise = null;
     console.log(`[PagePool] Ready: ${this.pages.length} page(s) — restart every ${this._cookieRefreshInterval / 60000}min`);
+    } finally {
+      this._isIniting = false;
+    }
   }
 
   /**
@@ -1970,9 +1985,13 @@ class BrowserPagePool {
       this._consecutiveErrors++;
       if (this._consecutiveErrors >= 5 && !this._isRestarting) {
         console.log(`[PagePool] ${this._consecutiveErrors} consecutive 403s — triggering browser restart`);
-        // A 403 storm in split mode means the shared jar's tmpt has expired/burned —
-        // invalidate it so the restart re-mints a fresh one on bart.
-        if (SEED_SPLIT()) { this._seedJar = null; this._seedJarAt = 0; }
+        // COST: only re-mint the bart jar if it's NEAR EXPIRY. A 403 storm is
+        // usually rate-flagged DATACENTER IPs, not a dead jar — the same jar still
+        // returns facets 200 on fresh IPs — so invalidating a fresh jar just burns
+        // metered bart residential data re-seeding something that still works. The
+        // restart rotates the datacenter proxies; the jar is reused until its TTL.
+        const jarAgeMs = this._seedJarAt ? Date.now() - this._seedJarAt : Infinity;
+        if (SEED_SPLIT() && jarAgeMs > 0.75 * SEED_TTL_MS()) { this._seedJar = null; this._seedJarAt = 0; }
         this._restartBrowser('403-errors').catch(() => {});
       }
     } else if (status >= 200 && status < 400) {
