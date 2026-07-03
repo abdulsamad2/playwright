@@ -36,58 +36,113 @@ let _farmJars = { list: [], at: 0, rr: 0 };
 async function readFarmJar() {
   if (!_farmJars.list.length || Date.now() - _farmJars.at > 10000) {
     try {
-      const docs = await mongoose.connection.db
-        .collection("seed_jars")
-        .find({ status: "healthy", expiresAt: { $gt: new Date() } })
-        .sort({ slot: 1 })
-        .toArray();
+      const budget = JAR_CALL_BUDGET();
+      const q = { status: "healthy", expiresAt: { $gt: new Date() } };
+      // #1: don't hand out tokens that have reached their call budget (retire clean).
+      if (budget) q.$or = [{ useCount: { $exists: false } }, { useCount: { $lt: budget } }];
+      const docs = await mongoose.connection.db.collection("seed_jars").find(q).sort({ slot: 1 }).toArray();
       _farmJars = { list: docs.map((d) => d.cookies), at: Date.now(), rr: _farmJars.rr };
     } catch (e) {
       console.warn("[SeedFarm] read failed:", e.message);
     }
   }
-  if (!_farmJars.list.length) return null;
-  const cookies = _farmJars.list[_farmJars.rr % _farmJars.list.length];
-  _farmJars.rr = (_farmJars.rr + 1) % _farmJars.list.length;
+  const N = _farmJars.list.length;
+  if (!N) return null;
+  // #2: round-robin, but skip any token already over the per-minute rate cap (scan up
+  // to N from the cursor); if all are over cap, fall back to the next one anyway.
+  const cap = JAR_RATE_CAP();
+  for (let i = 0; i < N; i++) {
+    const cand = _farmJars.list[(_farmJars.rr + i) % N];
+    if (!cap || jarLocalRate(_tmptOf(cand)) < cap) {
+      _farmJars.rr = (_farmJars.rr + i + 1) % N;
+      return cand;
+    }
+  }
+  const cookies = _farmJars.list[_farmJars.rr % N];
+  _farmJars.rr = (_farmJars.rr + 1) % N;
   return cookies;
 }
 
-// Health feedback: when a farm jar's facets return 403 (volume-flagged / dead), mark
-// its slot dead in seed_jars so the FARM re-mints it, and drop it from local rotation
-// immediately. Matched by the unique tmpt cookie value.
-async function markFarmJarDead(cookies) {
+function _tmptOf(cookies) { return (cookies.find((c) => c.name === "tmpt") || {}).value; }
+
+// --- Per-token budget (#1) + rate cap (#2): proactive 403 avoidance -------------
+// A tmpt token flags after a limited VOLUME of facets calls. Rather than use it until
+// it 403s (a bot signal), retire it PROACTIVELY at a call budget. The budget is GLOBAL
+// (a token is shared fleet-wide) → tracked in seed_jars.useCount, each instance $inc's
+// its share in batches. We also cap the per-token call RATE locally so no token gets
+// hammered in bursts. JAR_CALL_BUDGET / JAR_RATE_CAP = 0 disables each.
+const JAR_CALL_BUDGET = () => parseInt(process.env.JAR_CALL_BUDGET, 10) || 120;
+const JAR_RATE_CAP = () => parseInt(process.env.JAR_RATE_CAP, 10) || 25; // facets/min/token
+const _jarFail = new Map();      // tmpt -> consecutive 403 count
+const _jarUse = new Map();       // tmpt -> { pending, window: number[] }
+const _retiredTokens = new Set();// tmpt values retired locally (force page rebind)
+
+function _jarUseEntry(tmpt) {
+  let u = _jarUse.get(tmpt);
+  if (!u) { u = { pending: 0, window: [] }; _jarUse.set(tmpt, u); }
+  return u;
+}
+// Local facets calls on `tmpt` in the last 60s (for the rate cap).
+function jarLocalRate(tmpt) {
+  const u = _jarUse.get(tmpt);
+  if (!u) return 0;
+  const cutoff = Date.now() - 60000;
+  u.window = u.window.filter((t) => t > cutoff);
+  return u.window.length;
+}
+// Retire a token: drop from local rotation, flag for page rebind, mark dead in the DB
+// so the farm re-mints it and no instance hands it out again.
+async function _retireJarByTmpt(tmpt, reason) {
+  if (!tmpt || _retiredTokens.has(tmpt)) return;
+  if (_retiredTokens.size > 300) _retiredTokens.clear(); // bound; DB status:dead is the source of truth
+  _retiredTokens.add(tmpt);
+  _farmJars.list = _farmJars.list.filter((j) => _tmptOf(j) !== tmpt);
+  _jarUse.delete(tmpt); _jarFail.delete(tmpt);
   try {
-    const tmpt = (cookies.find((c) => c.name === "tmpt") || {}).value;
-    if (!tmpt) return;
-    _farmJars.list = _farmJars.list.filter((j) => (j.find((c) => c.name === "tmpt") || {}).value !== tmpt);
     await mongoose.connection.db.collection("seed_jars").updateOne(
       { cookies: { $elemMatch: { name: "tmpt", value: tmpt } } },
       { $set: { status: "dead", updatedAt: new Date() } }
     );
-    console.log("[SeedFarm] marked a jar dead (facets 403) — farm will re-mint");
-  } catch (e) {
-    console.warn("[SeedFarm] markDead failed:", e.message);
-  }
+    console.log(`[SeedFarm] retired a jar (${reason}) — farm will re-mint`);
+  } catch (e) { console.warn("[SeedFarm] retire failed:", e.message); }
+}
+async function markFarmJarDead(cookies) { return _retireJarByTmpt(_tmptOf(cookies), "facets 403"); }
+
+// Record N facets calls made on `tmpt`. Always tracks the rate window (#2); batches a
+// GLOBAL useCount $inc and retires the token once it reaches JAR_CALL_BUDGET (#1), so
+// it's rotated out BEFORE it can 403.
+async function noteJarUsage(tmpt, n) {
+  if (!tmpt || n <= 0) return;
+  const u = _jarUseEntry(tmpt);
+  const now = Date.now();
+  for (let i = 0; i < n; i++) u.window.push(now);
+  const budget = JAR_CALL_BUDGET();
+  if (!budget) return;
+  u.pending += n;
+  if (u.pending < 15) return; // batch DB writes
+  const inc = u.pending; u.pending = 0;
+  try {
+    const doc = await mongoose.connection.db.collection("seed_jars").findOneAndUpdate(
+      { cookies: { $elemMatch: { name: "tmpt", value: tmpt } }, status: "healthy" },
+      { $inc: { useCount: inc } },
+      { returnDocument: "after", projection: { useCount: 1 } }
+    );
+    const total = (doc && (doc.value ? doc.value.useCount : doc.useCount)) || 0;
+    if (total >= budget) _retireJarByTmpt(tmpt, `call budget ${total}/${budget}`).catch(() => {});
+  } catch { /* best effort */ }
 }
 
-// A single facets 403 is often the PROXY IP being rate-flagged, not the token — so
-// don't kill a jar on one blip (that wastes a bart re-mint on a good jar). Count
-// consecutive 403s PER JAR (they accrue across binds on different proxies thanks to
-// round-robin) and only mark it dead at JAR_DEAD_THRESHOLD; any 200 resets the count.
-const _jarFail = new Map(); // tmpt -> consecutive 403 count
-function _tmptOf(cookies) { return (cookies.find((c) => c.name === "tmpt") || {}).value; }
+// A single facets 403 is usually the PROXY IP, not the token — only mark a jar dead
+// after JAR_DEAD_THRESHOLD consecutive 403s (across proxies via round-robin); any 200
+// resets the count.
 function noteFarmJarResult(cookies, ok) {
   const tmpt = _tmptOf(cookies);
   if (!tmpt) return;
   if (ok) { _jarFail.delete(tmpt); return; }
   const threshold = Math.max(1, parseInt(process.env.JAR_DEAD_THRESHOLD, 10) || 3);
   const n = (_jarFail.get(tmpt) || 0) + 1;
-  if (n >= threshold) {
-    _jarFail.delete(tmpt);
-    markFarmJarDead(cookies).catch(() => {});
-  } else {
-    _jarFail.set(tmpt, n);
-  }
+  if (n >= threshold) { _jarFail.delete(tmpt); markFarmJarDead(cookies).catch(() => {}); }
+  else _jarFail.set(tmpt, n);
 }
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
@@ -1342,6 +1397,17 @@ class RequestBatcher {
         if (r.status) this.pool.trackError(r.status);
       }
 
+      // Per-token budget/rate accounting: attribute this batch's FACETS calls to the
+      // page's injected token, so it can be proactively retired at its call budget
+      // (before it 403s). If the token got retired, drop the page → rebind on a fresh one.
+      const meta = this.pool._pageMeta.get(page);
+      const tmpt = meta && meta.tmpt;
+      if (tmpt) {
+        const facetsCount = allRequests.reduce((a, r) => a + (/\/ismds\/|facets\?/.test(r.url) ? 1 : 0), 0);
+        if (facetsCount) noteJarUsage(tmpt, facetsCount).catch(() => {});
+        if (_retiredTokens.has(tmpt)) this.pool._removePage(page);
+      }
+
       // Distribute results back to each event's promise
       const eventResults = batch.map(() => []);
       for (let i = 0; i < results.length; i++) {
@@ -1615,7 +1681,7 @@ class BrowserPagePool {
         if (facetStatus === 200 || (!seedId && status === 200)) {
           if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
           this._contexts.push(context);
-          this._pageMeta.set(page, { context, proxy });
+          this._pageMeta.set(page, { context, proxy, tmpt: jar ? _tmptOf(jar) : undefined });
           console.log(`[PagePool] page bound to ${label} (page=${status}, facets=${facetStatus}) ✓`);
           return { page, context, proxy };
         }
@@ -1729,9 +1795,11 @@ class BrowserPagePool {
 
     console.log(`[PagePool] Seeding cookies via: ${eventUrl}`);
     const seedPage = await context.newPage();
+    let seedTmpt;
     try {
       const jar = SEED_SPLIT() ? await this._ensureSeedJar(eventId) : null;
       if (jar && jar.length) {
+        seedTmpt = _tmptOf(jar);
         // Split mode: this shared context is on a datacenter proxy that can't mint
         // tmpt — inject the bart-minted jar so page #1 scrapes like the rest.
         await context.addCookies(jar).catch((e) => console.warn('[PagePool] seed inject failed:', e.message));
@@ -1764,7 +1832,7 @@ class BrowserPagePool {
     this.pages.push(seedPage);
     this.available.push(seedPage);
     this._contexts.push(context);
-    this._pageMeta.set(seedPage, { context, proxy });
+    this._pageMeta.set(seedPage, { context, proxy, tmpt: seedTmpt });
     if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
 
     // Create remaining pool pages — EACH in its OWN context bound to its OWN
@@ -2009,7 +2077,7 @@ class BrowserPagePool {
       this.pages.push(seedPage);
       this.available.push(seedPage);
       this._contexts.push(context);
-      this._pageMeta.set(seedPage, { context, proxy: newProxy });
+      this._pageMeta.set(seedPage, { context, proxy: newProxy, tmpt: rjar ? _tmptOf(rjar) : undefined });
       if (newProxy?.proxy) this._usedProxies.add(newProxy.proxy);
 
       // Remaining pool pages — each on its OWN validated proxy
