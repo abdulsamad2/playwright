@@ -771,6 +771,16 @@ async function loadCookiesFromFile() {
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
 async function refreshCookies(eventId, proxy = null) {
+  // SPLIT MODE CHOKEPOINT: the scraper must NEVER mint its own tmpt by navigating
+  // TM. Every caller of refreshCookies (SessionManager, CookieManager, scraperManager)
+  // funnels through here, so one guard neutralizes them all. Serve a ready farm jar
+  // instead (or empty cookies → the caller fails cleanly and retries) rather than
+  // self-seeding on a datacenter proxy. SEED_FARM_FALLBACK=1 re-enables minting for
+  // single-instance bootstrap only.
+  if (SEED_SPLIT() && process.env.SEED_FARM_FALLBACK !== "1") {
+    const jar = SEED_FARM() ? await readFarmJar() : null;
+    return { cookies: jar || [], fingerprint: BrowserFingerprint.generate(), lastRefresh: Date.now() };
+  }
   if ((!proxy || !proxy.proxy) && !DIRECT_MODE) {
     throw new Error('Cannot refresh cookies without a valid proxy');
   }
@@ -1180,13 +1190,19 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
     // Create a page for requests
     apiPage = await apiContext.newPage();
     
-    // Navigate to ticketmaster initially to establish session
+    // Navigate to ticketmaster initially to establish session. SKIP in split mode:
+    // the per-page injected farm jar supplies the session, so touching TM on this
+    // datacenter init proxy only risks a self-mint / a 30s hang for no benefit.
     try {
-      await apiPage.goto('https://www.ticketmaster.com/', { 
+      if (SEED_SPLIT()) {
+        console.log('[API] split mode — skipping establish-session nav (jar injected per page)');
+      } else {
+      await apiPage.goto('https://www.ticketmaster.com/', {
         waitUntil: 'domcontentloaded',
-        timeout: 30000 
+        timeout: 30000
       });
       await new Promise(r => setTimeout(r, 1000));
+      }
     } catch (e) {
       // If browser crashed (Target closed), this is fatal — don't return dead context
       if (e.message?.includes('Target') && e.message?.includes('closed')) {
@@ -1197,8 +1213,10 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
       console.warn('Initial TM navigation warning:', e.message);
     }
 
-    // Verify browser is still alive before returning
-    if (!apiBrowser.isConnected()) {
+    // Verify browser is still alive before returning. Use ?. — a crash handler can
+    // null `apiBrowser` between launch and here, and `null.isConnected()` would throw
+    // a TypeError that escapes as an un-descriptive init failure (and crash-loops).
+    if (!apiBrowser?.isConnected()) {
       console.error('Browser disconnected after init');
       await cleanupApiBrowser();
       throw new Error('Browser disconnected immediately after launch');
@@ -1638,9 +1656,16 @@ class BrowserPagePool {
         if (jar && jar.length) {
           await context.addCookies(jar).catch((e) => console.warn('[PagePool] inject seed jar failed:', e.message));
           status = 200; // session comes from the injected jar; page nav is unnecessary
+        } else if (SEED_SPLIT()) {
+          // NEVER self-mint in split mode. The farm is momentarily dry — skip this
+          // proxy and retry later rather than navigate TM to mint a tmpt on a
+          // datacenter IP (EPS 403s it, burns the attempt, and pollutes the pool).
+          console.log('[PagePool] no farm jar available — skipping proxy (not self-minting)');
+          await context.close().catch(() => {});
+          continue;
         } else {
-          // Fallback (split off, or no jar available): self-seed on this proxy —
-          // homepage first (seed cookies), then the event page carrying them.
+          // Non-split standalone mode only: self-seed on this proxy — homepage first
+          // (seed cookies), then the event page carrying them.
           await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
           await page.waitForTimeout(1500 + Math.random() * 1500);
           const url = seedId ? `https://www.ticketmaster.com/event/${seedId}` : 'https://www.ticketmaster.com/';
@@ -1804,6 +1829,10 @@ class BrowserPagePool {
         // tmpt — inject the bart-minted jar so page #1 scrapes like the rest.
         await context.addCookies(jar).catch((e) => console.warn('[PagePool] seed inject failed:', e.message));
         console.log(`[PagePool] seed page #1 using injected bart jar (${jar.length} cookies)`);
+      } else if (SEED_SPLIT()) {
+        // NEVER self-mint in split mode: farm is dry. Fail pool init (caller retries)
+        // rather than navigate TM on a datacenter IP to mint our own tmpt.
+        throw new Error('no farm jar available — not self-minting (SEED_SPLIT on)');
       } else {
         await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
         // Wait for the EPS `tmpt` token to mint (IP-bound; residential hop needs time).
@@ -2067,6 +2096,11 @@ class BrowserPagePool {
       if (rjar && rjar.length) {
         await context.addCookies(rjar).catch((e) => console.warn('[PagePool] Restart seed inject failed:', e.message));
         console.log(`[PagePool] Restart: seed page #1 using injected bart jar (${rjar.length} cookies)`);
+      } else if (SEED_SPLIT()) {
+        // NEVER self-mint in split mode: farm is dry. Abort the restart (next submit
+        // re-inits) instead of navigating TM on a datacenter IP to mint our own tmpt.
+        await seedPage.close().catch(() => {});
+        throw new Error('no farm jar available — not self-minting (SEED_SPLIT on)');
       } else {
         await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
         await new Promise(r => setTimeout(r, 2000));

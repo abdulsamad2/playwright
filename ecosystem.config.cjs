@@ -33,6 +33,14 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: "production",
+        // Split + farm mode MUST be on for the fleet: every instance reads a ready
+        // tmpt jar from the shared `seed_jars` collection and injects it, instead of
+        // self-seeding on a datacenter proxy (which EPS 403s). Baked in here so a
+        // missed `.env` edit or PM2's cached-env trap can't silently drop them —
+        // that's what makes instances fall back to self-seed and fail wholesale.
+        SEED_SPLIT: "1",
+        SEED_FARM: "1",
+        SEED_FARM_FALLBACK: "0", // never stampede bart in-process when the farm runs dry
       },
     },
   ],
