@@ -69,6 +69,26 @@ async function markFarmJarDead(cookies) {
     console.warn("[SeedFarm] markDead failed:", e.message);
   }
 }
+
+// A single facets 403 is often the PROXY IP being rate-flagged, not the token — so
+// don't kill a jar on one blip (that wastes a bart re-mint on a good jar). Count
+// consecutive 403s PER JAR (they accrue across binds on different proxies thanks to
+// round-robin) and only mark it dead at JAR_DEAD_THRESHOLD; any 200 resets the count.
+const _jarFail = new Map(); // tmpt -> consecutive 403 count
+function _tmptOf(cookies) { return (cookies.find((c) => c.name === "tmpt") || {}).value; }
+function noteFarmJarResult(cookies, ok) {
+  const tmpt = _tmptOf(cookies);
+  if (!tmpt) return;
+  if (ok) { _jarFail.delete(tmpt); return; }
+  const threshold = Math.max(1, parseInt(process.env.JAR_DEAD_THRESHOLD, 10) || 3);
+  const n = (_jarFail.get(tmpt) || 0) + 1;
+  if (n >= threshold) {
+    _jarFail.delete(tmpt);
+    markFarmJarDead(cookies).catch(() => {});
+  } else {
+    _jarFail.set(tmpt, n);
+  }
+}
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
 // Device settings
@@ -1584,9 +1604,12 @@ class BrowserPagePool {
           const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
           const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
           facetStatus = vr.status || 0;
-          // Health feedback: an injected FARM jar that 403s here is volume-flagged/dead
-          // → mark its slot dead so the farm re-mints it (and stop handing it out).
-          if (SEED_FARM() && facetStatus === 403 && jar && jar.length) markFarmJarDead(jar).catch(() => {});
+          // Farm health-feedback: record the result. A jar is only marked dead after
+          // N consecutive 403s (a single 403 is usually the proxy IP, not the token),
+          // so proxy-flagged blips don't waste bart re-mints on good jars.
+          if (SEED_FARM() && jar && jar.length && (facetStatus === 200 || facetStatus === 403)) {
+            noteFarmJarResult(jar, facetStatus === 200);
+          }
         }
         const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         if (facetStatus === 200 || (!seedId && status === 200)) {
