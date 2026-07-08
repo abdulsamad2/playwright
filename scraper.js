@@ -69,6 +69,24 @@ async function getCachedMap(eventId) {
   } catch { /* fall through to live fetch */ }
   return null;
 }
+
+// Fallback variant that returns any known map (even if stale).
+// Geometry changes rarely, so stale map is safer than failing a full scrape cycle.
+async function getAnyCachedMap(eventId) {
+  const mem = _mapMem.get(eventId);
+  if (mem?.data) return mem.data;
+  try {
+    const doc = await mongoose.connection.db.collection('event_maps').findOne({ _id: eventId });
+    if (doc?.data) {
+      _mapMemSet(eventId, doc.data);
+      return doc.data;
+    }
+  } catch {
+    // Best effort fallback only.
+  }
+  return null;
+}
+
 async function storeCachedMap(eventId, data) {
   _mapMemSet(eventId, data);
   try {
@@ -1078,6 +1096,15 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       }
     }
     
+    // Resilience fallback: if map call failed but facets succeeded, try a stale map.
+    if (!DataMap && MAP_CACHE_ON()) {
+      const staleMap = await getAnyCachedMap(eventId);
+      if (staleMap) {
+        DataMap = staleMap;
+        console.warn(`[MapCache] Using cached fallback map for event ${eventId}`);
+      }
+    }
+
     // Both APIs must succeed to ensure data consistency
     if (!DataFacets || !DataMap) {
       const failedApis = [];

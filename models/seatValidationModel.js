@@ -56,10 +56,6 @@ const seatValidationSchema = new mongoose.Schema(
   }
 );
 
-// Index for cleanup queries
-seatValidationSchema.index({ lastUpdated: 1 });
-seatValidationSchema.index({ delayedUntil: 1 });
-
 // Static method to clean up old records
 seatValidationSchema.statics.cleanupOld = async function(maxAge = 24 * 60 * 60 * 1000) {
   const cutoffDate = new Date(Date.now() - maxAge);

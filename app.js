@@ -1,9 +1,9 @@
 // app.js
+import "dotenv/config";
 import express from "express";
 import mongoose from "mongoose";
 import morgan from "morgan";
 import cors from "cors";
-import dotenv from "dotenv";
 
 // Route imports
 import scraperRoutes from "./routes/scraperRoutes.js";
@@ -23,8 +23,6 @@ import redisLiveStore from "./helpers/RedisLiveStore.js";
 
 // Proxy loader (MongoDB-backed, replaces hardcoded list)
 import { loadProxies, startProxyRefresh, stopProxyRefresh } from "./helpers/proxy.js";
-
-dotenv.config();
 
 const app = express();
 const initialPort = parseInt(process.env.PORT, 10) || 3000; // Renamed and parsed

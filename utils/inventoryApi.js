@@ -10,12 +10,23 @@ dotenv.config();
 class InventoryApi {
   constructor() {
     this.baseURL = 'https://app.seatscouts.com/sync/api';
+    this.debug = process.env.INVENTORY_API_DEBUG === '1';
+    this.timeoutMs = parseInt(process.env.INVENTORY_API_TIMEOUT_MS, 10) || 7000;
+    this.authFailCooldownMs = parseInt(process.env.INVENTORY_API_AUTH_FAIL_COOLDOWN_MS, 10) || 10 * 60 * 1000;
+    this.suspendedUntil = 0;
     this.headers = {
       'X-Company-Id': process.env.SEATSCOUTS_COMPANY_ID,
       'X-Api-Token': process.env.SEATSCOUTS_API_TOKEN,
       'Content-Type': 'application/json',
       'Accept': 'application/json'
     };
+    this.isConfigured = Boolean(
+      this.headers['X-Company-Id'] && this.headers['X-Api-Token']
+    );
+
+    if (!this.isConfigured) {
+      console.warn('[InventoryApi] SeatScouts credentials missing; delete requests will be skipped.');
+    }
   }
 
   /**
@@ -31,27 +42,56 @@ class InventoryApi {
    * @returns {Promise<Object>} Batch deletion results
    */
   async deleteInventoryBatch(inventoryIds) {
+    if (!this.isConfigured) {
+      return {
+        successful: [],
+        failed: inventoryIds.map(id => ({
+          id,
+          error: 'SeatScouts credentials missing',
+          status: 'CONFIG_MISSING'
+        })),
+        total: inventoryIds.length,
+        skipped: true
+      };
+    }
+
+    if (this.suspendedUntil > Date.now()) {
+      return {
+        successful: [],
+        failed: inventoryIds.map(id => ({
+          id,
+          error: 'Inventory API temporarily suspended after auth failures',
+          status: 'API_SUSPENDED'
+        })),
+        total: inventoryIds.length,
+        skipped: true
+      };
+    }
+
     try {
-      // Debug logging for API request
-      console.log(`[API DEBUG] Attempting to delete inventory batch:`, {
-        url: `${this.baseURL}/inventories/delete`,
-        inventoryIds: inventoryIds,
-        count: inventoryIds.length,
-        headers: {
-          'X-Company-Id': this.headers['X-Company-Id'],
-          'X-Api-Token': this.headers['X-Api-Token'],
-          'Content-Type': this.headers['Content-Type']
-        }
-      });
+      if (this.debug) {
+        console.log(`[API DEBUG] Attempting to delete inventory batch:`, {
+          url: `${this.baseURL}/inventories/delete`,
+          inventoryIds: inventoryIds,
+          count: inventoryIds.length,
+          headers: {
+            'X-Company-Id': this.headers['X-Company-Id'],
+            'X-Api-Token': this.headers['X-Api-Token'],
+            'Content-Type': this.headers['Content-Type']
+          }
+        });
+      }
 
       const response = await axios.post(`${this.baseURL}/inventories/delete`, {
         inventory_ids: inventoryIds
       }, {
         headers: this.headers,
-        timeout: 15000 // 15 second timeout for batch operations
+        timeout: this.timeoutMs
       });
 
-      console.log(`[API DEBUG] Batch deletion successful:`, response.status, response.data);
+      if (this.debug) {
+        console.log(`[API DEBUG] Batch deletion successful:`, response.status, response.data);
+      }
 
       return {
         successful: inventoryIds, // Assume all successful if no error
@@ -61,7 +101,14 @@ class InventoryApi {
       };
     } catch (error) {
       console.error(`Failed to delete inventory batch:`, error.message);
-      if (error.response) {
+      const statusCode = error.response?.status || 'NETWORK_ERROR';
+      if (statusCode === 401 || statusCode === 403) {
+        this.suspendedUntil = Date.now() + this.authFailCooldownMs;
+        console.warn(
+          `[InventoryApi] Received ${statusCode}; suspending delete calls for ${Math.round(this.authFailCooldownMs / 1000)}s`
+        );
+      }
+      if (error.response && this.debug) {
         console.error(`[API DEBUG] Response status:`, error.response.status);
         console.error(`[API DEBUG] Response data:`, error.response.data);
         console.error(`[API DEBUG] Response headers:`, error.response.headers);
@@ -74,7 +121,7 @@ class InventoryApi {
         failed: inventoryIds.map(id => ({
           id: id,
           error: error.message,
-          status: error.response?.status || 'NETWORK_ERROR'
+          status: statusCode
         })),
         total: inventoryIds.length
       };

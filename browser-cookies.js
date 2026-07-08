@@ -1,7 +1,6 @@
-import {devices } from "patchright";
+import { devices, chromium, request as playwrightRequest } from "patchright";
 import fs from "fs/promises";
 import path from "path";
-import { chromium } from 'patchright'
 import { Camoufox } from "camoufox-js";
 
 import { BrowserFingerprint } from "./browserFingerprint.js";
@@ -13,6 +12,7 @@ import mongoose from "mongoose";
 // the default because it's the only thing that beats EPS's headless detection.
 const BROWSER_ENGINE = (process.env.BROWSER_ENGINE || "camoufox").toLowerCase();
 const USE_CAMOUFOX = BROWSER_ENGINE === "camoufox";
+const REQUEST_CONTEXT_MODE = () => process.env.REQUEST_CONTEXT_MODE === "1";
 // SEED/SCRAPE SPLIT: mint the tmpt-carrying cookie jar on clean bart RESIDENTIAL
 // (the only IPs that pass reCAPTCHA/EPS at the event page), then INJECT that jar
 // into pool contexts on the cheap Mongo datacenter proxies for the facets calls.
@@ -263,7 +263,7 @@ async function launchChromium(launchOptions = {}) {
  */
 async function apiGet(page, url, headers = {}) {
   try {
-    const resp = await page.context().request.get(url, { headers, timeout: parseInt(process.env.API_TIMEOUT_MS, 10) || 8000 });
+    const resp = await page.context().request.get(url, { headers, timeout: parseInt(process.env.API_TIMEOUT_MS, 10) || 18000 });
     const status = resp.status();
     if (status < 200 || status >= 400) {
       return { success: false, status, error: `HTTP ${status}` };
@@ -274,6 +274,51 @@ async function apiGet(page, url, headers = {}) {
   } catch (e) {
     return { success: false, status: 0, error: e.message };
   }
+}
+
+function toStorageCookie(cookie) {
+  const expires =
+    typeof cookie?.expires === "number"
+      ? cookie.expires
+      : typeof cookie?.expiry === "number"
+      ? cookie.expiry
+      : -1;
+
+  return {
+    name: cookie?.name,
+    value: cookie?.value,
+    domain: cookie?.domain || ".ticketmaster.com",
+    path: cookie?.path || "/",
+    expires,
+    httpOnly: !!cookie?.httpOnly,
+    secure: cookie?.secure !== false,
+    sameSite: cookie?.sameSite || "Lax",
+  };
+}
+
+async function apiGetRequestContext(requestContext, url, headers = {}) {
+  try {
+    const resp = await requestContext.get(url, {
+      headers,
+      timeout: parseInt(process.env.API_TIMEOUT_MS, 10) || 18000,
+    });
+    const status = resp.status();
+    if (status < 200 || status >= 400) {
+      return { success: false, status, error: `HTTP ${status}` };
+    }
+    const data = await resp.json().catch(() => null);
+    if (data == null) return { success: false, status, error: "Non-JSON / empty body" };
+    return { success: true, status, data };
+  } catch (e) {
+    return { success: false, status: 0, error: e.message };
+  }
+}
+
+async function apiGetFromWorker(worker, url, headers = {}) {
+  if (worker?.requestContext) {
+    return apiGetRequestContext(worker.requestContext, url, headers);
+  }
+  return apiGet(worker, url, headers);
 }
 
 /**
@@ -401,6 +446,7 @@ async function simulateMobileInteractions(page) {
 
 async function initBrowser(proxy) {
   let context = null;
+  let contextProxy = null;
   
   try {
     // Get randomized human-like properties
@@ -458,12 +504,20 @@ async function initBrowser(proxy) {
           
           const [hostname, portStr] = proxyString.split(':');
           const port = parseInt(portStr) || 80;
-          
-          launchOptions.proxy = {
+
+          const parsedProxy = {
             server: `http://${hostname}:${port}`,
             username: proxy.username,
             password: proxy.password,
           };
+
+          // Camoufox warns at launch when proxy is set without geoip. Using a
+          // context-level proxy preserves routing while avoiding that warning.
+          if (USE_CAMOUFOX) {
+            contextProxy = parsedProxy;
+          } else {
+            launchOptions.proxy = parsedProxy;
+          }
           
           console.log(`Configuring browser with proxy: ${hostname}:${port}`);
         } catch (error) {
@@ -500,6 +554,7 @@ async function initBrowser(proxy) {
       acceptDownloads: true,
       ignoreHTTPSErrors: true,
       bypassCSP: true,
+      ...(contextProxy ? { proxy: contextProxy } : {}),
     });
     
     // No manual stealth init scripts. patchright already neutralizes the automation
@@ -1080,6 +1135,7 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
   try {
     const location = getRandomLocation();
     const fingerprint = BrowserFingerprint.generate('desktop');
+    let contextProxy = null;
 
     const launchOptions = {
       // EPS blocks HEADLESS Chrome (event page 403, cookies never mint) even with
@@ -1127,12 +1183,19 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
         
         const [hostname, portStr] = proxyString.split(':');
         const port = parseInt(portStr) || 80;
-        
-        launchOptions.proxy = {
+
+        const parsedProxy = {
           server: `http://${hostname}:${port}`,
           username: proxy.username,
           password: proxy.password,
         };
+
+        // Camoufox warning fix: apply proxy on context instead of launch.
+        if (USE_CAMOUFOX) {
+          contextProxy = parsedProxy;
+        } else {
+          launchOptions.proxy = parsedProxy;
+        }
       } catch (error) {
         console.warn('Invalid proxy for API context:', error.message);
       }
@@ -1164,6 +1227,8 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
       } })
+      ,
+      ...(contextProxy ? { proxy: contextProxy } : {})
     });
 
     // NO manual stealth init scripts here. patchright already masks automation
@@ -1386,29 +1451,28 @@ class RequestBatcher {
       }
     }
 
-    let page;
+    let worker;
     try {
-      page = await this.pool.acquire(20000); // 20s timeout for page acquisition
+      worker = await this.pool.acquire(20000); // 20s timeout for worker acquisition
     } catch (err) {
       for (const item of batch) item.reject(err);
       return;
     }
 
-    // Fail fast if page was closed between acquire and evaluate
-    if (page.isClosed()) {
-      this.pool._removePage(page);
+    // Fail fast if a page worker was closed between acquire and evaluate
+    if (!worker?.requestContext && worker?.isClosed && worker.isClosed()) {
+      this.pool._removePage(worker);
       for (const item of batch) item.reject(new Error('Acquired page was already closed'));
       return;
     }
 
     try {
-      // Fetch all requests via the page's CONTEXT request client (bypasses CORS;
-      // required for Firefox/Camoufox, works for Chrome too). Carries the context cookies.
+      // Fetch all requests via either a page context client or lightweight request context.
       const results = await Promise.all(
-        allRequests.map(({ url, headers }) => apiGet(page, url, headers))
+        allRequests.map(({ url, headers }) => apiGetFromWorker(worker, url, headers))
       );
 
-      this.pool.release(page);
+      this.pool.release(worker);
 
       // Track errors for cookie refresh triggering
       for (const r of results) {
@@ -1418,12 +1482,12 @@ class RequestBatcher {
       // Per-token budget/rate accounting: attribute this batch's FACETS calls to the
       // page's injected token, so it can be proactively retired at its call budget
       // (before it 403s). If the token got retired, drop the page → rebind on a fresh one.
-      const meta = this.pool._pageMeta.get(page);
+      const meta = this.pool._pageMeta.get(worker);
       const tmpt = meta && meta.tmpt;
       if (tmpt) {
         const facetsCount = allRequests.reduce((a, r) => a + (/\/ismds\/|facets\?/.test(r.url) ? 1 : 0), 0);
         if (facetsCount) noteJarUsage(tmpt, facetsCount).catch(() => {});
-        if (_retiredTokens.has(tmpt)) this.pool._removePage(page);
+        if (_retiredTokens.has(tmpt)) this.pool._removePage(worker);
       }
 
       // Distribute results back to each event's promise
@@ -1442,9 +1506,9 @@ class RequestBatcher {
           error.message?.includes('Protocol error') ||
           error.message?.includes('crashed') ||
           error.message?.includes('Execution context')) {
-        this.pool._removePage(page);
+        this.pool._removePage(worker);
       } else {
-        this.pool.release(page);
+        this.pool.release(worker);
       }
       // Reject all events in this batch
       for (const item of batch) item.reject(error);
@@ -1485,6 +1549,8 @@ class BrowserPagePool {
     // 8 min default — well before 10-15m cookie expiry. Tunable via COOKIE_REFRESH_MIN
     // (raise it to cut re-mint churn, which is what burns proxies; keep < ~10m expiry).
     this._cookieRefreshInterval = (parseInt(process.env.COOKIE_REFRESH_MIN, 10) || 8) * 60 * 1000;
+    // Add random jitter so multiple instances don't refresh at the exact same time.
+    this._cookieRefreshJitterMs = (parseInt(process.env.COOKIE_REFRESH_JITTER_SEC, 10) || 90) * 1000;
     this._isRestarting = false;
     this._isRefreshing = false; // rolling refresh in progress (browser stays alive)
     this._refreshTimer = null;
@@ -1507,6 +1573,7 @@ class BrowserPagePool {
     this._seedJar = null;                // Array<cookie> last minted on bart
     this._seedJarAt = 0;                 // ms timestamp of the jar
     this._seedInFlight = null;           // dedupe concurrent mints
+    this._refreshCursor = 0;             // round-robin target index for rolling refresh
   }
 
   // Ensure a fresh seed cookie jar exists (minted on bart). Returns the jar or null.
@@ -1623,10 +1690,100 @@ class BrowserPagePool {
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
+  // Create one lightweight request-context slot bound to one proxy.
+  async _createRequestContextSlot(eventId, attempts = 4) {
+    const seedId = eventId || this._initEventId;
+    const tries = DIRECT_MODE ? 1 : attempts;
+    for (let a = 0; a < tries; a++) {
+      const proxy = DIRECT_MODE ? null : this._pickUnusedProxy();
+      if (!DIRECT_MODE && !proxy) return null;
+
+      let requestContext = null;
+      try {
+        const jar = SEED_SPLIT() ? await this._ensureSeedJar(seedId) : null;
+        if (SEED_SPLIT() && (!jar || !jar.length)) {
+          console.log('[RequestPool] no farm jar available — skipping proxy (not self-minting)');
+          continue;
+        }
+
+        const rcOpts = {
+          ignoreHTTPSErrors: true,
+          extraHTTPHeaders: {
+            accept: 'application/json',
+            'x-api-key': 'b462oi7fic6pehcdkzony5bxhe',
+          },
+        };
+
+        if (proxy) {
+          const [host, portStr] = String(proxy.proxy).split(':');
+          rcOpts.proxy = {
+            server: `http://${host}:${parseInt(portStr, 10) || 80}`,
+            username: proxy.username,
+            password: proxy.password,
+          };
+        }
+
+        if (jar && jar.length) {
+          rcOpts.storageState = { cookies: jar.map(toStorageCookie), origins: [] };
+        }
+
+        requestContext = await playwrightRequest.newContext(rcOpts);
+
+        let facetStatus = 0;
+        if (seedId) {
+          const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+          const vr = await apiGetRequestContext(requestContext, vu, {
+            accept: 'application/json',
+            'x-api-key': 'b462oi7fic6pehcdkzony5bxhe',
+            'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9),
+            'x-request-id': 'v' + Math.floor(Math.random() * 1e9),
+          });
+          facetStatus = vr.status || 0;
+
+          if (SEED_FARM() && jar && jar.length && (facetStatus === 200 || facetStatus === 403)) {
+            noteFarmJarResult(jar, facetStatus === 200);
+          }
+        }
+
+        const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
+        if (facetStatus === 200 || !seedId) {
+          if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
+
+          const worker = {
+            type: 'request-context',
+            requestContext,
+            isClosed: () => false,
+            close: () => requestContext.dispose(),
+          };
+
+          this._pageMeta.set(worker, {
+            requestContext,
+            proxy,
+            tmpt: jar ? _tmptOf(jar) : undefined,
+          });
+
+          console.log(`[RequestPool] slot bound to ${label} (facets=${facetStatus}) ✓`);
+          return { page: worker, context: null, proxy };
+        }
+
+        console.log(`[RequestPool] ${label} blocked (facets=${facetStatus}) — trying another`);
+        await requestContext.dispose().catch(() => {});
+      } catch (e) {
+        console.warn(`[RequestPool] ${proxy ? proxy.proxy : 'direct'} setup failed: ${e.message}`);
+        if (requestContext) await requestContext.dispose().catch(() => {});
+      }
+    }
+    return null;
+  }
+
   // Create one pool page in its OWN context bound to its OWN proxy, seeded on an
   // event page and validated with a real facets call. Returns {page,context,proxy}
   // or null if no working proxy could be found within `attempts`.
   async _createProxyPage(eventId, attempts = 4) {
+    if (REQUEST_CONTEXT_MODE()) {
+      return this._createRequestContextSlot(eventId, attempts);
+    }
+
     const seedId = eventId || this._initEventId;
     const tries = DIRECT_MODE ? 1 : attempts;
     for (let a = 0; a < tries; a++) {
@@ -1745,7 +1902,7 @@ class BrowserPagePool {
 
   async init(proxy = null, cookies = null, eventId = null) {
     // Already initialized and browser alive — nothing to do
-    if (this.initialized && this._browser?.isConnected()) return;
+    if (this.initialized && (REQUEST_CONTEXT_MODE() || this._browser?.isConnected())) return;
 
     // Another caller is already initializing — piggyback on their promise
     if (this._initPromise) return this._initPromise;
@@ -1758,7 +1915,7 @@ class BrowserPagePool {
       for (let i = 0; i < 200 && this._isRestarting; i++) {
         await new Promise((r) => setTimeout(r, 200));
       }
-      if (this.initialized && this._browser?.isConnected()) return;
+      if (this.initialized && (REQUEST_CONTEXT_MODE() || this._browser?.isConnected())) return;
       if (this._initPromise) return this._initPromise;
     }
 
@@ -1776,7 +1933,7 @@ class BrowserPagePool {
     // extra datacenter hammering). Only one runs; the rest wait and reuse its pool.
     if (this._isIniting) {
       for (let i = 0; i < 400 && this._isIniting; i++) await new Promise((r) => setTimeout(r, 200));
-      if (this.initialized && this._browser?.isConnected()) return;
+      if (this.initialized && (REQUEST_CONTEXT_MODE() || this._browser?.isConnected())) return;
     }
     this._isIniting = true;
     try {
@@ -1784,7 +1941,7 @@ class BrowserPagePool {
     // constructor runs at import, before app.js calls dotenv.config(), so it can't.
     this.size = parseInt(process.env.POOL_SIZE, 10) || this.size;
     // Only cleanup if there's something to clean up
-    if (this.pages.length > 0 || this._browser) {
+    if (this.pages.length > 0 || this._browser || this._pageMeta.size > 0) {
       await this.cleanup();
     }
 
@@ -1800,6 +1957,39 @@ class BrowserPagePool {
     this._contexts = [];
     this._pageMeta = new Map();
     this._usedProxies = new Set();
+
+    if (REQUEST_CONTEXT_MODE()) {
+      // Lightweight client-library mode: use request contexts only (no browser pages).
+      const fillResults = await Promise.all(
+        Array.from({ length: this.size }, () => this._createRequestContextSlot(eventId))
+      );
+
+      for (const made of fillResults) {
+        if (made) {
+          this.pages.push(made.page);
+          this.available.push(made.page);
+        } else {
+          console.warn('[RequestPool] Could not bind a working proxy for a slot');
+        }
+      }
+
+      console.log(`[RequestPool] ${this.pages.length}/${this.size} slots ready (${this._usedProxies.size} distinct proxies)`);
+
+      const batchSize = parseInt(process.env.REQUEST_BATCH_SIZE, 10) || 6;
+      const batchFlushMs = parseInt(process.env.REQUEST_BATCH_FLUSH_MS, 10) || 150;
+      this._batcher = new RequestBatcher(this, batchSize, batchFlushMs);
+
+      this._lastCookieRefresh = Date.now();
+      this._consecutiveErrors = 0;
+      this._isRestarting = false;
+
+      this._startRestartTimer();
+      this.initialized = true;
+      this._initPromise = null;
+
+      console.log(`[RequestPool] Ready: ${this.pages.length} slot(s) — refresh every ${this._cookieRefreshInterval / 60000}min`);
+      return;
+    }
 
     console.log(`[PagePool] Initial proxy: ${DIRECT_MODE ? 'DIRECT (no proxy)' : (proxy?.proxy || 'none')}`);
 
@@ -1884,10 +2074,10 @@ class BrowserPagePool {
     }
     console.log(`[PagePool] ${this.pages.length}/${this.size} pages ready, each on its own proxy (${this._usedProxies.size} distinct IPs)`);
 
-    // Batcher: 20 events/batch × pages, flush every 100ms
-    // Smaller batches = smaller per-IP burst (6 events = 12 fetches/proxy/batch
-    // instead of 40) so EPS's per-IP rate limit isn't tripped on residential IPs.
-    this._batcher = new RequestBatcher(this, 6, 150);
+    // Smaller batches reduce per-IP burst pressure and avoid EPS rate spikes.
+    const batchSize = parseInt(process.env.REQUEST_BATCH_SIZE, 10) || 6;
+    const batchFlushMs = parseInt(process.env.REQUEST_BATCH_FLUSH_MS, 10) || 150;
+    this._batcher = new RequestBatcher(this, batchSize, batchFlushMs);
 
     this._lastCookieRefresh = Date.now();
     this._consecutiveErrors = 0;
@@ -1909,13 +2099,53 @@ class BrowserPagePool {
    * to get completely fresh cookies and prevent stale session issues.
    */
   _startRestartTimer() {
-    if (this._refreshTimer) clearInterval(this._refreshTimer);
+    if (this._refreshTimer) clearTimeout(this._refreshTimer);
 
-    this._refreshTimer = setInterval(async () => {
-      if (this._isRestarting || this._isRefreshing) return;
+    const nextRegularDelay = () => {
+      const jitter = Math.round((Math.random() * 2 - 1) * this._cookieRefreshJitterMs);
+      return Math.max(60000, this._cookieRefreshInterval + jitter);
+    };
+
+    const scheduleAfter = (delayMs) => {
+      if (!this.initialized) return;
+      this._refreshTimer = setTimeout(() => {
+        this._refreshTimer = null;
+        runTick().catch((err) => {
+          console.warn(`[PagePool] Refresh scheduler error: ${err.message}`);
+          if (this.initialized) scheduleAfter(30000);
+        });
+      }, delayMs);
+      this._refreshTimer.unref?.();
+    };
+
+    const runTick = async () => {
+      if (!this.initialized) return;
+      if (this._isRestarting || this._isRefreshing) {
+        scheduleAfter(15000);
+        return;
+      }
+
+      const queueDepth = this._batcher?.queue?.length || 0;
+      const activeFlushes = this._batcher?._activeFlushes || 0;
+      const waitingDepth = this.waiting.length || 0;
+      if (queueDepth > 0 || activeFlushes > 0 || waitingDepth > 0) {
+        const deferMs = Math.max(
+          15000,
+          parseInt(process.env.ROLLING_REFRESH_BUSY_DEFER_MS, 10) || 45000
+        );
+        console.log(
+          `[PagePool] Deferring rolling refresh (queue=${queueDepth}, activeFlushes=${activeFlushes}, waiting=${waitingDepth})`
+        );
+        scheduleAfter(deferMs);
+        return;
+      }
+
       console.log(`[PagePool] Scheduled rolling refresh (cookies age: ${Math.round((Date.now() - this._lastCookieRefresh) / 60000)}min)`);
       await this._rollingRefresh();
-    }, this._cookieRefreshInterval);
+      scheduleAfter(nextRegularDelay());
+    };
+
+    scheduleAfter(nextRegularDelay());
   }
 
   /**
@@ -1929,7 +2159,7 @@ class BrowserPagePool {
    */
   async _rollingRefresh() {
     if (this._isRestarting || this._isRefreshing) return;
-    if (!this._browser?.isConnected()) return; // dead browser → crash handler owns recovery
+    if (!REQUEST_CONTEXT_MODE() && !this._browser?.isConnected()) return; // dead browser → crash handler owns recovery
     this._isRefreshing = true;
     const start = Date.now();
     console.log('[PagePool] Rolling refresh starting…');
@@ -1954,10 +2184,29 @@ class BrowserPagePool {
       }
 
       const oldPages = [...this.pages];
+      if (!oldPages.length) return;
+
+      const maxPagesPerCycle = Math.max(
+        1,
+        parseInt(process.env.ROLLING_REFRESH_MAX_PAGES, 10) || oldPages.length
+      );
+      const refreshAttempts = Math.max(
+        1,
+        parseInt(process.env.ROLLING_REFRESH_ATTEMPTS, 10) || 2
+      );
+
+      const targetCount = Math.min(oldPages.length, maxPagesPerCycle);
+      const startIndex = this._refreshCursor % oldPages.length;
+      const pagesToRefresh = [];
+      for (let i = 0; i < targetCount; i++) {
+        pagesToRefresh.push(oldPages[(startIndex + i) % oldPages.length]);
+      }
+      this._refreshCursor = (startIndex + targetCount) % oldPages.length;
+
       let refreshed = 0;
-      for (const oldPage of oldPages) {
+      for (const oldPage of pagesToRefresh) {
         if (!this._browser?.isConnected()) break; // bail if the browser dies mid-refresh
-        const made = await this._createProxyPage(seedEventId);
+        const made = await this._createProxyPage(seedEventId, refreshAttempts);
         if (!made) {
           console.warn('[PagePool] Rolling refresh: no fresh proxy for a slot — keeping current page');
           continue;
@@ -1971,7 +2220,7 @@ class BrowserPagePool {
 
       this._lastCookieRefresh = Date.now();
       this._consecutiveErrors = 0;
-      console.log(`[PagePool] Rolling refresh complete in ${Date.now() - start}ms — refreshed ${refreshed}/${oldPages.length}, ${this.pages.length} page(s) live`);
+      console.log(`[PagePool] Rolling refresh complete in ${Date.now() - start}ms — refreshed ${refreshed}/${pagesToRefresh.length} (total pages=${oldPages.length}), ${this.pages.length} page(s) live`);
     } catch (e) {
       console.error(`[PagePool] Rolling refresh error: ${e.message}`);
     } finally {
@@ -1987,7 +2236,12 @@ class BrowserPagePool {
     if (pi !== -1) this.pages.splice(pi, 1);
     const meta = this._pageMeta.get(page);
     this._pageMeta.delete(page);
-    page.close().catch(() => {});
+    const proxyKey = meta?.proxy ? (meta.proxy.id || meta.proxy.proxy) : null;
+    if (proxyKey) this._usedProxies.delete(proxyKey);
+    if (page?.close) page.close().catch(() => {});
+    if (meta?.requestContext) {
+      meta.requestContext.dispose().catch(() => {});
+    }
     const ctx = meta?.context;
     if (ctx) {
       const ci = this._contexts.indexOf(ctx);
@@ -2005,6 +2259,10 @@ class BrowserPagePool {
    * 5. Drain deferred queue
    */
   async _restartBrowser(reason = 'scheduled') {
+    if (REQUEST_CONTEXT_MODE()) {
+      return this._restartRequestPool(reason);
+    }
+
     if (this._isRestarting) return;
     this._isRestarting = true;
     const restartStart = Date.now();
@@ -2126,9 +2384,9 @@ class BrowserPagePool {
       }
 
       // 7. Create new batcher and mark ready
-      // Smaller batches = smaller per-IP burst (6 events = 12 fetches/proxy/batch
-    // instead of 40) so EPS's per-IP rate limit isn't tripped on residential IPs.
-    this._batcher = new RequestBatcher(this, 6, 150);
+      const batchSize = parseInt(process.env.REQUEST_BATCH_SIZE, 10) || 6;
+      const batchFlushMs = parseInt(process.env.REQUEST_BATCH_FLUSH_MS, 10) || 150;
+      this._batcher = new RequestBatcher(this, batchSize, batchFlushMs);
       this._lastCookieRefresh = Date.now();
       this._consecutiveErrors = 0;
       this._requestsSinceRotation = 0;
@@ -2155,6 +2413,103 @@ class BrowserPagePool {
       for (const { reject, timer } of this._deferredQueue) {
         if (timer) clearTimeout(timer);
         reject(new Error(`Browser restart failed: ${error.message}`));
+      }
+      this._deferredQueue = [];
+    } finally {
+      this._isRestarting = false;
+    }
+  }
+
+  async _restartRequestPool(reason = 'scheduled') {
+    if (this._isRestarting) return;
+    this._isRestarting = true;
+    const restartStart = Date.now();
+
+    console.log(`[RequestPool] Restart starting (${reason})...`);
+
+    try {
+      const oldBatcher = this._batcher;
+      this._batcher = null;
+      this.initialized = false;
+
+      if (oldBatcher) {
+        const waitStart = Date.now();
+        while (oldBatcher._activeFlushes > 0 && Date.now() - waitStart < 10000) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        oldBatcher.cleanup();
+      }
+
+      for (const w of this.waiting) {
+        clearTimeout(w.timer);
+        w.resolve = null;
+      }
+      this.waiting = [];
+
+      const workers = [...this.pages];
+      this.pages = [];
+      this.available = [];
+
+      await Promise.allSettled(
+        workers.map(async (worker) => {
+          const meta = this._pageMeta.get(worker);
+          this._pageMeta.delete(worker);
+          if (meta?.requestContext) {
+            await meta.requestContext.dispose().catch(() => {});
+            return;
+          }
+          if (worker?.close) await worker.close().catch(() => {});
+        })
+      );
+
+      this._contexts = [];
+      this._usedProxies = new Set();
+
+      const refreshAttempts = Math.max(
+        1,
+        parseInt(process.env.ROLLING_REFRESH_ATTEMPTS, 10) || 2
+      );
+
+      const fillResults = await Promise.all(
+        Array.from({ length: this.size }, () =>
+          this._createRequestContextSlot(this._initEventId, refreshAttempts)
+        )
+      );
+
+      for (const made of fillResults) {
+        if (made) {
+          this.pages.push(made.page);
+          this.available.push(made.page);
+        }
+      }
+
+      const batchSize = parseInt(process.env.REQUEST_BATCH_SIZE, 10) || 6;
+      const batchFlushMs = parseInt(process.env.REQUEST_BATCH_FLUSH_MS, 10) || 150;
+      this._batcher = new RequestBatcher(this, batchSize, batchFlushMs);
+
+      this._lastCookieRefresh = Date.now();
+      this._consecutiveErrors = 0;
+      this._requestsSinceRotation = 0;
+      this.initialized = true;
+
+      const restartMs = Date.now() - restartStart;
+      console.log(`[RequestPool] Restart complete in ${restartMs}ms — ${this.pages.length} slot(s) ready`);
+
+      if (this._deferredQueue.length > 0) {
+        const deferred = this._deferredQueue.splice(0);
+        console.log(`[RequestPool] Draining ${deferred.length} deferred request(s)`);
+        for (const { requests, resolve, reject, timer } of deferred) {
+          if (timer) clearTimeout(timer);
+          this._batcher.submit(requests).then(resolve).catch(reject);
+        }
+      }
+    } catch (error) {
+      console.error(`[RequestPool] Restart FAILED: ${error.message}`);
+      this.initialized = false;
+      this._initPromise = null;
+      for (const { reject, timer } of this._deferredQueue) {
+        if (timer) clearTimeout(timer);
+        reject(new Error(`Request pool restart failed: ${error.message}`));
       }
       this._deferredQueue = [];
     } finally {
@@ -2227,7 +2582,7 @@ class BrowserPagePool {
   }
 
   async acquire(timeoutMs = 20000) {
-    if (!this.initialized || !this._browser?.isConnected()) {
+    if (!this.initialized || (!REQUEST_CONTEXT_MODE() && !this._browser?.isConnected())) {
       throw new Error('Pool not initialized or browser disconnected');
     }
 
@@ -2267,14 +2622,19 @@ class BrowserPagePool {
     const meta = this._pageMeta.get(page);
     if (meta) {
       this._pageMeta.delete(page);
-      if (meta.proxy?.proxy) this._usedProxies.delete(meta.proxy.proxy);
+      const proxyKey = meta.proxy ? (meta.proxy.id || meta.proxy.proxy) : null;
+      if (proxyKey) this._usedProxies.delete(proxyKey);
+      if (meta.requestContext) {
+        meta.requestContext.dispose().catch(() => {});
+      }
       const ci = this._contexts.indexOf(meta.context);
       if (ci !== -1) this._contexts.splice(ci, 1);
-      meta.context.close().catch(() => {});
+      meta.context?.close().catch(() => {});
     }
 
     // Replace it with a fresh page on a NEW validated proxy (best-effort)
-    if (this._browser?.isConnected() && !this._isRestarting && this.pages.length < this.size) {
+    const canRebuild = REQUEST_CONTEXT_MODE() || this._browser?.isConnected();
+    if (canRebuild && !this._isRestarting && this.pages.length < this.size) {
       this._createProxyPage(this._initEventId).then((made) => {
         if (made) {
           this.pages.push(made.page);
@@ -2288,7 +2648,7 @@ class BrowserPagePool {
   async cleanup() {
     // Stop browser restart timer
     if (this._refreshTimer) {
-      clearInterval(this._refreshTimer);
+      clearTimeout(this._refreshTimer);
       this._refreshTimer = null;
     }
 
@@ -2305,6 +2665,11 @@ class BrowserPagePool {
       reject(new Error('Pool cleanup'));
     }
     this._deferredQueue = [];
+
+    const requestContexts = Array.from(this._pageMeta.values())
+      .map((m) => m?.requestContext)
+      .filter(Boolean);
+    await Promise.allSettled(requestContexts.map((rc) => rc.dispose().catch(() => {})));
 
     await Promise.allSettled(this.pages.map(p => p.close().catch(() => {})));
     await Promise.allSettled(this._contexts.map(c => c.close().catch(() => {})));
