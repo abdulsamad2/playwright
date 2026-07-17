@@ -22,8 +22,9 @@ module.exports = {
       exec_mode: "fork",
       autorestart: true,
       // recycle a leaky/hung instance instead of letting it drag; each Camoufox
-      // instance sits ~150-280MB, so 500M leaves headroom.
-      max_memory_restart: "500M",
+      // context sits ~150-280MB and POOL_SIZE=6 runs several per instance, so 750M
+      // leaves headroom (raised from 500M when POOL_SIZE went 4→6 for ~480 events).
+      max_memory_restart: "750M",
       // don't hammer-restart a crash-looping instance (e.g. bad Redis/Mongo config)
       min_uptime: "20s",
       max_restarts: 10,
