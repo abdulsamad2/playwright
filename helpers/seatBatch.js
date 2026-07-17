@@ -101,30 +101,33 @@ function breakArray(arr) {
 }
 
 function CreateConsicutiveSeats(data) {
+  // Merges only ever happen between items sharing (section, row, offerId), so we
+  // index groups by that key and compare only within a key instead of scanning
+  // the whole list. This turns the old O(n^2) first pass + O(n^3) second pass into
+  // roughly O(n) bucketing + small per-key work. Output order and merge results are
+  // identical to the previous global scan (earliest group per key survives; groups
+  // stay in first-seen order). group.seats is kept sorted, so first/last seat are
+  // just [0] and [len-1] — avoids Math.max(...seats) spreads (also stack-safe).
   const mergedData = [];
+  const byKey = new Map(); // key -> array of group refs held in mergedData
 
   data.forEach((item) => {
+    const key = JSON.stringify([item.section, item.row, item.offerId]);
+    const candidates = byKey.get(key);
     let merged = false;
 
-    // Try to find an existing group that this item can be merged with
-    for (let group of mergedData) {
-      if (
-        group.section === item.section &&
-        group.row === item.row &&
-        group.offerId === item.offerId
-      ) {
-        // Check if seats are consecutive (either direction)
-        const groupLastSeat = Math.max(...group.seats);
-        const groupFirstSeat = Math.min(...group.seats);
-        const itemFirstSeat = Math.min(...item.seats);
-        const itemLastSeat = Math.max(...item.seats);
-
-        // Check if they can be merged (consecutive) - fixed logic
+    if (candidates) {
+      const itemSeats = item.seats;
+      const itemFirstSeat = itemSeats[0];
+      const itemLastSeat = itemSeats[itemSeats.length - 1];
+      for (const group of candidates) {
+        const groupFirstSeat = group.seats[0];
+        const groupLastSeat = group.seats[group.seats.length - 1];
         if (
           groupLastSeat + 1 === itemFirstSeat ||
           itemLastSeat + 1 === groupFirstSeat
         ) {
-          group.seats.push(...item.seats);
+          group.seats.push(...itemSeats);
           group.seats.sort((a, b) => a - b); // Keep seats sorted
           merged = true;
           break;
@@ -133,7 +136,7 @@ function CreateConsicutiveSeats(data) {
     }
 
     if (!merged) {
-      mergedData.push({
+      const group = {
         amount: item.amount,
         lineItemType: item.lineItemType,
         section: item.section,
@@ -143,47 +146,47 @@ function CreateConsicutiveSeats(data) {
         accessibility: item?.accessibility,
         descriptionId: item?.descriptionId,
         attributes: item?.attributes,
-      });
+      };
+      mergedData.push(group);
+      if (candidates) candidates.push(group);
+      else byKey.set(key, [group]);
     }
   });
 
-  // Second pass: try to merge any remaining consecutive groups
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let i = 0; i < mergedData.length; i++) {
-      for (let j = i + 1; j < mergedData.length; j++) {
-        const group1 = mergedData[i];
-        const group2 = mergedData[j];
-
-        if (
-          group1.section === group2.section &&
-          group1.row === group2.row &&
-          group1.offerId === group2.offerId
-        ) {
-          const group1LastSeat = Math.max(...group1.seats);
-          const group1FirstSeat = Math.min(...group1.seats);
-          const group2FirstSeat = Math.min(...group2.seats);
-          const group2LastSeat = Math.max(...group2.seats);
-
-          // Check if they can be merged (consecutive)
+  // Second pass: merge groups that became adjacent after the first pass. Only
+  // same-key groups can ever merge, so scan each key's bucket independently.
+  const removed = new Set();
+  for (const candidates of byKey.values()) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let i = 0; i < candidates.length; i++) {
+        if (removed.has(candidates[i])) continue;
+        for (let j = i + 1; j < candidates.length; j++) {
+          if (removed.has(candidates[j])) continue;
+          const group1 = candidates[i];
+          const group2 = candidates[j];
+          const group1FirstSeat = group1.seats[0];
+          const group1LastSeat = group1.seats[group1.seats.length - 1];
+          const group2FirstSeat = group2.seats[0];
+          const group2LastSeat = group2.seats[group2.seats.length - 1];
           if (
             group1LastSeat + 1 === group2FirstSeat ||
             group2LastSeat + 1 === group1FirstSeat
           ) {
             group1.seats.push(...group2.seats);
             group1.seats.sort((a, b) => a - b);
-            mergedData.splice(j, 1); // Remove the merged group
+            removed.add(group2); // drop group2; group1 (earlier) survives
             changed = true;
             break;
           }
         }
+        if (changed) break;
       }
-      if (changed) break;
     }
   }
 
-  return mergedData;
+  return removed.size ? mergedData.filter((g) => !removed.has(g)) : mergedData;
 }
 function getSplitType(arr, offer) {
   var length = arr.length;
@@ -467,7 +470,14 @@ export const AttachRowSection = (
   const debugSplitLog = process.env.DEBUG_SPLIT === "1" ? [] : null;
 
   let allAvailableSeats = GetMapSeats(mapData);
-  let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
+  // O(1) seatId -> seatInfo lookup. Replaces a mapPlacesIndex.indexOf() linear
+  // scan that ran per place per listing (O(places * mapSize)). First occurrence
+  // wins, preserving the previous indexOf semantics.
+  const seatById = new Map();
+  for (let i = 0; i < allAvailableSeats.length; i++) {
+    const sid = allAvailableSeats[i].seatId;
+    if (!seatById.has(sid)) seatById.set(sid, allAvailableSeats[i]);
+  }
   // fs.writeFileSync("debug/allAvailableSeats.json", JSON.stringify(allAvailableSeats));
   let returnData = [];
   //get all seats number by seat id
@@ -481,12 +491,7 @@ export const AttachRowSection = (
       const sectionMap = {};
       const allPlaces = x.places
         .map((placeId) => {
-          const index = mapPlacesIndex.indexOf(placeId);
-          if (index === -1) {
-            return null;
-          }
-
-          const seatInfo = allAvailableSeats[index];
+          const seatInfo = seatById.get(placeId);
           if (!seatInfo) return null;
 
           // Track sections for verification
@@ -579,9 +584,19 @@ export const AttachRowSection = (
 
   //attach offer
 
+  // O(1) offerId -> offer lookup. Replaces offers.find() which ran per group
+  // (O(groups * offers)). String-keyed to preserve the previous loose (==)
+  // comparison; first match wins, matching Array.find().
+  const offerById = new Map();
+  for (const o of offers) {
+    if (o == null || o.offerId == null) continue;
+    const k = String(o.offerId);
+    if (!offerById.has(k)) offerById.set(k, o);
+  }
+
   const finalData = returnData
     .map((x) => {
-      let offerGet = offers.find((e) => e.offerId == x.offerId);
+      let offerGet = offerById.get(String(x.offerId));
 
       // Check accessibility exclusion filters first
       if (GLOBAL_FILTERS.excludeAccessibility) {
