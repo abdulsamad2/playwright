@@ -4,6 +4,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "test": "node --test \"test/*.test.js\"",
     "start": "node app.js",
     "start-scraper": "node app.js --start-scraper",
     "dev": "node --watch app.js",

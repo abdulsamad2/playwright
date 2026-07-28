@@ -802,6 +802,25 @@ export const AttachRowSection = (
           return undefined;
         }
 
+        // Exclude TM hold inventory: held-back seats carry a
+        // ticketTypeUnsoldQualifier ending in HOLD (VIP5HOLD, 2PACKHOLD,
+        // 222PA1HOLD, 22BOGOHOLD, artist/promoter/production holds, ...).
+        if (
+          typeof offerGet?.ticketTypeUnsoldQualifier === "string" &&
+          /HOLD$/i.test(offerGet.ticketTypeUnsoldQualifier)
+        ) {
+          return undefined;
+        }
+
+        // Exclude bundled VIP/experience packages: pricing, delivery and
+        // fulfillment differ from a plain ticket.
+        if (
+          typeof offerGet?.description === "string" &&
+          /package/i.test(offerGet.description)
+        ) {
+          return undefined;
+        }
+
         if (offerGet.name == "Special Offers") {
           return undefined;
         } else if (offerGet.name == "Summer's Live 4 Pack") {
