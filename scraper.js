@@ -1067,17 +1067,18 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         DataMap = null;
         DataFacets = null;
       }
-    } else if (process.env.SEED_SPLIT === "1") {
-      // Split mode: the pool failed to init because the farm is momentarily dry.
+    } else if (process.env.SEED_SPLIT === "1" && process.env.SELF_MINT === "0") {
+      // Strict farm-consumer mode: the pool failed to init because the farm is dry.
       // Do NOT fall back to single-page requests — that self-navigates TM / replays
       // tmpt-less cookies on a datacenter proxy (instant 403) and effectively
       // self-mints. Fail the event cleanly; it retries once the farm has a jar.
-      console.warn(`[Scraper] pool not ready and no farm jar — skipping ${eventId} (never self-minting)`);
+      console.warn(`[Scraper] pool not ready and no farm jar — skipping ${eventId} (SELF_MINT=0)`);
       DataMap = null;
       DataFacets = null;
     } else {
-      // Non-split standalone mode only: single-page browser requests (sequential but
-      // still uses real TLS).
+      // Pool unavailable and self-minting allowed (or non-split standalone): single-page
+      // browser requests (sequential but still uses real TLS). refreshCookies() mints a
+      // fresh tmpt when the farm is dry, so this path can recover instead of stalling.
       try {
         const mapResult = await browserApiRequest(mapUrlWithParams,
           filterForBrowser(safeMapHeader || safeFacetHeader), proxyData, cookies);

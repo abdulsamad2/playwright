@@ -9,6 +9,8 @@ node_modules/
 # Secrets & local env (DB password, API keys)
 .env
 .env.*
+txt.env.txt
 
 # Debug/test scripts & logs (contain proxy credentials)
 debug/
+*.log

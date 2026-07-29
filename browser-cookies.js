@@ -28,6 +28,15 @@ const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 50 * 60 * 100
 // fresh by the separate cookie-farm service) instead of minting on bart in-process.
 // Off (default) = unchanged self-mint behaviour. See cookie-farm/README.md.
 const SEED_FARM = () => process.env.SEED_FARM === "1";
+// SELF_MINT=1 → when the farm has NO jar to serve, mint a tmpt in-process by
+// navigating TM on the page's own proxy instead of stalling. The farm jar is still
+// always preferred; this only fires when `readFarmJar()` comes back empty (farm
+// down, cold start, or every jar over budget) — which otherwise leaves an instance
+// stuck at 0/N pages forever with no way to recover on its own. The first page to
+// mint successfully caches its jar in-process (`_seedJar`) so its siblings INJECT
+// that jar rather than each navigating TM. Set SELF_MINT=0 to restore the strict
+// farm-only consumer behaviour.
+const SELF_MINT = () => process.env.SELF_MINT !== "0";
 // Cache the LIST of healthy jars (~once/10s, cheap), but hand them out ROUND-ROBIN
 // per call — so each pool page gets a DIFFERENT token and facets load spreads evenly
 // across all K jars. (Random + a 15s cache used to funnel every page bound in the
@@ -865,15 +874,19 @@ async function loadCookiesFromFile() {
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
 async function refreshCookies(eventId, proxy = null) {
-  // SPLIT MODE CHOKEPOINT: the scraper must NEVER mint its own tmpt by navigating
-  // TM. Every caller of refreshCookies (SessionManager, CookieManager, scraperManager)
-  // funnels through here, so one guard neutralizes them all. Serve a ready farm jar
-  // instead (or empty cookies → the caller fails cleanly and retries) rather than
-  // self-seeding on a datacenter proxy. SEED_FARM_FALLBACK=1 re-enables minting for
-  // single-instance bootstrap only.
+  // SPLIT MODE CHOKEPOINT: every caller of refreshCookies (SessionManager,
+  // CookieManager, scraperManager) funnels through here, so one guard covers them all.
+  // Prefer a ready farm jar — it costs nothing and is already validated. Only when the
+  // farm has nothing does behaviour diverge: SELF_MINT on falls through to the real
+  // browser refresh below (mint our own tmpt rather than hand back an empty jar that
+  // guarantees a 403), SELF_MINT=0 returns empty so the caller fails cleanly and waits
+  // for the farm. SEED_FARM_FALLBACK=1 skips the chokepoint entirely.
   if (SEED_SPLIT() && process.env.SEED_FARM_FALLBACK !== "1") {
     const jar = SEED_FARM() ? await readFarmJar() : null;
-    return { cookies: jar || [], fingerprint: BrowserFingerprint.generate(), lastRefresh: Date.now() };
+    if ((jar && jar.length) || !SELF_MINT()) {
+      return { cookies: jar || [], fingerprint: BrowserFingerprint.generate(), lastRefresh: Date.now() };
+    }
+    console.log('[Cookies] farm dry — self-minting a fresh jar in-process');
   }
   if ((!proxy || !proxy.proxy) && !DIRECT_MODE) {
     throw new Error('Cannot refresh cookies without a valid proxy');
@@ -1629,12 +1642,34 @@ class BrowserPagePool {
       // and flag the residential range. Return null (page won't bind → retries) and
       // wait for the farm to supply a jar. SEED_FARM_FALLBACK=1 re-enables local mint
       // (single-instance bootstrap only).
-      if (process.env.SEED_FARM_FALLBACK !== "1") return null;
+      if (process.env.SEED_FARM_FALLBACK !== "1") {
+        // SELF_MINT: the farm is dry, but a sibling page may have already minted a
+        // jar on its own proxy this cycle — reuse it (tmpt is IP-agnostic once valid)
+        // so only ONE page pays the navigate-TM cost per TTL. Null → the caller
+        // self-mints and calls _cacheSelfMintedJar() to populate this for the rest.
+        if (SELF_MINT() && this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS()) {
+          return this._seedJar;
+        }
+        return null;
+      }
     }
     if (this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS()) return this._seedJar;
     if (this._seedInFlight) return this._seedInFlight;
     this._seedInFlight = this._mintSeedJar(eventId).finally(() => { this._seedInFlight = null; });
     return this._seedInFlight;
+  }
+
+  // Remember a jar we minted ourselves (SELF_MINT) so every other page in this pool
+  // injects it instead of navigating TM too. Only stores jars that actually carry a
+  // `tmpt` — a tmpt-less jar is worthless to facets and would poison the cache for a
+  // full TTL, keeping siblings from making their own (possibly successful) attempt.
+  _cacheSelfMintedJar(cookies) {
+    const jar = (cookies || []).filter((c) => String(c.domain || '').includes('ticketmaster'));
+    if (!jar.some((c) => c.name === 'tmpt')) return false;
+    this._seedJar = jar;
+    this._seedJarAt = Date.now();
+    console.log(`[Seed] self-minted jar cached (${jar.length} cookies) — siblings will inject it`);
+    return true;
   }
 
   // Mint a tmpt-carrying cookie jar on clean bart residential using the FULL recipe
@@ -1746,7 +1781,10 @@ class BrowserPagePool {
       try {
         const jar = SEED_SPLIT() ? await this._ensureSeedJar(seedId) : null;
         if (SEED_SPLIT() && (!jar || !jar.length)) {
-          console.log('[RequestPool] no farm jar available — skipping proxy (not self-minting)');
+          // No self-mint escape hatch here even with SELF_MINT=1: a request-context has
+          // no page to run the reCAPTCHA challenge that mints tmpt. Skip and retry —
+          // set REQUEST_CONTEXT_MODE=0 (page pool) if you need self-minting.
+          console.log('[RequestPool] no farm jar available — skipping proxy (request contexts cannot mint)');
           continue;
         }
 
@@ -1856,19 +1894,26 @@ class BrowserPagePool {
         // without any reCAPTCHA seed on this IP. facets is IP-agnostic once tmpt is
         // valid, so one bart seed serves every scrape proxy.
         const jar = SEED_SPLIT() ? await this._ensureSeedJar(seedId) : null;
+        // Did we mint this page's session ourselves? If so, and facets validates it,
+        // cache the jar so the rest of the pool injects instead of navigating too.
+        let selfMinted = false;
         if (jar && jar.length) {
           await context.addCookies(jar).catch((e) => console.warn('[PagePool] inject seed jar failed:', e.message));
           status = 200; // session comes from the injected jar; page nav is unnecessary
-        } else if (SEED_SPLIT()) {
-          // NEVER self-mint in split mode. The farm is momentarily dry — skip this
-          // proxy and retry later rather than navigate TM to mint a tmpt on a
+        } else if (SEED_SPLIT() && !SELF_MINT()) {
+          // Strict farm-consumer mode (SELF_MINT=0). The farm is momentarily dry — skip
+          // this proxy and retry later rather than navigate TM to mint a tmpt on a
           // datacenter IP (EPS 403s it, burns the attempt, and pollutes the pool).
           console.log('[PagePool] no farm jar available — skipping proxy (not self-minting)');
           await context.close().catch(() => {});
           continue;
         } else {
-          // Non-split standalone mode only: self-seed on this proxy — homepage first
-          // (seed cookies), then the event page carrying them.
+          // Farm dry + SELF_MINT on (or non-split standalone): self-seed on this
+          // proxy — homepage first (seed cookies), then the event page carrying them.
+          // The facets check below is the real verdict: a proxy that can't mint just
+          // fails validation and we move to the next one, exactly as a blocked IP does.
+          selfMinted = SEED_SPLIT();
+          if (selfMinted) console.log('[PagePool] no farm jar — self-minting tmpt on this proxy');
           await page.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
           await page.waitForTimeout(1500 + Math.random() * 1500);
           const url = seedId ? `https://www.ticketmaster.com/event/${seedId}` : 'https://www.ticketmaster.com/';
@@ -1909,7 +1954,14 @@ class BrowserPagePool {
         if (facetStatus === 200 || (!seedId && status === 200)) {
           if (proxy) { this._usedProxies.add(proxy.id || proxy.proxy); noteProxyOk(proxy.id || proxy.proxy); }
           this._contexts.push(context);
-          this._pageMeta.set(page, { context, proxy, tmpt: jar ? _tmptOf(jar) : undefined });
+          // A self-minted session that just passed facets is proven good — share it
+          // with the remaining pages so they skip the nav entirely.
+          let ownTmpt;
+          if (selfMinted) {
+            const own = await context.cookies().catch(() => []);
+            if (this._cacheSelfMintedJar(own)) ownTmpt = _tmptOf(this._seedJar);
+          }
+          this._pageMeta.set(page, { context, proxy, tmpt: jar ? _tmptOf(jar) : ownTmpt });
           console.log(`[PagePool] page bound to ${label} (page=${status}, facets=${facetStatus}) ✓`);
           return { page, context, proxy };
         }
@@ -2067,11 +2119,19 @@ class BrowserPagePool {
         // tmpt — inject the bart-minted jar so page #1 scrapes like the rest.
         await context.addCookies(jar).catch((e) => console.warn('[PagePool] seed inject failed:', e.message));
         console.log(`[PagePool] seed page #1 using injected bart jar (${jar.length} cookies)`);
-      } else if (SEED_SPLIT()) {
-        // NEVER self-mint in split mode: farm is dry. Fail pool init (caller retries)
-        // rather than navigate TM on a datacenter IP to mint our own tmpt.
-        throw new Error('no farm jar available — not self-minting (SEED_SPLIT on)');
+      } else if (SEED_SPLIT() && !SELF_MINT()) {
+        // Strict farm-consumer mode (SELF_MINT=0): farm is dry, so fail pool init
+        // (caller retries) rather than navigate TM on a datacenter IP for our own tmpt.
+        throw new Error('no farm jar available — not self-minting (SELF_MINT=0)');
       } else {
+        if (SEED_SPLIT()) {
+          // Split mode skipped the establish-session nav in initApiBrowserContext (it
+          // assumed an injected jar), so do the homepage hop here first — the proven
+          // mint recipe is homepage → event page, not a cold jump to the event.
+          console.log('[PagePool] no farm jar — self-minting tmpt on the init proxy');
+          await seedPage.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+          await seedPage.waitForTimeout(1500 + Math.random() * 1500);
+        }
         await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
         // Wait for the EPS `tmpt` token to mint (IP-bound; residential hop needs time).
         let hasTmpt = false;
@@ -2088,6 +2148,9 @@ class BrowserPagePool {
         if (tmCookies.length === 0) {
           console.warn('[PagePool] WARNING: No TM cookies found after page load!');
         }
+        // Share a successful self-mint with the pages filled below, so they inject
+        // this jar instead of each navigating TM on their own proxy.
+        if (hasTmpt && this._cacheSelfMintedJar(allCookies)) seedTmpt = _tmptOf(this._seedJar);
       }
     } catch (e) {
       console.error(`[PagePool] Seed page load failed: ${e.message}`);
@@ -2402,22 +2465,36 @@ class BrowserPagePool {
       if (rjar && rjar.length) {
         await context.addCookies(rjar).catch((e) => console.warn('[PagePool] Restart seed inject failed:', e.message));
         console.log(`[PagePool] Restart: seed page #1 using injected bart jar (${rjar.length} cookies)`);
-      } else if (SEED_SPLIT()) {
-        // NEVER self-mint in split mode: farm is dry. Abort the restart (next submit
-        // re-inits) instead of navigating TM on a datacenter IP to mint our own tmpt.
+      } else if (SEED_SPLIT() && !SELF_MINT()) {
+        // Strict farm-consumer mode (SELF_MINT=0): farm is dry, so abort the restart
+        // (next submit re-inits) instead of navigating TM to mint our own tmpt.
         await seedPage.close().catch(() => {});
-        throw new Error('no farm jar available — not self-minting (SEED_SPLIT on)');
+        throw new Error('no farm jar available — not self-minting (SELF_MINT=0)');
       } else {
+        if (SEED_SPLIT()) {
+          // Homepage first, then the event page — same mint recipe as init/_createProxyPage.
+          console.log('[PagePool] Restart: no farm jar — self-minting tmpt on the restart proxy');
+          await seedPage.goto('https://www.ticketmaster.com/', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => null);
+          await seedPage.waitForTimeout(1500 + Math.random() * 1500);
+        }
         await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-        await new Promise(r => setTimeout(r, 2000));
-        const tmCookies = (await context.cookies()).filter(c => c.domain.includes('ticketmaster'));
-        console.log(`[PagePool] Restart: ${tmCookies.length} TM cookies after seed`);
+        // Wait for tmpt rather than a flat 2s: the token is what makes the jar useful,
+        // and a restart that seeds without it puts a dead page #1 back in the pool.
+        for (let w = 0; w < 8; w++) {
+          const names = (await context.cookies()).map((c) => c.name);
+          if (names.includes('tmpt')) break;
+          await new Promise((t) => setTimeout(t, 1500));
+        }
+        const all = await context.cookies();
+        const tmCookies = all.filter(c => c.domain.includes('ticketmaster'));
+        console.log(`[PagePool] Restart: ${tmCookies.length} TM cookies after seed (tmpt=${all.some(c => c.name === 'tmpt') ? 'YES' : 'no'})`);
+        if (SEED_SPLIT()) this._cacheSelfMintedJar(all);
       }
 
       this.pages.push(seedPage);
       this.available.push(seedPage);
       this._contexts.push(context);
-      this._pageMeta.set(seedPage, { context, proxy: newProxy, tmpt: rjar ? _tmptOf(rjar) : undefined });
+      this._pageMeta.set(seedPage, { context, proxy: newProxy, tmpt: rjar ? _tmptOf(rjar) : _tmptOf(await context.cookies().catch(() => [])) });
       if (newProxy?.proxy) this._usedProxies.add(newProxy.proxy);
 
       // Remaining pool pages — each on its OWN validated proxy
