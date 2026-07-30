@@ -1067,12 +1067,13 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         DataMap = null;
         DataFacets = null;
       }
-    } else if (process.env.SEED_SPLIT === "1" && process.env.SELF_MINT === "0") {
-      // Strict farm-consumer mode: the pool failed to init because the farm is dry.
+    } else if (process.env.SEED_SPLIT === "1" && process.env.SELF_MINT !== "1") {
+      // Strict farm-consumer mode (the default): the pool failed to init because the
+      // farm is dry.
       // Do NOT fall back to single-page requests — that self-navigates TM / replays
       // tmpt-less cookies on a datacenter proxy (instant 403) and effectively
       // self-mints. Fail the event cleanly; it retries once the farm has a jar.
-      console.warn(`[Scraper] pool not ready and no farm jar — skipping ${eventId} (SELF_MINT=0)`);
+      console.warn(`[Scraper] pool not ready and no farm jar — skipping ${eventId} (self-mint off)`);
       DataMap = null;
       DataFacets = null;
     } else {

@@ -30,13 +30,16 @@ const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 50 * 60 * 100
 const SEED_FARM = () => process.env.SEED_FARM === "1";
 // SELF_MINT=1 → when the farm has NO jar to serve, mint a tmpt in-process by
 // navigating TM on the page's own proxy instead of stalling. The farm jar is still
-// always preferred; this only fires when `readFarmJar()` comes back empty (farm
-// down, cold start, or every jar over budget) — which otherwise leaves an instance
-// stuck at 0/N pages forever with no way to recover on its own. The first page to
-// mint successfully caches its jar in-process (`_seedJar`) so its siblings INJECT
-// that jar rather than each navigating TM. Set SELF_MINT=0 to restore the strict
-// farm-only consumer behaviour.
-const SELF_MINT = () => process.env.SELF_MINT !== "0";
+// always preferred; this only fires when `readFarmJar()` comes back empty.
+//
+// OFF BY DEFAULT — measured, not assumed (scripts/testSelfMint.mjs, farm stubbed dry):
+//   • Camoufox (default engine): no tmpt minted at all (39 TM cookies, tmpt=no).
+//   • Real Chrome: tmpt minted and cached, but facets still 403.
+//   • Either way the init path still binds the seed page, so the pool reports
+//     "1 page ready" while that page 403s every request — worse than failing loudly.
+// Enable only with SELF_MINT=1 after a mint path is proven to pass EPS on the IP
+// in question. The default (unset/0) is the strict farm-only consumer behaviour.
+const SELF_MINT = () => process.env.SELF_MINT === "1";
 // Cache the LIST of healthy jars (~once/10s, cheap), but hand them out ROUND-ROBIN
 // per call — so each pool page gets a DIFFERENT token and facets load spreads evenly
 // across all K jars. (Random + a 15s cache used to funnel every page bound in the

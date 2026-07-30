@@ -42,10 +42,12 @@ module.exports = {
         SEED_SPLIT: "1",
         SEED_FARM: "1",
         SEED_FARM_FALLBACK: "0", // never stampede bart in-process when the farm runs dry
-        // …but DO self-mint on the page's own proxy when the farm hands back nothing,
-        // instead of stalling at 0/N pages until a jar appears. Farm jars still win
-        // whenever one exists; one page mints per TTL and shares it with the pool.
-        SELF_MINT: "1",
+        // Self-minting stays OFF. Tested with the farm stubbed dry
+        // (scripts/testSelfMint.mjs): Camoufox mints no tmpt at all, and real Chrome
+        // mints one that facets still 403s — and the page binds anyway, so the pool
+        // looks healthy while every request fails. Stalling at 0/N is the better
+        // failure: it's visible and it recovers the moment the farm has a jar.
+        SELF_MINT: "0",
       },
     },
   ],
