@@ -156,44 +156,15 @@ function noteFarmJarResult(cookies, ok) {
   if (n >= threshold) { _jarFail.delete(tmpt); markFarmJarDead(cookies).catch(() => {}); }
   else _jarFail.set(tmpt, n);
 }
-// --- Per-machine proxy blocklist -------------------------------------------------
-// Exclude datacenter proxies that error too much FROM THIS HOST (facets 403/401 at
-// bind, or a connection/tunnel failure). Tracked IN-PROCESS (per machine/instance),
-// NOT in Mongo — a proxy bad from this host's network may still work elsewhere, so we
-// drop it locally without touching the shared list. Consecutive errors reset on any
-// success; N in a row → excluded for PROXY_BLOCK_MS, then automatically retried.
-// PROXY_ERROR_THRESHOLD=0 disables. Browser-crash errors are NOT counted (not the proxy).
-const PROXY_ERROR_THRESHOLD = () => parseInt(process.env.PROXY_ERROR_THRESHOLD, 10) || 5;
-const PROXY_BLOCK_MS = () => parseInt(process.env.PROXY_BLOCK_MS, 10) || 30 * 60 * 1000;
-const _proxyErr = new Map();          // proxyKey -> consecutive error count
-const _proxyBlockedUntil = new Map(); // proxyKey -> ms timestamp it can be used again
-
-function isProxyBlocked(key) {
-  if (!key) return false;
-  const until = _proxyBlockedUntil.get(key);
-  if (!until) return false;
-  if (Date.now() >= until) { _proxyBlockedUntil.delete(key); _proxyErr.delete(key); return false; }
-  return true;
-}
-function noteProxyOk(key) { if (key) _proxyErr.delete(key); }
-function noteProxyError(key) {
-  if (!key) return;
-  const threshold = PROXY_ERROR_THRESHOLD();
-  if (!threshold) return; // disabled
-  const n = (_proxyErr.get(key) || 0) + 1;
-  if (n >= threshold) {
-    _proxyErr.delete(key);
-    const ms = PROXY_BLOCK_MS();
-    _proxyBlockedUntil.set(key, Date.now() + ms);
-    console.warn(`[Proxy] excluded ${key} after ${n} consecutive errors — blocked ${Math.round(ms / 60000)}min`);
-  } else {
-    _proxyErr.set(key, n);
-  }
-}
-// A browser/context crash is NOT the proxy's fault — don't penalize the proxy for it.
-function isBrowserCrashError(msg) {
-  return /Target (?:page,? context or browser|closed)|browser has been closed|has been closed|reading '(?:newContext|newPage|cookies)'/i.test(msg || "");
-}
+// NOTE: the per-machine proxy blocklist was REMOVED. It excluded a proxy locally after
+// N consecutive errors, but the state lived in-process, so each of the ~10 PM2
+// instances had to rediscover the same bad IPs by burning ~5 binds apiece — and every
+// one of those failed binds also voted a perfectly good farm jar toward death via
+// noteFarmJarResult. Measured 2026-07-30: ~44% of the pool 403s, so the blocklist was
+// destroying jars far faster than it was saving binds, and the 30-min expiry made each
+// instance relearn it all over again. A proxy that 403s is simply retried.
+// isBrowserCrashError() went with it — its only job was to keep a browser crash from
+// being charged to the proxy, and there is no longer a proxy tally to charge.
 
 // NOTE: protocol stability requires playwright-core@1.60.0 (matches the Camoufox 150
 // build). With the matching version there are ZERO protocol errors — no swallow needed.
@@ -1762,11 +1733,7 @@ class BrowserPagePool {
     // Key on a unique id when present (IPRoyal sticky sessions all share one
     // host:port but differ by session id); fall back to host:port for static lists.
     const keyOf = (p) => p.id || p.proxy;
-    // Drop locally-blocked proxies first. Safety valve: if excluding them would leave
-    // NOTHING usable (e.g. a systemic 403 storm blocked the whole pool), ignore the
-    // blocklist this round so the pool never fully starves.
-    const usable = all.filter((p) => p && p.proxy && !isProxyBlocked(keyOf(p)));
-    const base = usable.length ? usable : all.filter((p) => p && p.proxy);
+    const base = all.filter((p) => p && p.proxy);
     const free = base.filter((p) => !this._usedProxies.has(keyOf(p)));
     const pool = free.length ? free : base;
     return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
@@ -1832,7 +1799,7 @@ class BrowserPagePool {
 
         const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         if (facetStatus === 200 || !seedId) {
-          if (proxy) { this._usedProxies.add(proxy.id || proxy.proxy); noteProxyOk(proxy.id || proxy.proxy); }
+          if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
 
           const worker = {
             type: 'request-context',
@@ -1851,11 +1818,9 @@ class BrowserPagePool {
           return { page: worker, context: null, proxy };
         }
 
-        if (proxy) noteProxyError(proxy.id || proxy.proxy);
         console.log(`[RequestPool] ${label} blocked (facets=${facetStatus}) — trying another`);
         await requestContext.dispose().catch(() => {});
       } catch (e) {
-        if (proxy && !isBrowserCrashError(e.message)) noteProxyError(proxy.id || proxy.proxy);
         console.warn(`[RequestPool] ${proxy ? proxy.proxy : 'direct'} setup failed: ${e.message}`);
         if (requestContext) await requestContext.dispose().catch(() => {});
       }
@@ -1955,7 +1920,7 @@ class BrowserPagePool {
         }
         const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         if (facetStatus === 200 || (!seedId && status === 200)) {
-          if (proxy) { this._usedProxies.add(proxy.id || proxy.proxy); noteProxyOk(proxy.id || proxy.proxy); }
+          if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
           this._contexts.push(context);
           // A self-minted session that just passed facets is proven good — share it
           // with the remaining pages so they skip the nav entirely.
@@ -1968,11 +1933,9 @@ class BrowserPagePool {
           console.log(`[PagePool] page bound to ${label} (page=${status}, facets=${facetStatus}) ✓`);
           return { page, context, proxy };
         }
-        if (proxy) noteProxyError(proxy.id || proxy.proxy);
         console.log(`[PagePool] ${label} blocked (page=${status}, facets=${facetStatus}) — ${DIRECT_MODE ? 'retrying' : 'trying another'}`);
         await context.close().catch(() => {});
       } catch (e) {
-        if (proxy && !isBrowserCrashError(e.message)) noteProxyError(proxy.id || proxy.proxy);
         console.warn(`[PagePool] ${proxy ? proxy.proxy : 'direct'} setup failed: ${e.message}`);
         if (context) await context.close().catch(() => {});
       }
