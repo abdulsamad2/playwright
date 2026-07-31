@@ -85,7 +85,21 @@ function _tmptOf(cookies) { return (cookies.find((c) => c.name === "tmpt") || {}
 // hammered in bursts. JAR_CALL_BUDGET / JAR_RATE_CAP = 0 disables each.
 const JAR_CALL_BUDGET = () => parseInt(process.env.JAR_CALL_BUDGET, 10) || 120;
 const JAR_RATE_CAP = () => parseInt(process.env.JAR_RATE_CAP, 10) || 25; // facets/min/token
-const _jarFail = new Map();      // tmpt -> consecutive 403 count
+// NOTE: 403-based jar retirement was REMOVED (JAR_DEAD_THRESHOLD / noteFarmJarResult).
+// A facets 403 cannot distinguish "bad token" from "bad exit IP", and with ~44% of the
+// read proxies EPS-blocked it was overwhelmingly the IP. Measured 2026-07-30 with
+// scripts/auditJars.mjs — every unexpired jar replayed on a clean DIRECT IP, no proxy
+// in the path:
+//
+//   15 of 16 jars flagged status:"dead" returned facets 200  -> 94% false-retirement
+//   jars at useCount 184 / 212 / 263 / 281 were still ALIVE   -> volume wasn't it either
+//
+// Meanwhile the scraper sat at 0 events/min logging "no farm jar available", because
+// readFarmJar() filters on status:"healthy" and we had marked every good token dead.
+// Retiring on 403 destroyed the jar supply to protect against a failure it could not
+// actually detect. Tokens now leave rotation only via TTL expiry or the useCount budget
+// below — both of which measure something real. A genuinely dead jar simply fails its
+// binds and ages out, which costs a few retries instead of the whole pool.
 const _jarUse = new Map();       // tmpt -> { pending, window: number[] }
 const _retiredTokens = new Set();// tmpt values retired locally (force page rebind)
 
@@ -109,7 +123,7 @@ async function _retireJarByTmpt(tmpt, reason) {
   if (_retiredTokens.size > 300) _retiredTokens.clear(); // bound; DB status:dead is the source of truth
   _retiredTokens.add(tmpt);
   _farmJars.list = _farmJars.list.filter((j) => _tmptOf(j) !== tmpt);
-  _jarUse.delete(tmpt); _jarFail.delete(tmpt);
+  _jarUse.delete(tmpt);
   try {
     await mongoose.connection.db.collection("seed_jars").updateOne(
       { cookies: { $elemMatch: { name: "tmpt", value: tmpt } } },
@@ -118,7 +132,6 @@ async function _retireJarByTmpt(tmpt, reason) {
     console.log(`[SeedFarm] retired a jar (${reason}) — farm will re-mint`);
   } catch (e) { console.warn("[SeedFarm] retire failed:", e.message); }
 }
-async function markFarmJarDead(cookies) { return _retireJarByTmpt(_tmptOf(cookies), "facets 403"); }
 
 // Record N facets calls made on `tmpt`. Always tracks the rate window (#2); batches a
 // GLOBAL useCount $inc and retires the token once it reaches JAR_CALL_BUDGET (#1), so
@@ -144,18 +157,6 @@ async function noteJarUsage(tmpt, n) {
   } catch { /* best effort */ }
 }
 
-// A single facets 403 is usually the PROXY IP, not the token — only mark a jar dead
-// after JAR_DEAD_THRESHOLD consecutive 403s (across proxies via round-robin); any 200
-// resets the count.
-function noteFarmJarResult(cookies, ok) {
-  const tmpt = _tmptOf(cookies);
-  if (!tmpt) return;
-  if (ok) { _jarFail.delete(tmpt); return; }
-  const threshold = Math.max(1, parseInt(process.env.JAR_DEAD_THRESHOLD, 10) || 3);
-  const n = (_jarFail.get(tmpt) || 0) + 1;
-  if (n >= threshold) { _jarFail.delete(tmpt); markFarmJarDead(cookies).catch(() => {}); }
-  else _jarFail.set(tmpt, n);
-}
 // NOTE: the per-machine proxy blocklist was REMOVED. It excluded a proxy locally after
 // N consecutive errors, but the state lived in-process, so each of the ~10 PM2
 // instances had to rediscover the same bad IPs by burning ~5 binds apiece — and every
@@ -1791,10 +1792,8 @@ class BrowserPagePool {
             'x-request-id': 'v' + Math.floor(Math.random() * 1e9),
           });
           facetStatus = vr.status || 0;
-
-          if (SEED_FARM() && jar && jar.length && (facetStatus === 200 || facetStatus === 403)) {
-            noteFarmJarResult(jar, facetStatus === 200);
-          }
+          // No jar health-feedback here: a bind 403 is far more likely the exit IP than
+          // the token, and blaming the token retired 94% good jars. See the note above.
         }
 
         const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
@@ -1911,12 +1910,8 @@ class BrowserPagePool {
           const vu = `https://services.ticketmaster.com/api/ismds/event/${seedId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
           const vr = await apiGet(page, vu, { accept: 'application/json', 'x-api-key': 'b462oi7fic6pehcdkzony5bxhe', 'tmps-correlation-id': 'v' + Math.floor(Math.random() * 1e9), 'x-request-id': 'v' + Math.floor(Math.random() * 1e9) });
           facetStatus = vr.status || 0;
-          // Farm health-feedback: record the result. A jar is only marked dead after
-          // N consecutive 403s (a single 403 is usually the proxy IP, not the token),
-          // so proxy-flagged blips don't waste bart re-mints on good jars.
-          if (SEED_FARM() && jar && jar.length && (facetStatus === 200 || facetStatus === 403)) {
-            noteFarmJarResult(jar, facetStatus === 200);
-          }
+          // No jar health-feedback here: a bind 403 is far more likely the exit IP than
+          // the token, and blaming the token retired 94% good jars. See the note above.
         }
         const label = proxy ? (proxy.id || proxy.proxy) : 'direct (no proxy)';
         if (facetStatus === 200 || (!seedId && status === 200)) {
