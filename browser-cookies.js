@@ -30,7 +30,7 @@ const SEED_TTL_MS = () => parseInt(process.env.SEED_TTL_MS, 10) || 50 * 60 * 100
 const SEED_FARM = () => process.env.SEED_FARM === "1";
 // SELF_MINT=1 → when the farm has NO jar to serve, mint a tmpt in-process by
 // navigating TM on the page's own proxy instead of stalling. The farm jar is still
-// always preferred; this only fires when `readFarmJar()` comes back empty.
+// always preferred; this only fires when the jar lease comes back empty.
 //
 // OFF BY DEFAULT — measured, not assumed (scripts/testSelfMint.mjs, farm stubbed dry):
 //   • Camoufox (default engine): no tmpt minted at all (39 TM cookies, tmpt=no).
@@ -40,19 +40,104 @@ const SEED_FARM = () => process.env.SEED_FARM === "1";
 // Enable only with SELF_MINT=1 after a mint path is proven to pass EPS on the IP
 // in question. The default (unset/0) is the strict farm-only consumer behaviour.
 const SELF_MINT = () => process.env.SELF_MINT === "1";
-// Cache the LIST of healthy jars (~once/10s, cheap), but hand them out ROUND-ROBIN
-// per call — so each pool page gets a DIFFERENT token and facets load spreads evenly
-// across all K jars. (Random + a 15s cache used to funnel every page bound in the
-// same window onto ONE jar, burning it ~K× faster.)
+// --- Per-exit-IP throughput (the limit that actually governs this scraper) --------
+// MEASURED 2026-08-09, scripts/jarRateRamp.mjs, one token on one IP, sliding 60s window:
+//     <=29 calls/min -> 3-5% fail      30-39 -> 22% fail      40+ -> 78% fail
+// and an IP driven into a block answered 200 again ~75s after the load stopped. So the
+// safe operating point is ~20/min per exit IP with a ~90s rest after a 403.
+// IP_RATE_PER_MIN=0 disables pacing entirely (not recommended).
+const IP_RATE_PER_MIN = () => {
+  const v = parseInt(process.env.IP_RATE_PER_MIN, 10);
+  return Number.isFinite(v) ? v : 20;
+};
+const IP_COOLDOWN_MS = () => parseInt(process.env.IP_COOLDOWN_MS, 10) || 90000;
+// --- ONE JAR, ONE EXIT IP — exclusive Mongo lease -------------------------------
+// MEASURED 2026-08-09 (scripts/jarIpBudget.mjs, reproduced in four independent runs):
+// TM revokes a tmpt session PERMANENTLY once it is used from an ELEVENTH exit IP. Every
+// IP then returns 403 {"response":"block"} — including ones that answered 200 seconds
+// earlier. It is a session-hijack heuristic, not a rate limit and not the token wearing
+// out:
+//     one token on ONE IP  -> 775+ consecutive facets calls, zero failures
+//     one token on 11 IPs  -> dead on the 11th, and dead everywhere afterwards
+//
+// The old readFarmJar() handed the same jar round-robin to every page, and every page
+// binds its OWN proxy. With 6-8 farm jars against 60 pages per machine, each jar crossed
+// ten IPs within seconds of being minted and was revoked on arrival. The pool then read
+// the resulting 403 storm as dead proxies, restarted the browser and discarded the jar,
+// so its replacement died the same way. That loop — not blocked proxies, not call volume
+// — is what held throughput down.
+//
+// A jar is therefore LEASED to exactly one page on exactly one proxy for its whole life.
+// When nothing is free the caller gets null and does not bind that page: an unfed page
+// costs nothing, whereas a shared jar kills every page holding it.
+// Set JAR_LEASE=0 to fall back to the old sharing behaviour (not recommended).
+const JAR_LEASE = () => process.env.JAR_LEASE !== "0";
+
+let _leaseSeq = 0;
+const newOwnerId = () => `${process.env.MACHINE_ID || "m"}:${process.pid}:${++_leaseSeq}`;
+
+function _tmptOf(cookies) { return (cookies.find((c) => c.name === "tmpt") || {}).value; }
+
+// Claim a jar no other page holds, freshest first so the page gets the most remaining
+// life. The lease runs to the jar's own expiresAt: a jar is useless past 60 minutes
+// anyway, and handing a crashed owner's jar to a DIFFERENT proxy is exactly the thing
+// that revokes it. Deliberately avoids an aggregation-pipeline update (needs Mongo 4.2+)
+// — a compare-and-set on one _id at a time is just as atomic and works everywhere.
+// ttlMs caps how long the lease is held. Pool pages pass nothing and hold the jar for its
+// whole life; short-lived callers that have no teardown hook pass a TTL so a leaked lease
+// frees itself instead of stranding a good jar until expiry.
+async function leaseFarmJar(ownerId, proxyKey, ttlMs) {
+  try {
+    const coll = mongoose.connection.db.collection("seed_jars");
+    const now = new Date();
+    const free = { $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: now } }] };
+    const candidates = await coll
+      .find({ status: "healthy", expiresAt: { $gt: now }, ...free })
+      .sort({ mintedAt: -1 })
+      .limit(20)
+      .toArray();
+
+    for (const c of candidates) {
+      const until = ttlMs
+        ? new Date(Math.min(new Date(c.expiresAt).getTime(), Date.now() + ttlMs))
+        : c.expiresAt;
+      const res = await coll.findOneAndUpdate(
+        { _id: c._id, status: "healthy", expiresAt: { $gt: new Date() }, ...free },
+        { $set: { leaseOwner: ownerId, leaseProxy: proxyKey || "direct", leaseUntil: until, leasedAt: new Date() } },
+        { returnDocument: "after" }
+      );
+      const doc = res && (res.value !== undefined ? res.value : res);
+      if (doc && doc.cookies && doc.cookies.length) {
+        return { cookies: doc.cookies, jarId: doc._id, tmpt: _tmptOf(doc.cookies) };
+      }
+    }
+    return null; // every jar is already spoken for — the farm is the bottleneck, not us
+  } catch (e) {
+    console.warn("[SeedFarm] lease failed:", e.message);
+    return null;
+  }
+}
+
+// Hand a jar back when its page dies, so a replacement page can pick it up. Only the
+// holder may release it, so a stale owner cannot free someone else's lease.
+async function releaseFarmJar(jarId, ownerId) {
+  if (!jarId) return;
+  try {
+    await mongoose.connection.db.collection("seed_jars").updateOne(
+      { _id: jarId, leaseOwner: ownerId },
+      { $unset: { leaseOwner: "", leaseProxy: "", leaseUntil: "", leasedAt: "" } }
+    );
+  } catch { /* best effort — the lease expires with the jar regardless */ }
+}
+
+// Legacy shared-jar reader, used only when JAR_LEASE=0. Kept so the old behaviour is one
+// env var away if the lease ever needs to be switched off in a hurry.
 let _farmJars = { list: [], at: 0, rr: 0 };
-async function readFarmJar() {
+async function readFarmJarShared() {
   if (!_farmJars.list.length || Date.now() - _farmJars.at > 10000) {
     try {
-      const budget = JAR_CALL_BUDGET();
-      const q = { status: "healthy", expiresAt: { $gt: new Date() } };
-      // #1: don't hand out tokens that have reached their call budget (retire clean).
-      if (budget) q.$or = [{ useCount: { $exists: false } }, { useCount: { $lt: budget } }];
-      const docs = await mongoose.connection.db.collection("seed_jars").find(q).sort({ slot: 1 }).toArray();
+      const docs = await mongoose.connection.db.collection("seed_jars")
+        .find({ status: "healthy", expiresAt: { $gt: new Date() } }).sort({ slot: 1 }).toArray();
       _farmJars = { list: docs.map((d) => d.cookies), at: Date.now(), rr: _farmJars.rr };
     } catch (e) {
       console.warn("[SeedFarm] read failed:", e.message);
@@ -60,100 +145,30 @@ async function readFarmJar() {
   }
   const N = _farmJars.list.length;
   if (!N) return null;
-  // #2: round-robin, but skip any token already over the per-minute rate cap (scan up
-  // to N from the cursor); if all are over cap, fall back to the next one anyway.
-  const cap = JAR_RATE_CAP();
-  for (let i = 0; i < N; i++) {
-    const cand = _farmJars.list[(_farmJars.rr + i) % N];
-    if (!cap || jarLocalRate(_tmptOf(cand)) < cap) {
-      _farmJars.rr = (_farmJars.rr + i + 1) % N;
-      return cand;
-    }
-  }
   const cookies = _farmJars.list[_farmJars.rr % N];
   _farmJars.rr = (_farmJars.rr + 1) % N;
-  return cookies;
+  return { cookies, jarId: null, tmpt: _tmptOf(cookies) };
 }
 
-function _tmptOf(cookies) { return (cookies.find((c) => c.name === "tmpt") || {}).value; }
-
-// --- Per-token budget (#1) + rate cap (#2): proactive 403 avoidance -------------
-// A tmpt token flags after a limited VOLUME of facets calls. Rather than use it until
-// it 403s (a bot signal), retire it PROACTIVELY at a call budget. The budget is GLOBAL
-// (a token is shared fleet-wide) → tracked in seed_jars.useCount, each instance $inc's
-// its share in batches. We also cap the per-token call RATE locally so no token gets
-// hammered in bursts. JAR_CALL_BUDGET / JAR_RATE_CAP = 0 disables each.
-const JAR_CALL_BUDGET = () => parseInt(process.env.JAR_CALL_BUDGET, 10) || 120;
-const JAR_RATE_CAP = () => parseInt(process.env.JAR_RATE_CAP, 10) || 25; // facets/min/token
-// NOTE: 403-based jar retirement was REMOVED (JAR_DEAD_THRESHOLD / noteFarmJarResult).
-// A facets 403 cannot distinguish "bad token" from "bad exit IP", and with ~44% of the
-// read proxies EPS-blocked it was overwhelmingly the IP. Measured 2026-07-30 with
-// scripts/auditJars.mjs — every unexpired jar replayed on a clean DIRECT IP, no proxy
-// in the path:
-//
-//   15 of 16 jars flagged status:"dead" returned facets 200  -> 94% false-retirement
-//   jars at useCount 184 / 212 / 263 / 281 were still ALIVE   -> volume wasn't it either
-//
-// Meanwhile the scraper sat at 0 events/min logging "no farm jar available", because
-// readFarmJar() filters on status:"healthy" and we had marked every good token dead.
-// Retiring on 403 destroyed the jar supply to protect against a failure it could not
-// actually detect. Tokens now leave rotation only via TTL expiry or the useCount budget
-// below — both of which measure something real. A genuinely dead jar simply fails its
-// binds and ages out, which costs a few retries instead of the whole pool.
-const _jarUse = new Map();       // tmpt -> { pending, window: number[] }
-const _retiredTokens = new Set();// tmpt values retired locally (force page rebind)
-
-function _jarUseEntry(tmpt) {
-  let u = _jarUse.get(tmpt);
-  if (!u) { u = { pending: 0, window: [] }; _jarUse.set(tmpt, u); }
-  return u;
-}
-// Local facets calls on `tmpt` in the last 60s (for the rate cap).
-function jarLocalRate(tmpt) {
-  const u = _jarUse.get(tmpt);
-  if (!u) return 0;
-  const cutoff = Date.now() - 60000;
-  u.window = u.window.filter((t) => t > cutoff);
-  return u.window.length;
-}
-// Retire a token: drop from local rotation, flag for page rebind, mark dead in the DB
-// so the farm re-mints it and no instance hands it out again.
-async function _retireJarByTmpt(tmpt, reason) {
-  if (!tmpt || _retiredTokens.has(tmpt)) return;
-  if (_retiredTokens.size > 300) _retiredTokens.clear(); // bound; DB status:dead is the source of truth
-  _retiredTokens.add(tmpt);
-  _farmJars.list = _farmJars.list.filter((j) => _tmptOf(j) !== tmpt);
-  _jarUse.delete(tmpt);
+// --- Usage counter: OBSERVABILITY ONLY ------------------------------------------
+// JAR_CALL_BUDGET (retire a jar at 400 calls) was REMOVED. It had no measured basis and
+// was the largest single jar killer in production: 12 of 29 dead jars hit it, after a
+// median of 14 minutes of a 60-minute life. Measured against that, one token served 775+
+// consecutive facets calls on ONE IP with zero degradation (scripts/jarBurnTest.mjs), and
+// tmpt's expiry does not move when it is used (scripts/tmptRefreshProbe.mjs) — so the
+// only real limit is the 60-minute clock that starts at mint. useCount is still tracked
+// because it is useful for spotting a starved fleet, but it no longer retires anything.
+const _jarPending = new Map(); // tmpt -> calls not yet flushed
+async function noteJarUsage(tmpt, n) {
+  if (!tmpt || n <= 0) return;
+  const pending = (_jarPending.get(tmpt) || 0) + n;
+  if (pending < 15) { _jarPending.set(tmpt, pending); return; } // batch the DB writes
+  _jarPending.set(tmpt, 0);
   try {
     await mongoose.connection.db.collection("seed_jars").updateOne(
       { cookies: { $elemMatch: { name: "tmpt", value: tmpt } } },
-      { $set: { status: "dead", updatedAt: new Date() } }
+      { $inc: { useCount: pending } }
     );
-    console.log(`[SeedFarm] retired a jar (${reason}) — farm will re-mint`);
-  } catch (e) { console.warn("[SeedFarm] retire failed:", e.message); }
-}
-
-// Record N facets calls made on `tmpt`. Always tracks the rate window (#2); batches a
-// GLOBAL useCount $inc and retires the token once it reaches JAR_CALL_BUDGET (#1), so
-// it's rotated out BEFORE it can 403.
-async function noteJarUsage(tmpt, n) {
-  if (!tmpt || n <= 0) return;
-  const u = _jarUseEntry(tmpt);
-  const now = Date.now();
-  for (let i = 0; i < n; i++) u.window.push(now);
-  const budget = JAR_CALL_BUDGET();
-  if (!budget) return;
-  u.pending += n;
-  if (u.pending < 15) return; // batch DB writes
-  const inc = u.pending; u.pending = 0;
-  try {
-    const doc = await mongoose.connection.db.collection("seed_jars").findOneAndUpdate(
-      { cookies: { $elemMatch: { name: "tmpt", value: tmpt } }, status: "healthy" },
-      { $inc: { useCount: inc } },
-      { returnDocument: "after", projection: { useCount: 1 } }
-    );
-    const total = (doc && (doc.value ? doc.value.useCount : doc.useCount)) || 0;
-    if (total >= budget) _retireJarByTmpt(tmpt, `call budget ${total}/${budget}`).catch(() => {});
   } catch { /* best effort */ }
 }
 
@@ -857,7 +872,16 @@ async function refreshCookies(eventId, proxy = null) {
   // guarantees a 403), SELF_MINT=0 returns empty so the caller fails cleanly and waits
   // for the farm. SEED_FARM_FALLBACK=1 skips the chokepoint entirely.
   if (SEED_SPLIT() && process.env.SEED_FARM_FALLBACK !== "1") {
-    const jar = SEED_FARM() ? await readFarmJar() : null;
+    // Callers of this legacy path have no teardown hook to release a lease, so take one
+    // with a short TTL rather than none at all: a jar handed out here still must not end
+    // up on a second exit IP while a pool page is driving it (see the lease notes above).
+    const lease = SEED_FARM()
+      ? (JAR_LEASE()
+          ? await leaseFarmJar(newOwnerId(), proxy ? (proxy.id || proxy.proxy) : "direct",
+              parseInt(process.env.REFRESH_JAR_LEASE_MS, 10) || 5 * 60 * 1000)
+          : await readFarmJarShared())
+      : null;
+    const jar = lease && lease.cookies;
     if ((jar && jar.length) || !SELF_MINT()) {
       return { cookies: jar || [], fingerprint: BrowserFingerprint.generate(), lastRefresh: Date.now() };
     }
@@ -1493,7 +1517,16 @@ class RequestBatcher {
       return;
     }
 
+    const meta = this.pool._pageMeta.get(worker);
+
     try {
+      // PACE THE EXIT IP BEFORE ANYTHING GOES OUT.
+      // Measured 2026-08-09 (scripts/jarRateRamp.mjs) on a single exit IP, sliding 60s
+      // window: <=29 calls/min fails 3-5%, 30-39 fails 22%, 40+ fails 78%. Firing a whole
+      // batch at once put 12 requests down one IP in a single burst — far past that knee —
+      // and the 403s it caused were then misread as dead jars and dead proxies.
+      await this.pool.reserveIpSlots(meta, allRequests.length);
+
       // Fetch all requests via either a page context client or lightweight request context.
       const results = await Promise.all(
         allRequests.map(({ url, headers }) => apiGetFromWorker(worker, url, headers))
@@ -1501,20 +1534,19 @@ class RequestBatcher {
 
       this.pool.release(worker);
 
-      // Track errors for cookie refresh triggering
-      for (const r of results) {
-        if (r.status) this.pool.trackError(r.status);
-      }
+      // A 403 here means this IP is over its window, and it clears on its own in ~75s
+      // (measured: a hard-blocked IP answered 200 again 75s after the load stopped). It
+      // does NOT mean the jar is dead and does NOT mean the proxy is burned — so rest
+      // this IP briefly instead of restarting the browser and throwing the jar away.
+      const blocked = results.filter((r) => r.status === 403).length;
+      if (blocked) this.pool.coolProxy(meta, blocked);
+      else if (results.some((r) => r.status >= 200 && r.status < 400)) this.pool.trackError(200);
 
-      // Per-token budget/rate accounting: attribute this batch's FACETS calls to the
-      // page's injected token, so it can be proactively retired at its call budget
-      // (before it 403s). If the token got retired, drop the page → rebind on a fresh one.
-      const meta = this.pool._pageMeta.get(worker);
+      // Usage counter for observability only — nothing retires on it any more.
       const tmpt = meta && meta.tmpt;
       if (tmpt) {
         const facetsCount = allRequests.reduce((a, r) => a + (/\/ismds\/|facets\?/.test(r.url) ? 1 : 0), 0);
         if (facetsCount) noteJarUsage(tmpt, facetsCount).catch(() => {});
-        if (_retiredTokens.has(tmpt)) this.pool._removePage(worker);
       }
 
       // Distribute results back to each event's promise
@@ -1594,13 +1626,37 @@ class BrowserPagePool {
     // Per-page proxy isolation: each pool page lives in its OWN context with its
     // OWN proxy, so a batch's fetches spread across N IPs instead of hammering one.
     this._contexts = [];                 // all contexts (for cleanup)
-    this._pageMeta = new Map();          // page -> { context, proxy }
+    this._pageMeta = new Map();          // page -> { context, proxy, tmpt, jarId, jarOwner }
     this._usedProxies = new Set();       // proxy strings currently assigned to a page
+    this._ipBuckets = new Map();         // proxyKey -> { tokens, last, coolUntil }
     // Seed/scrape split: shared cookie jar minted on bart, injected into scrape pages.
     this._seedJar = null;                // Array<cookie> last minted on bart
     this._seedJarAt = 0;                 // ms timestamp of the jar
     this._seedInFlight = null;           // dedupe concurrent mints
     this._refreshCursor = 0;             // round-robin target index for rolling refresh
+  }
+
+  // Acquire the jar for ONE page on ONE proxy. Returns { cookies, jarId, ownerId } or
+  // null. The lease is what keeps a token off a second exit IP; `proxyKey` is recorded on
+  // the lease so a jar's IP is visible in the DB when something looks wrong.
+  async _acquireSeedJar(eventId, proxyKey) {
+    if (!SEED_SPLIT()) return null;
+    if (SEED_FARM() && JAR_LEASE()) {
+      const ownerId = newOwnerId();
+      const lease = await leaseFarmJar(ownerId, proxyKey);
+      if (lease) return { ...lease, ownerId };
+      // Every jar is already leased. Do NOT fall back to a shared one — that is the
+      // failure this lease exists to prevent. The page simply does not bind and retries;
+      // the fix for "no jar available" is more mint throughput, not more sharing.
+      if (process.env.SEED_FARM_FALLBACK !== "1") {
+        if (SELF_MINT() && this._seedJar && Date.now() - this._seedJarAt < SEED_TTL_MS()) {
+          return { cookies: this._seedJar, jarId: null, ownerId: null };
+        }
+        return null;
+      }
+    }
+    const cookies = await this._ensureSeedJar(eventId);
+    return cookies && cookies.length ? { cookies, jarId: null, ownerId: null } : null;
   }
 
   // Ensure a fresh seed cookie jar exists (minted on bart). Returns the jar or null.
@@ -1610,7 +1666,8 @@ class BrowserPagePool {
     // FARM MODE: read a ready jar from the shared store (minted by cookie-farm) —
     // this instance never touches bart.
     if (SEED_FARM()) {
-      const farmJar = await readFarmJar();
+      const shared = await readFarmJarShared();
+      const farmJar = shared && shared.cookies;
       if (farmJar && farmJar.length) return farmJar;
       // FLEET SAFETY: with the farm on, do NOT fall back to minting on bart in-process.
       // 100 instances all stampeding bart when the farm briefly runs dry would flood
@@ -1749,8 +1806,11 @@ class BrowserPagePool {
       if (!DIRECT_MODE && !proxy) return null;
 
       let requestContext = null;
+      let lease = null; // one jar, one proxy — released below if this slot fails to bind
       try {
-        const jar = SEED_SPLIT() ? await this._ensureSeedJar(seedId) : null;
+        const proxyKey = proxy ? (proxy.id || proxy.proxy) : 'direct';
+        lease = SEED_SPLIT() ? await this._acquireSeedJar(seedId, proxyKey) : null;
+        const jar = lease && lease.cookies;
         if (SEED_SPLIT() && (!jar || !jar.length)) {
           // No self-mint escape hatch here even with SELF_MINT=1: a request-context has
           // no page to run the reCAPTCHA challenge that mints tmpt. Skip and retry —
@@ -1811,6 +1871,8 @@ class BrowserPagePool {
             requestContext,
             proxy,
             tmpt: jar ? _tmptOf(jar) : undefined,
+            jarId: lease && lease.jarId,
+            jarOwner: lease && lease.ownerId,
           });
 
           console.log(`[RequestPool] slot bound to ${label} (facets=${facetStatus}) ✓`);
@@ -1818,9 +1880,11 @@ class BrowserPagePool {
         }
 
         console.log(`[RequestPool] ${label} blocked (facets=${facetStatus}) — trying another`);
+        if (lease && lease.jarId) await releaseFarmJar(lease.jarId, lease.ownerId);
         await requestContext.dispose().catch(() => {});
       } catch (e) {
         console.warn(`[RequestPool] ${proxy ? proxy.proxy : 'direct'} setup failed: ${e.message}`);
+        if (lease && lease.jarId) await releaseFarmJar(lease.jarId, lease.ownerId);
         if (requestContext) await requestContext.dispose().catch(() => {});
       }
     }
@@ -1842,6 +1906,7 @@ class BrowserPagePool {
       const proxy = DIRECT_MODE ? null : this._pickUnusedProxy();
       if (!DIRECT_MODE && !proxy) return null;
       let context = null;
+      let lease = null; // declared out here so the catch below can release it
       try {
         const ctxOpts = {
           viewport: USE_CAMOUFOX ? null : { width: 1920, height: 1080 },
@@ -1860,7 +1925,9 @@ class BrowserPagePool {
         // Inject the bart-minted jar (tmpt + session cookies) so facets validates
         // without any reCAPTCHA seed on this IP. facets is IP-agnostic once tmpt is
         // valid, so one bart seed serves every scrape proxy.
-        const jar = SEED_SPLIT() ? await this._ensureSeedJar(seedId) : null;
+        const proxyKey = proxy ? (proxy.id || proxy.proxy) : 'direct';
+        lease = SEED_SPLIT() ? await this._acquireSeedJar(seedId, proxyKey) : null;
+        const jar = lease && lease.cookies;
         // Did we mint this page's session ourselves? If so, and facets validates it,
         // cache the jar so the rest of the pool injects instead of navigating too.
         let selfMinted = false;
@@ -1924,14 +1991,21 @@ class BrowserPagePool {
             const own = await context.cookies().catch(() => []);
             if (this._cacheSelfMintedJar(own)) ownTmpt = _tmptOf(this._seedJar);
           }
-          this._pageMeta.set(page, { context, proxy, tmpt: jar ? _tmptOf(jar) : ownTmpt });
+          this._pageMeta.set(page, {
+            context, proxy, tmpt: jar ? _tmptOf(jar) : ownTmpt,
+            jarId: lease && lease.jarId, jarOwner: lease && lease.ownerId,
+          });
           console.log(`[PagePool] page bound to ${label} (page=${status}, facets=${facetStatus}) ✓`);
           return { page, context, proxy };
         }
         console.log(`[PagePool] ${label} blocked (page=${status}, facets=${facetStatus}) — ${DIRECT_MODE ? 'retrying' : 'trying another'}`);
+        // Hand the jar back before trying another proxy. A leaked lease would strand a
+        // perfectly good jar until it expired, and jar supply is the scarce resource.
+        if (lease && lease.jarId) await releaseFarmJar(lease.jarId, lease.ownerId);
         await context.close().catch(() => {});
       } catch (e) {
         console.warn(`[PagePool] ${proxy ? proxy.proxy : 'direct'} setup failed: ${e.message}`);
+        if (lease && lease.jarId) await releaseFarmJar(lease.jarId, lease.ownerId);
         if (context) await context.close().catch(() => {});
       }
     }
@@ -2015,6 +2089,7 @@ class BrowserPagePool {
     this._initEventId = eventId;
 
     // Reset per-page proxy tracking for this (re)init
+    this._releaseAllLeases();
     this._contexts = [];
     this._pageMeta = new Map();
     this._usedProxies = new Set();
@@ -2072,8 +2147,12 @@ class BrowserPagePool {
     console.log(`[PagePool] Seeding cookies via: ${eventUrl}`);
     const seedPage = await context.newPage();
     let seedTmpt;
+    let seedLease = null;
     try {
-      const jar = SEED_SPLIT() ? await this._ensureSeedJar(eventId) : null;
+      seedLease = SEED_SPLIT()
+        ? await this._acquireSeedJar(eventId, proxy ? (proxy.id || proxy.proxy) : 'direct')
+        : null;
+      const jar = seedLease && seedLease.cookies;
       if (jar && jar.length) {
         seedTmpt = _tmptOf(jar);
         // Split mode: this shared context is on a datacenter proxy that can't mint
@@ -2123,7 +2202,7 @@ class BrowserPagePool {
     this.pages.push(seedPage);
     this.available.push(seedPage);
     this._contexts.push(context);
-    this._pageMeta.set(seedPage, { context, proxy, tmpt: seedTmpt });
+    this._pageMeta.set(seedPage, { context, proxy, tmpt: seedTmpt, jarId: seedLease && seedLease.jarId, jarOwner: seedLease && seedLease.ownerId });
     if (proxy) this._usedProxies.add(proxy.id || proxy.proxy);
 
     // Create remaining pool pages — EACH in its OWN context bound to its OWN
@@ -2386,6 +2465,7 @@ class BrowserPagePool {
       apiPage = null;
 
       // 6. Reset per-page proxy tracking + pick a fresh proxy for context #1
+      this._releaseAllLeases();
       this._contexts = [];
       this._pageMeta = new Map();
       this._usedProxies = new Set();
@@ -2422,7 +2502,10 @@ class BrowserPagePool {
       // Seed cookies on page #1 (context #1 / newProxy). In split mode inject the
       // bart-minted jar instead of self-seeding on the datacenter proxy.
       const seedPage = await context.newPage();
-      const rjar = SEED_SPLIT() ? await this._ensureSeedJar(seedEventId) : null;
+      const rlease = SEED_SPLIT()
+        ? await this._acquireSeedJar(seedEventId, newProxy ? (newProxy.id || newProxy.proxy) : 'direct')
+        : null;
+      const rjar = rlease && rlease.cookies;
       if (rjar && rjar.length) {
         await context.addCookies(rjar).catch((e) => console.warn('[PagePool] Restart seed inject failed:', e.message));
         console.log(`[PagePool] Restart: seed page #1 using injected bart jar (${rjar.length} cookies)`);
@@ -2455,7 +2538,7 @@ class BrowserPagePool {
       this.pages.push(seedPage);
       this.available.push(seedPage);
       this._contexts.push(context);
-      this._pageMeta.set(seedPage, { context, proxy: newProxy, tmpt: rjar ? _tmptOf(rjar) : _tmptOf(await context.cookies().catch(() => [])) });
+      this._pageMeta.set(seedPage, { context, proxy: newProxy, tmpt: rjar ? _tmptOf(rjar) : _tmptOf(await context.cookies().catch(() => [])), jarId: rlease && rlease.jarId, jarOwner: rlease && rlease.ownerId });
       if (newProxy?.proxy) this._usedProxies.add(newProxy.proxy);
 
       // Remaining pool pages — each on its OWN validated proxy
@@ -2540,6 +2623,7 @@ class BrowserPagePool {
         workers.map(async (worker) => {
           const meta = this._pageMeta.get(worker);
           this._pageMeta.delete(worker);
+          if (meta?.jarId) releaseFarmJar(meta.jarId, meta.jarOwner).catch(() => {});
           if (meta?.requestContext) {
             await meta.requestContext.dispose().catch(() => {});
             return;
@@ -2607,25 +2691,21 @@ class BrowserPagePool {
    * Track errors from batch results. If too many 403s pile up,
    * trigger an early browser restart.
    */
+  // A 403 no longer restarts anything.
+  //
+  // It used to: five consecutive 403s tore down the whole browser and threw the seed jar
+  // away. Measured 2026-08-09, that reasoning was wrong on both counts. A 403 is a
+  // per-exit-IP rate trip that clears by itself in ~75s (scripts/jarRateRamp.mjs), and
+  // the batcher fired up to 12 requests down one IP at once — so ONE over-sized burst
+  // produced five 403s instantly and took down all six pages plus their jars. The
+  // replacement pages then repeated the burst. That loop is what capped throughput.
+  //
+  // Rate is now controlled before the fact by reserveIpSlots(), and a 403 that still gets
+  // through rests just the offending IP via coolProxy(). Genuine browser death is already
+  // handled where it actually shows up: Target closed / Protocol error / crashed.
   trackError(status) {
-    if (status === 403) {
-      this._consecutiveErrors++;
-      if (this._consecutiveErrors >= 5 && !this._isRestarting) {
-        console.log(`[PagePool] ${this._consecutiveErrors} consecutive 403s — triggering browser restart`);
-        // 5 consecutive 403s with ZERO successes in between means the shared jar's
-        // tmpt is no longer accepted — either it expired, or (the common one at
-        // scale) TM VOLUME-rate-flagged the token after too many facets calls went
-        // through one session. A live jar would have produced a 200 and reset this
-        // counter, so reaching the storm = the jar is dead → re-mint it. The 60s
-        // floor stops thrash: a brand-new jar is given time to work before a storm
-        // can discard it (and avoids re-minting on a transient single-IP blip).
-        const jarAgeMs = this._seedJarAt ? Date.now() - this._seedJarAt : Infinity;
-        if (SEED_SPLIT() && jarAgeMs > 60000) { this._seedJar = null; this._seedJarAt = 0; }
-        this._restartBrowser('403-errors').catch(() => {});
-      }
-    } else if (status >= 200 && status < 400) {
-      this._consecutiveErrors = 0;
-    }
+    if (status >= 200 && status < 400) this._consecutiveErrors = 0;
+    else if (status === 403) this._consecutiveErrors++;
   }
 
   /**
@@ -2667,13 +2747,80 @@ class BrowserPagePool {
     return this._batcher.submit(requests);
   }
 
+  // --- Per-exit-IP pacing and cooldown -------------------------------------------
+  // The governing limit is requests per minute per EXIT IP, measured at a knee of ~30/min
+  // with a ~75s recovery (scripts/jarRateRamp.mjs). The old controls were both aimed at
+  // the wrong resource: JAR_RATE_CAP counted per TOKEN, and it lived in-process, so ten
+  // PM2 instances multiplied whatever cap you set by ten. Both are replaced by one token
+  // bucket per proxy, which is also per-jar now that a jar is leased to a single proxy.
+  _proxyKeyOf(page) {
+    const m = this._pageMeta.get(page);
+    return m && m.proxy ? (m.proxy.id || m.proxy.proxy) : 'direct';
+  }
+
+  // Hand every held jar back before the page map is wiped. Without this a restart strands
+  // the instance's whole jar allocation until it expires — and with the farm minting only
+  // a handful an hour, jars are the scarce resource, not pages.
+  _releaseAllLeases() {
+    for (const m of this._pageMeta.values()) {
+      if (m && m.jarId) releaseFarmJar(m.jarId, m.jarOwner).catch(() => {});
+    }
+  }
+
+  _ipState(meta) {
+    const key = meta && meta.proxy ? (meta.proxy.id || meta.proxy.proxy) : 'direct';
+    let s = this._ipBuckets.get(key);
+    if (!s) {
+      s = { tokens: IP_RATE_PER_MIN(), last: Date.now(), coolUntil: 0 };
+      this._ipBuckets.set(key, s);
+    }
+    return s;
+  }
+
+  // Block until this IP can afford `n` more requests, and until any cooldown has passed.
+  async reserveIpSlots(meta, n) {
+    const rate = IP_RATE_PER_MIN();
+    if (!rate) return;
+    const s = this._ipState(meta);
+    for (let guard = 0; guard < 600; guard++) {
+      const now = Date.now();
+      if (now < s.coolUntil) {
+        await new Promise((r) => setTimeout(r, Math.min(2000, s.coolUntil - now)));
+        continue;
+      }
+      s.tokens = Math.min(rate, s.tokens + ((now - s.last) / 60000) * rate);
+      s.last = now;
+      if (s.tokens >= n) { s.tokens -= n; return; }
+      await new Promise((r) => setTimeout(r, Math.min(2000, ((n - s.tokens) / rate) * 60000)));
+    }
+  }
+
+  // Rest an IP that just came back 403. Never touches the jar: a 403 cannot distinguish a
+  // bad token from an over-driven IP, and retiring jars on 403 previously threw away 94%
+  // good tokens (see the notes on the removed JAR_DEAD_THRESHOLD).
+  coolProxy(meta, blockedCount) {
+    const s = this._ipState(meta);
+    const ms = IP_COOLDOWN_MS();
+    s.coolUntil = Math.max(s.coolUntil, Date.now() + ms);
+    s.tokens = 0;
+    const key = meta && meta.proxy ? (meta.proxy.id || meta.proxy.proxy) : 'direct';
+    console.log(`[PagePool] ${key} returned ${blockedCount}×403 — resting it ${Math.round(ms / 1000)}s (jar kept)`);
+  }
+
   async acquire(timeoutMs = 20000) {
     if (!this.initialized || (!REQUEST_CONTEXT_MODE() && !this._browser?.isConnected())) {
       throw new Error('Pool not initialized or browser disconnected');
     }
 
     if (this.available.length > 0) {
-      return this.available.pop();
+      // Prefer a page whose IP is not resting; fall back to any rather than stall the
+      // queue, since reserveIpSlots() will wait out the remaining cooldown anyway.
+      const now = Date.now();
+      const idx = this.available.findIndex((p) => {
+        const s = this._ipBuckets.get(this._proxyKeyOf(p));
+        return !s || now >= s.coolUntil;
+      });
+      return idx === -1 ? this.available.pop() : this.available.splice(idx, 1)[0];
     }
 
     // Wait for a page to be released
@@ -2710,6 +2857,10 @@ class BrowserPagePool {
       this._pageMeta.delete(page);
       const proxyKey = meta.proxy ? (meta.proxy.id || meta.proxy.proxy) : null;
       if (proxyKey) this._usedProxies.delete(proxyKey);
+      // Give the jar back so a replacement page can use it — on whatever proxy it lands
+      // on. The jar is still good: pages die for browser reasons far more often than
+      // token reasons, and a jar has no per-call budget to have used up.
+      if (meta.jarId) releaseFarmJar(meta.jarId, meta.jarOwner).catch(() => {});
       if (meta.requestContext) {
         meta.requestContext.dispose().catch(() => {});
       }
@@ -2762,6 +2913,7 @@ class BrowserPagePool {
     this.pages = [];
     this.available = [];
     this._contexts = [];
+    this._releaseAllLeases();
     this._pageMeta = new Map();
     this._usedProxies = new Set();
     this.initialized = false;
@@ -2833,5 +2985,10 @@ export {
   cleanupApiBrowser,
   isApiBrowserAvailable,
   // Page pool for high-throughput parallel requests
-  browserPagePool
+  browserPagePool,
+  // Jar leasing — exported so the cookie-farm and scripts/ diagnostics can honour the
+  // same one-jar-one-IP rule instead of re-introducing the fan-out that revokes tokens.
+  leaseFarmJar,
+  releaseFarmJar,
+  newOwnerId
 };
