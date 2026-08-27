@@ -484,6 +484,9 @@ class RedisLiveStore {
       if (err || !val) continue;
       try {
         const event = JSON.parse(val);
+        // Same rule as syncEventsFromDB: the staleness index is the TM work
+        // queue, so tickets.com events are never added to it.
+        if (event.source === "ticketscom") continue;
         const score = event.Last_Updated
           ? new Date(event.Last_Updated).getTime()
           : 0;
@@ -554,7 +557,7 @@ class RedisLiveStore {
         this.redis.smembers(KEY.active),
         Event.find(
           { Skip_Scraping: { $ne: true } },
-          { Event_ID: 1, mapping_id: 1 }
+          { Event_ID: 1, mapping_id: 1, source: 1 }
         ).lean(),
       ]);
 
@@ -600,8 +603,15 @@ class RedisLiveStore {
           pipe.set(KEY.event(ev.Event_ID), JSON.stringify(fullEvent));
           pipe.sadd(KEY.all, ev.Event_ID);
           pipe.sadd(KEY.active, ev.Event_ID);
-          // Score 0 = highest priority (will be claimed immediately)
-          pipe.zadd(KEY.staleness, 0, ev.Event_ID);
+          // Staleness IS the Ticketmaster work queue — claimEvents() reads it.
+          // tickets.com events stay out of it so TM instances never claim an
+          // event they cannot scrape; they are queued by the tickets.com
+          // manager in its own tc: namespace instead. They DO stay in the
+          // active set so portal reads and stats still count them.
+          if (fullEvent.source !== "ticketscom") {
+            // Score 0 = highest priority (will be claimed immediately)
+            pipe.zadd(KEY.staleness, 0, ev.Event_ID);
+          }
           if (fullEvent.mapping_id) {
             pipe.set(KEY.map(fullEvent.mapping_id), ev.Event_ID);
           }
@@ -643,9 +653,10 @@ class RedisLiveStore {
    */
   async claimEvents(count = 5) {
     if (!this.ready) {
-      // MongoDB fallback: get stalest active events
+      // MongoDB fallback: get stalest active events. Excludes tickets.com for
+      // the same reason the Redis path does — this is the TM work queue.
       const events = await Event.find(
-        { Skip_Scraping: { $ne: true } },
+        { Skip_Scraping: { $ne: true }, source: { $ne: "ticketscom" } },
         { Event_ID: 1, Last_Updated: 1 }
       )
         .sort({ Last_Updated: 1 })

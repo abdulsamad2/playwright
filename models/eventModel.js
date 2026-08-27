@@ -25,6 +25,19 @@ const eventSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Which scraper owns this event. Defaults to "ticketmaster" so every row
+    // that existed before tickets.com was added keeps its current behaviour.
+    //
+    // This field is LOad-BEARING, not decorative: the TM queue builder in
+    // helpers/RedisLiveStore.js filters on it, and the tickets.com manager
+    // claims only its own source. Without it, one scraper would pick up the
+    // other's events and fail every scrape.
+    source: {
+      type: String,
+      enum: ["ticketmaster", "ticketscom"],
+      default: "ticketmaster",
+      index: true,
+    },
     Zone: {
       type: String,
       default: "none",
