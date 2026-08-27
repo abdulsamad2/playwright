@@ -55,6 +55,7 @@ const inventoryTombstoneSchema = new mongoose.Schema(
       enum: [
         "scraper-removed",     // row disappeared from a scrape cycle
         "seats-changed",       // different seats = a genuinely different listing
+        "quantity-changed",    // count changed; StubHub cannot patch it, so recreate
         "event-deleted",       // event removed from the portal
         "event-expired",       // auto-delete cron, past or expired event
         "low-seat-auto-stop",  // below the configured minimum

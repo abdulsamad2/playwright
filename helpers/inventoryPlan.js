@@ -304,15 +304,27 @@ export function planInventoryChanges(existing, scraped, ctx) {
     const customSplitChanged = (prev.customSplit || "") !== (next.customSplit || "");
     const splitTypeChanged = (prev.splitType || "") !== (next.splitType || "");
 
-    if (seatsChanged) {
+    if (seatsChanged || quantityChanged) {
       // Different physical tickets — a different listing, however similar.
-      deletes.push({ ...prev, rowKey, reason: "seats-changed" });
+      //
+      // Quantity belongs here rather than with the patchable fields because the
+      // marketplace cannot change it. StubHub's InventoryUpdateRequest carries a
+      // `quantity`, but the spec restricts it to placeholder (SeatSaver)
+      // listings behind the ExtApiPlaceholderListingQtyPatch feature; on an
+      // ordinary seated listing a PATCH silently leaves the count alone. Treated
+      // as a patch, a quantity change therefore hashed differently, sent an
+      // update, changed nothing, and was recorded as synced — the listing kept
+      // selling the old count.
+      //
+      // In practice this nearly always coincides with a seat change, so it is
+      // usually already covered; nearly always is not a guarantee.
+      deletes.push({ ...prev, rowKey, reason: seatsChanged ? "seats-changed" : "quantity-changed" });
       creates.push({ rowKey, data: next });
       recreatedForSeats++;
       continue;
     }
 
-    if (priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
+    if (priceChanged || customSplitChanged || splitTypeChanged) {
       patches.push({ rowKey, _id: prev._id, data: next, now });
       continue;
     }
