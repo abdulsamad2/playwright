@@ -77,6 +77,18 @@ const inventoryTombstoneSchema = new mongoose.Schema(
       default: "pending",
     },
 
+    /**
+     * When the listing was delisted, starting the reappearance window.
+     *
+     * Load-bearing, and its absence was silent. resolveRemoval reads this to tell
+     * "already delisted, waiting out the grace window" from "not delisted yet",
+     * and mongoose drops writes to undeclared paths under strict mode — so
+     * markDelisted appeared to work, the field never persisted, and every pass
+     * re-delisted the same listings forever. 34 of them, and they could never
+     * progress to being deleted because the clock never started.
+     */
+    delistedAt: { type: Date },
+
     syncBatchId: { type: String },
     syncLeaseUntil: { type: Date },
     syncAttempts: { type: Number, default: 0 },
