@@ -22,18 +22,19 @@
  *     "SeatScouts has no update endpoint: changing a listing means deleting it
  *      by inventoryId and re-inserting."
  *
- * StubHub's POS API has PATCH, so the two kinds of change can be told apart:
+ * StubHub's POS API has PATCH and the CSV path is retired, so the two kinds of
+ * change can finally be told apart:
  *
  *   seats changed   a different set of physical tickets — genuinely a different
- *                   listing, so still delete then create.
+ *                   block, so the old row is tombstoned and a new one created.
  *
- *   price, quantity the same tickets on different terms. Update in place, keep
- *   or split changed the inventoryId, and let the portal PATCH the live listing.
- *                   It keeps its StubHub id, its age and its history, and never
- *                   leaves the market in between.
+ *   price, quantity the same tickets on different terms. Update in place and keep
+ *   or split changed the inventoryId.
  *
- * Under INVENTORY_SYNC_PROVIDER=csv the second branch is not taken and the plan
- * is exactly what it has always been.
+ * Note what this module does NOT decide. It says a row changed, or a row is gone,
+ * and why. Whether "gone" becomes a delist, a delete, or nothing at all because
+ * the row reappears inside the grace window is the portal's call — the scraper
+ * has no opinion about marketplaces and no way to act on one.
  */
 
 import moment from "moment";
@@ -243,11 +244,11 @@ export function buildPatchFields(group, ctx, price, now) {
  * @param {object[]} scraped   validated scrape groups
  * @param {object}   ctx       { eventId, mapping_id, event_name, venue_name,
  *                               event_date, priceIncreasePercentage,
- *                               stubhubMode, now }
+ *                               now }
  * @returns {{creates, patches, deletes, unchanged, stats}}
  */
 export function planInventoryChanges(existing, scraped, ctx) {
-  const { priceIncreasePercentage, stubhubMode, now = new Date() } = ctx;
+  const { priceIncreasePercentage, now = new Date() } = ctx;
 
   const existingByKey = new Map();
   for (const doc of existing) {
@@ -312,14 +313,7 @@ export function planInventoryChanges(existing, scraped, ctx) {
     }
 
     if (priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
-      if (stubhubMode) {
-        patches.push({ rowKey, _id: prev._id, data: next, now });
-      } else {
-        // Legacy path: SeatScouts cannot update, so the row is rebuilt and the
-        // listing deleted downstream.
-        deletes.push({ ...prev, rowKey, reason: "scraper-removed" });
-        creates.push({ rowKey, data: next });
-      }
+      patches.push({ rowKey, _id: prev._id, data: next, now });
       continue;
     }
 

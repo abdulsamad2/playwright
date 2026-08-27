@@ -30,19 +30,8 @@
  */
 
 import { ConsecutiveGroup } from "../models/seatModel.js";
-import InventoryApi from "../utils/inventoryApi.js";
 import { buildGroupDocument, buildPatchFields } from "./inventoryPlan.js";
-import { isStubhubMode, recordTombstones } from "./syncOutbox.js";
-
-/**
- * Legacy SeatScouts client, used only while INVENTORY_SYNC_PROVIDER=csv.
- *
- * It stays because delist latency matters: under the CSV the removal would
- * otherwise wait for the next scheduled upload, and inventory we no longer hold
- * must stop selling now, not in a few minutes. Once the provider flips to
- * stubhub the portal's worker owns removals and this goes away entirely.
- */
-const legacyInventoryApi = new InventoryApi();
+import { recordTombstones } from "./syncOutbox.js";
 
 /**
  * Apply a reconciliation plan.
@@ -94,13 +83,11 @@ export async function applyInventoryPlan(plan, ctx, { session, source = "ticketm
 
   for (const { data } of creates) {
     const doc = buildGroupDocument(data.group, ctx, data.price);
-    if (isStubhubMode()) {
-      // New rows enter the outbox as pending: nothing about them has reached
-      // StubHub yet, so the worker has a create to do rather than an update.
-      doc.inventory.syncState = "pending";
-      doc.inventory.syncPendingSince = new Date();
-      doc.inventory.syncAttempts = 0;
-    }
+    // New rows enter the outbox as pending: nothing about them has reached the
+    // marketplace yet, so the portal has a create to do rather than an update.
+    doc.inventory.syncState = "pending";
+    doc.inventory.syncPendingSince = new Date();
+    doc.inventory.syncAttempts = 0;
     ops.push({ insertOne: { document: doc } });
   }
 
@@ -117,24 +104,6 @@ export async function applyInventoryPlan(plan, ctx, { session, source = "ticketm
   // batch. Duplicates are expected under concurrent processing of the same event
   // and have always been tolerated here.
   const result = await ConsecutiveGroup.bulkWrite(ops, { ordered: false, session });
-
-  // Legacy delist. Only while the CSV owns the marketplace: absence from the next
-  // export would eventually remove these, but "eventually" is the wrong latency
-  // for inventory we no longer hold, so the immediate delete is preserved exactly
-  // as it was. Under stubhub mode the tombstones above carry this instead, and no
-  // external call is made from the scraper at all.
-  if (!isStubhubMode() && deletes.length > 0) {
-    const ids = deletes.map((d) => d.inventoryId).filter(Boolean).map(String);
-    if (ids.length > 0) {
-      try {
-        await legacyInventoryApi.deleteInventoryBatch(ids);
-      } catch (error) {
-        // Never fatal: the row is already gone locally and the next CSV snapshot
-        // will reconcile the marketplace regardless.
-        console.error(`[API DELETE] SeatScouts batch delete failed: ${error.message}`);
-      }
-    }
-  }
 
   return {
     deleted: result.deletedCount ?? 0,

@@ -14,7 +14,6 @@ import config from './config/scraperConfig.js';
 import _ from 'lodash';
 import { planInventoryChanges, generateUniqueInventoryId } from './helpers/inventoryPlan.js';
 import { applyInventoryPlan, PLAN_PROJECTION } from './helpers/inventoryPersist.js';
-import { isStubhubMode } from './helpers/syncOutbox.js';
 import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
 import redisLiveStore from './helpers/RedisLiveStore.js';
 // CSV upload functionality removed
@@ -851,15 +850,15 @@ async updateEventMetadata(eventId, scrapeResult) {
       // HTTP/insertMany sequence, which cut up to eight serialised round trips per
       // event down to one and closes the transaction sooner.
       //
-      // The external marketplace calls are gone. The scraper records intent —
-      // dirty rows, tombstones — and the portal's sync worker is the only process
-      // that writes to StubHub. That is required rather than tidy: the POS API has
-      // no optimistic concurrency anywhere in its 160 operations, so two writers
-      // racing on a listing lose silently.
+      // The scraper no longer talks to any marketplace. It records what happened
+      // — dirty rows and tombstones, both written inside this transaction — and
+      // the portal decides what that means: update, delist, delete, or nothing at
+      // all because the row came back. That is required rather than tidy. The POS
+      // API has no optimistic concurrency anywhere in its 160 operations, so two
+      // writers racing on a listing lose silently; and only the portal knows the
+      // final price, since the second stage of markup lives in the exporter.
       let plan = null;
       if (validScrapeResult?.length > 0) {
-        const stubhubMode = isStubhubMode();
-
         const existingGroups = await ConsecutiveGroup.find(
           { eventId },
           PLAN_PROJECTION
@@ -875,7 +874,6 @@ async updateEventMetadata(eventId, scrapeResult) {
           venue_name,
           event_date,
           priceIncreasePercentage,
-          stubhubMode,
           now: new Date(),
         });
 

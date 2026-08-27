@@ -68,7 +68,7 @@ const scrapedGroup = (over = {}) => ({
 });
 
 const plan = (existing, scraped, over = {}) =>
-  planInventoryChanges(existing, scraped, { ...CTX, stubhubMode: true, ...over });
+  planInventoryChanges(existing, scraped, { ...CTX, ...over });
 
 describe("markup", () => {
   test("percentage above the flat-rate threshold", () => {
@@ -123,25 +123,33 @@ describe("planInventoryChanges", () => {
     assert.equal(p.patches[0].data.group.inventory.inventoryId, 2540402267);
   });
 
-  test("in csv mode a price change still rebuilds, exactly as before", () => {
-    const p = plan([existingRow()], [scrapedGroup({ listPrice: 150 })], { stubhubMode: false });
-    assert.equal(p.patches.length, 0);
+  test("a gap appearing mid-block is a seats change — same key, different tickets", () => {
+    // [1,2,3,4] -> [1,2,4]: first and last seats are unchanged, so the row key
+    // still matches, but the block is not the same tickets any more.
+    const existing = existingRow();
+    existing.seats = [{ number: "1" }, { number: "2" }, { number: "3" }, { number: "4" }];
+    existing.inventory.quantity = 4;
+
+    const scraped = scrapedGroup({ quantity: 3 });
+    scraped.seats = [1, 2, 4];
+
+    const p = plan([existing], [scraped]);
+    assert.equal(p.patches.length, 0, "different tickets must not be a patch");
     assert.equal(p.deletes.length, 1);
     assert.equal(p.creates.length, 1);
-    assert.equal(
-      p.creates[0].data.group.inventory.inventoryId,
-      2540402267,
-      "even the legacy path preserves the id"
-    );
+    assert.equal(p.deletes[0].reason, "seats-changed");
   });
 
-  test("changed seats rebuild in both modes — different tickets, different listing", () => {
-    for (const stubhubMode of [true, false]) {
-      const p = plan([existingRow()], [scrapedGroup({ quantity: 2 })].map(g => ({ ...g, seats: [1, 3] })), { stubhubMode });
-      assert.equal(p.deletes.length, 1, `stubhubMode=${stubhubMode}`);
-      assert.equal(p.creates.length, 1);
-      assert.equal(p.deletes[0].reason, "scraper-removed");
-    }
+  test("a block whose outer seats move is simply a removal plus an arrival", () => {
+    // [1,2] -> [1,3] changes the seat range, so the key changes and the two rows
+    // never meet. Worth pinning: it is the common shape and it is NOT the
+    // seats-changed branch.
+    const scraped = scrapedGroup();
+    scraped.seats = [1, 3];
+
+    const p = plan([existingRow()], [scraped]);
+    assert.equal(p.deletes[0].reason, "scraper-removed");
+    assert.equal(p.creates.length, 1);
   });
 
   test("split and quantity changes patch in place", () => {
