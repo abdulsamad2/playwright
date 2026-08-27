@@ -207,6 +207,44 @@ const consecutiveGroupSchema = new mongoose.Schema(
       mapping_id: {
         type: String,
       },
+
+      // ── StubHub POS sync state ────────────────────────────────────────────
+      // Mirrors the portal's models/seatModel.js. Both processes write this same
+      // collection, so the schemas have to agree — mongoose runs in strict mode
+      // here, and any field this schema does not declare is silently stripped on
+      // insert. Change one, change the other.
+      //
+      // The scraper only ever writes syncState and syncPendingSince. The rest
+      // belong to the portal's sync worker and are declared so they survive a
+      // scraper write, not so the scraper can set them.
+      //
+      // Indexes are deliberately NOT declared here: the portal owns index
+      // creation for this collection, and two processes racing to build the same
+      // partial indexes on startup is noise nobody needs.
+
+      /** Set by the portal after POST /inventory. The scraper must not touch it. */
+      stubhubListingId: { type: String },
+
+      syncState: {
+        type: String,
+        enum: [
+          "pending", "creating", "created", "dirty", "updating",
+          "synced", "deleting", "failed", "skipped",
+        ],
+      },
+
+      /** Queue marker: present while a push is outstanding, unset once synced. */
+      syncPendingSince: { type: Date },
+
+      /** Hash of the payload StubHub last accepted. Portal-owned. */
+      syncHash: { type: String },
+
+      syncBatchId: { type: String },
+      syncLeaseUntil: { type: Date },
+      syncAttempts: { type: Number, default: 0 },
+      syncError: { type: String },
+      syncedAt: { type: Date },
+
       tickets: [ticketSchema],
     },
   },

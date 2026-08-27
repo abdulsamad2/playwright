@@ -12,36 +12,12 @@ import SessionManager from './helpers/SessionManager.js';
 import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
 import _ from 'lodash';
-import InventoryApi from './utils/inventoryApi.js';
+import { planInventoryChanges, generateUniqueInventoryId } from './helpers/inventoryPlan.js';
+import { applyInventoryPlan, PLAN_PROJECTION } from './helpers/inventoryPersist.js';
+import { isStubhubMode } from './helpers/syncOutbox.js';
 import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
 import redisLiveStore from './helpers/RedisLiveStore.js';
 // CSV upload functionality removed
-let inventoryIdCounter = 0;
-
-function generateUniqueInventoryId() {
-  // Enhanced algorithm to prevent collisions even under high load
-  const timestamp = Date.now();
-  const processId = process.pid % 1000; // Use process ID for multi-instance uniqueness
-  const random = Math.floor(Math.random() * 1000); // Add randomness
-  
-  // Increment counter and reset if it exceeds 3 digits (0-999)
-  inventoryIdCounter = (inventoryIdCounter + 1) % 1000;
-  
-  // Create a unique string: timestamp(13) + processId(3) + counter(3) + random(3) = 22 digits
-  const fullUniqueString = `${timestamp}${processId.toString().padStart(3, '0')}${inventoryIdCounter.toString().padStart(3, '0')}${random.toString().padStart(3, '0')}`;
-  
-  // Hash to 10 digits for compatibility while maintaining uniqueness
-  // Use a simple but effective hash that preserves uniqueness
-  const hash = fullUniqueString.split('').reduce((acc, char, index) => {
-    return ((acc << 5) - acc + char.charCodeAt(0) + index) & 0x7fffffff;
-  }, 0);
-  
-  // Ensure it's always 10 digits by taking modulo and padding
-  const tenDigitId = (hash % 9000000000) + 1000000000; // Ensures 10 digits (1000000000-9999999999)
-  
-  return tenDigitId;
-}
-
 // CSV processing functionality removed entirely
 
 const MAX_UPDATE_INTERVAL = config.MAX_UPDATE_INTERVAL; // Use config value
@@ -174,7 +150,8 @@ export class ScraperManager {
     })(ScrapeEvent);
 
     // Initialize inventory API for external deletions
-    this.inventoryApi = new InventoryApi();
+    // No marketplace client here any more. The scraper records intent; the
+    // portal's sync worker is the single writer. See helpers/syncOutbox.js.
   }
 
   logWithTime(message, type = "info") {
@@ -823,12 +800,6 @@ async updateEventMetadata(eventId, scrapeResult) {
         throw new Error(`Event ${eventId} scrape failed - no valid data returned. Scrape result: ${scrapeResult ? 'empty array' : 'null/undefined'}`);
       }
 
-      // Initialize variables for database operations tracking
-      let rowsToDelete = [];
-      let rowsToInsert = [];
-      let rowsToUpdate = [];
-      let unchangedRows = 0;
-
       // Filter valid groups - only check for basic structure, allow single seats
       const validScrapeResult = scrapeResult.filter(
         (group) =>
@@ -866,537 +837,66 @@ async updateEventMetadata(eventId, scrapeResult) {
           ? global.config.LOG_LEVEL
           : process.env.LOG_LEVEL || 2;
 
+      // ── Reconcile scraped inventory against the database ──────────────────
+      //
+      // The diff and its execution used to live here inline, ~530 lines of
+      // interleaved decision and I/O with the row-building logic duplicated
+      // between the update and insert paths (and already drifted: one copy minted
+      // a fresh inventoryId on every change, the other preserved it).
+      //
+      // They are now two modules. planInventoryChanges is pure — no Mongo, no
+      // clock, no network — so the hardest logic in the scraper can be tested
+      // against fixtures. applyInventoryPlan performs the whole plan as a single
+      // bulkWrite instead of the previous find/deleteMany/HTTP/find/deleteMany/
+      // HTTP/insertMany sequence, which cut up to eight serialised round trips per
+      // event down to one and closes the transaction sooner.
+      //
+      // The external marketplace calls are gone. The scraper records intent —
+      // dirty rows, tombstones — and the portal's sync worker is the only process
+      // that writes to StubHub. That is required rather than tidy: the POS API has
+      // no optimistic concurrency anywhere in its 160 operations, so two writers
+      // racing on a listing lose silently.
+      let plan = null;
       if (validScrapeResult?.length > 0) {
-          // Fetch existing groups for efficient row-level comparison - always fresh data
-          const existingGroups = await ConsecutiveGroup.find(
-            { eventId },
-            {
-              _id: 1,
-              section: 1,
-              row: 1,
-              seats: 1,
-              seatCount: 1,
-              "inventory.listPrice": 1,
-              "inventory.quantity": 1,
-              "inventory.inventoryId": 1,
-              "inventory.customSplit": 1,
-              "inventory.splitType": 1,
-            }
-          ).session(session).read('primary'); // Force read from primary for fresh data
+        const stubhubMode = isStubhubMode();
 
-        // Create maps for efficient lookups
-        const existingRowMap = new Map();
-        existingGroups.forEach((group) => {
-          // Extract seat numbers and ensure they're all strings for consistent comparison
-          const extractedSeats = group.seats
-            .map((s) => {
-              // Handle different possible seat formats
-              let seatNumber;
-              if (typeof s === "object" && s !== null) {
-                seatNumber = s.number;
-              } else {
-                seatNumber = s;
-              }
-              // Ensure seat number is a string
-              return String(seatNumber);
-            })
-            .sort(); // Sort lexicographically as strings
+        const existingGroups = await ConsecutiveGroup.find(
+          { eventId },
+          PLAN_PROJECTION
+        )
+          .session(session)
+          .read("primary") // fresh data — a stale read would plan against the past
+          .lean();
 
-          // Create unique rowKey that includes seat range to avoid conflicts
-          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'no-seats';
-          const rowKey = `${group.section}-${group.row}-${seatRange}`;
-
-          existingRowMap.set(rowKey, {
-            _id: group._id,
-            seatCount: group.seatCount,
-            seats: extractedSeats,
-            price: group.inventory?.listPrice,
-            quantity: group.inventory?.quantity,
-            inventoryId: group.inventory?.inventoryId,
-            customSplit: group.inventory?.customSplit,
-            splitType: group.inventory?.splitType,
-          });
+        plan = planInventoryChanges(existingGroups, validScrapeResult, {
+          eventId,
+          mapping_id,
+          event_name,
+          venue_name,
+          event_date,
+          priceIncreasePercentage,
+          stubhubMode,
+          now: new Date(),
         });
 
-        const newRowMap = new Map();
-        validScrapeResult.forEach((group) => {
-          // Extract seat numbers and ensure they're all strings for consistent comparison
-          const extractedSeats = group.seats
-            .map((s) => {
-              // Handle different possible seat formats
-              let seatNumber;
-              if (typeof s === "object" && s !== null && "number" in s) {
-                seatNumber = s.number;
-              } else {
-                seatNumber = s;
-              }
-              // Ensure seat number is a string
-              return String(seatNumber);
-            })
-            .sort(); // Sort lexicographically as strings
-
-          // Create unique rowKey that includes seat range to avoid conflicts
-          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'no-seats';
-          const rowKey = `${group.section}-${group.row}-${seatRange}`;
-          
-          const basePrice = parseFloat(group.inventory.listPrice);
-          const increasedPrice = basePrice < 35 
-            ? basePrice + 15 
-            : basePrice * (1 + priceIncreasePercentage / 100);
-
-          newRowMap.set(rowKey, {
-            seatCount: group.inventory.quantity,
-            seats: extractedSeats, // Use the normalized and sorted array
-            price: increasedPrice,
-            quantity: group.inventory.quantity,
-            customSplit: group.inventory.customSplit,
-            splitType: group.inventory.splitType,
-            groupData: group,
-          });
-        });
-
-     
-
-        // Identify rows to delete or update
-        for (const [rowKey, existingData] of existingRowMap) {
-          const newData = newRowMap.get(rowKey);
-
-          if (!newData) {
-            // Row no longer exists in new data - mark for deletion
-            rowsToDelete.push(existingData._id);
-          } else {
-            // Helper to compare two arrays of strings (already normalized and sorted)
-            const areArraysEqual = (arr1, arr2) => {
-              if (arr1.length !== arr2.length) {
-                return false;
-              }
-
-              // Since we've already normalized to strings and sorted, we can do a direct comparison
-              for (let i = 0; i < arr1.length; i++) {
-                if (arr1[i] !== arr2[i]) {
-                  return false;
-                }
-              }
-
-              return true;
-            };
-
-            // Check if row data has changed (excluding inventory ID)
-            const seatsChanged = !areArraysEqual(
-              existingData.seats,
-              newData.seats
-            );
-
-            const existingPrice = parseFloat(existingData.price);
-            const newPrice = parseFloat(newData.price);
-            const priceChanged = Math.abs(existingPrice - newPrice) > 0.01;
-            const quantityChanged =
-              Number(existingData.quantity) !== Number(newData.quantity);
-            const customSplitChanged =
-              (existingData.customSplit || "") !== (newData.customSplit || "");
-            const splitTypeChanged =
-              (existingData.splitType || "") !== (newData.splitType || "");
-
-            // Always preserve the existing inventory ID for updates
-            // Only generate new inventory IDs for truly new inventory or deleted/re-added rows
-            newData.groupData.inventory.inventoryId = existingData.inventoryId;
-
-            // Now, decide if the DB record needs an update for any of these fields
-             // Force delete-and-insert for all changes to ensure fresh inventory IDs
-             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
-               rowsToDelete.push(existingData._id);
-               rowsToInsert.push({ rowKey, data: newData });
-             } else {
-              // This 'else' implies:
-              // 1. !seatsChanged && !priceChanged (so inventoryId was preserved)
-              // 2. AND !quantityChanged (so no other tracked change)
-              // Therefore, truly no changes to the row data itself.
-              unchangedRows++;
-            }
-          }
-        }
-
-        // Identify new rows to insert
-        for (const [rowKey, newData] of newRowMap) {
-          if (!existingRowMap.has(rowKey)) {
-            rowsToInsert.push({ rowKey, data: newData });
-          }
-        }
-
-        // Log database operation summary at level 3
-        if (LOG_LEVEL >= 3) {
-          this.logWithTime(
-            `[Debug SM ${eventId}] Database operation summary: ${rowsToDelete.length} to delete, ${rowsToUpdate.length} to update, ${rowsToInsert.length} to insert, ${unchangedRows} unchanged`,
-            "debug"
+        if (plan.stats.creates || plan.stats.patches || plan.stats.deletes) {
+          const applied = await applyInventoryPlan(
+            plan,
+            { eventId, mapping_id, event_name, venue_name, event_date },
+            { session, source: "ticketmaster" }
           );
-        }
-        // Console log only when there are actual DB changes
-        if (rowsToDelete.length > 0 || rowsToUpdate.length > 0 || rowsToInsert.length > 0) {
-          console.log(`[DB OPS ${eventId}] ${rowsToDelete.length}D ${rowsToUpdate.length}U ${rowsToInsert.length}I (${unchangedRows} unchanged)`);
-        }
 
-        // Perform efficient updates only if there are changes
-        if (
-          rowsToDelete.length > 0 ||
-          rowsToInsert.length > 0 ||
-          rowsToUpdate.length > 0
-        ) {
-          // const result = JSON.stringify(rowsToInsert);
+          console.log(
+            `[DB OPS ${eventId}] ${applied.deleted}D ${applied.patched}P ${applied.created}I` +
+              `${applied.tombstoned ? ` ${applied.tombstoned}T` : ""}` +
+              ` (${plan.stats.unchanged} unchanged)`
+          );
 
-          // fs.writeFileSync("debug/rowsToInsert.json", result);
-            // Delete removed rows
-            if (rowsToDelete.length > 0) {
-              // First, get inventory IDs for external API deletion
-              const groupsToDelete = await ConsecutiveGroup.find({
-                _id: { $in: rowsToDelete }
-              }, { 'inventory.inventoryId': 1 }).session(session);
-              
-              const inventoryIdsToDelete = groupsToDelete
-                .map(group => group.inventory?.inventoryId)
-                .filter(id => id) // Filter out null/undefined IDs
-                .map(id => String(id)); // Convert to strings for API
-
-              // Delete from database first
-              await ConsecutiveGroup.deleteMany({
-                _id: { $in: rowsToDelete },
-              }).session(session);
-
-              // Then delete from external API if we have inventory IDs
-              if (inventoryIdsToDelete.length > 0) {
-                try {
-                  const apiDeleteResult = await this.inventoryApi.deleteInventoryBatch(
-                    inventoryIdsToDelete
-                  );
-
-                  if (LOG_LEVEL >= 3) {
-                    this.logWithTime(
-                      `[Debug SM ${eventId}] External API deletion: ${apiDeleteResult.successful.length} successful, ${apiDeleteResult.failed.length} failed`,
-                      "debug"
-                    );
-                  }
-                  console.log(`[API DELETE ${eventId}] External API: ${apiDeleteResult.successful.length} successful, ${apiDeleteResult.failed.length} failed`);
-                } catch (apiError) {
-                  console.error(`[API DELETE ERROR ${eventId}] Failed to delete inventories via API:`, apiError.message);
-                  if (LOG_LEVEL >= 1) {
-                    this.logWithTime(
-                      `[Warning SM ${eventId}] External API deletion failed: ${apiError.message}`,
-                      "warning"
-                    );
-                  }
-                }
-              }
-
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `[Info SM ${eventId}] Deleted ${rowsToDelete.length} removed rows.`,
-                "info"
-              );
-            }
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(
-                `[Debug SM ${eventId}] DELETE operation completed: ${rowsToDelete.length} rows removed from database`,
-                "debug"
-              );
-            }
-          }
-
-          // Handle updates by deleting existing inventory and adding new ones
-          if (rowsToUpdate.length > 0) {
-            // First, get inventory IDs for external API deletion
-            const groupsToUpdate = await ConsecutiveGroup.find({
-              _id: { $in: rowsToUpdate.map(row => row._id) }
-            }, { 'inventory.inventoryId': 1 }).session(session);
-            
-            const inventoryIdsToUpdate = groupsToUpdate
-              .map(group => group.inventory?.inventoryId)
-              .filter(id => id) // Filter out null/undefined IDs
-              .map(id => String(id)); // Convert to strings for API
-
-            // Delete existing inventory from database first
-            await ConsecutiveGroup.deleteMany({
-              _id: { $in: rowsToUpdate.map(row => row._id) },
-            }).session(session);
-
-            // Then delete from external API if we have inventory IDs
-            if (inventoryIdsToUpdate.length > 0) {
-              try {
-                const apiDeleteResult = await this.inventoryApi.deleteInventoryBatch(inventoryIdsToUpdate);
-                if (LOG_LEVEL >= 3) {
-                  this.logWithTime(
-                    `[Debug SM ${eventId}] External API deletion for updates: ${apiDeleteResult.successful.length} successful, ${apiDeleteResult.failed.length} failed`,
-                    "debug"
-                  );
-                }
-                console.log(`[API DELETE UPDATE ${eventId}] External API: ${apiDeleteResult.successful.length} successful, ${apiDeleteResult.failed.length} failed`);
-              } catch (apiError) {
-                console.error(`[API DELETE UPDATE ERROR ${eventId}] Failed to delete inventories via API:`, apiError.message);
-                if (LOG_LEVEL >= 1) {
-                  this.logWithTime(
-                    `[Warning SM ${eventId}] External API deletion for updates failed: ${apiError.message}`,
-                    "warning"
-                  );
-                }
-              }
-            }
-
-            // Now prepare new inventory items to insert
-            const newInventoryItems = rowsToUpdate.map(({ data }) => {
-              const group = data.groupData;
-              const eventDateObj =
-                typeof event_date === "string"
-                  ? new Date(event_date)
-                  : event_date;
-              const inHandDateObj = moment(eventDateObj).subtract(1, "day");
-              const formattedInHandDate = inHandDateObj.toISOString();
-              const increasedPrice = data.price;
-
-              return {
-                eventId,
-                mapping_id,
-                event_name,
-                venue_name,
-                event_date: eventDateObj.toISOString(),
-                inHandDate: formattedInHandDate,
-                section: group.section,
-                row: group.row,
-                seatCount: group.inventory.quantity,
-                seatRange: `${Math.min(...group.seats)}-${Math.max(
-                  ...group.seats
-                )}`,
-                seats: group.seats.map((seatNumber) => ({
-                  number: seatNumber.toString(),
-                  inHandDate: formattedInHandDate,
-                  price: increasedPrice,
-                  mapping_id,
-                })),
-                inventory: {
-                  inventoryId: generateUniqueInventoryId(), // Always generate new inventory ID for updates
-                  quantity: group.inventory.quantity,
-                  section: group.section,
-                  hideSeatNumbers: group.inventory.hideSeatNumbers || true,
-                  row: group.row,
-                  cost: group.inventory.cost,
-                  stockType: group.inventory.stockType || "MOBILE_TRANSFER",
-                  lineType: group.inventory.lineType,
-                  seatType: group.inventory.seatType,
-                  inHandDate: formattedInHandDate,
-                  notes: group.inventory.notes,
-                  tags: group.inventory.tags,
-                  offerId: group.inventory.offerId,
-                  splitType: group.inventory.splitType || "CUSTOM",
-                  publicNotes: group.inventory.publicNotes,
-                  listPrice: increasedPrice,
-                  face_price: group.inventory.faceValue,
-                  taxed_cost: group.inventory.taxedCost,
-                  cost: group.inventory.cost,
-                  hide_seats: group.inventory.hideSeatNumbers || true,
-                  in_hand:
-                    typeof group.inventory.inHand === "boolean"
-                      ? group.inventory.inHand
-                      : true,
-                  in_hand_date: formattedInHandDate,
-                  instant_transfer:
-                    typeof group.inventory.instantTransfer === "boolean"
-                      ? group.inventory.instantTransfer
-                      : false,
-                  files_available:
-                    typeof group.inventory.filesAvailable === "boolean"
-                      ? group.inventory.filesAvailable
-                      : false,
-                  customSplit: group.inventory.customSplit,
-                  stock_type: group.inventory.stockType || "MOBILE_TRANSFER",
-                  zone: group.inventory.zone,
-                  shown_quantity: group.inventory.shownQuantity,
-                  passthrough: group.inventory.passthrough,
-                  mapping_id,
-                  event_name: event_name,
-                  venue_name: venue_name,
-                  event_date: eventDateObj.toISOString(),
-                  eventId: eventId,
-                  tickets: group.inventory.tickets.map((ticket) => ({
-                    id: ticket.id,
-                    seatNumber: ticket.seatNumber,
-                    notes: ticket.notes,
-                    cost: ticket.cost,
-                    faceValue: ticket.faceValue,
-                    taxedCost: ticket.taxedCost,
-                    sellPrice:
-                      typeof ticket?.sellPrice === "number" &&
-                      !isNaN(ticket?.sellPrice)
-                        ? ticket.sellPrice
-                        : parseFloat(
-                            ticket?.cost || ticket?.faceValue || 0
-                          ),
-                    stockType: ticket.stockType,
-                    eventId: ticket.eventId,
-                    accountId: ticket.accountId,
-                    status: ticket.status,
-                    auditNote: ticket.auditNote,
-                    mapping_id: mapping_id,
-                  })),
-                },
-              };
-            });
-
-            // Insert new inventory items in batches
-            const BATCH_SIZE = 100;
-            for (let i = 0; i < newInventoryItems.length; i += BATCH_SIZE) {
-              const batch = newInventoryItems.slice(i, i + BATCH_SIZE);
-              try {
-                await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
-              } catch (error) {
-                console.error(
-                  `[ERROR] Event ${eventId} - Failed to insert updated ConsecutiveGroup batch:`,
-                  error.message
-                );
-              }
-            }
-
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `[Info SM ${eventId}] Updated ${rowsToUpdate.length} rows by delete-and-insert with new inventory IDs.`,
-                "info"
-              );
-            }
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(
-                `[Debug SM ${eventId}] UPDATE operation completed: ${rowsToUpdate.length} rows deleted and re-inserted with new inventory IDs`,
-                "debug"
-              );
-            }
-            // DB UPDATE log already covered by summary above
-          }
-
-          // Insert new/updated rows with new inventory IDs
-          if (rowsToInsert.length > 0) {
-            const groupsToInsert = rowsToInsert.map(({ data }) => {
-              const group = data.groupData;
-              // Convert event_date to Date object if it's a string and subtract one day
-              const eventDateObj =
-                typeof event_date === "string"
-                  ? new Date(event_date)
-                  : event_date;
-              const inHandDateObj = moment(eventDateObj).subtract(1, "day");
-              const formattedInHandDate = inHandDateObj.toISOString();
-
-              const increasedPrice = data.price;
-              return {
-                eventId,
-                mapping_id,
-                event_name,
-                venue_name,
-                event_date: eventDateObj.toISOString(),
-                inHandDate: formattedInHandDate,
-                section: group.section,
-                row: group.row,
-                seatCount: group.inventory.quantity,
-                seatRange: `${Math.min(...group.seats)}-${Math.max(
-                  ...group.seats
-                )}`,
-                seats: group.seats.map((seatNumber) => ({
-                  number: seatNumber.toString(),
-                  inHandDate: formattedInHandDate,
-                  price: increasedPrice,
-                  mapping_id,
-                })),
-                inventory: {
-                  inventoryId:
-                    group.inventory.inventoryId || generateUniqueInventoryId(), // Use preserved ID if available, otherwise generate new one
-                  quantity: group.inventory.quantity,
-                  section: group.section,
-                  hideSeatNumbers: group.inventory.hideSeatNumbers || true,
-                  row: group.row,
-                  cost: group.inventory.cost,
-                  stockType: group.inventory.stockType || "MOBILE_TRANSFER",
-                  lineType: group.inventory.lineType,
-                  seatType: group.inventory.seatType,
-                  inHandDate: formattedInHandDate,
-                  notes: group.inventory.notes,
-                  tags: group.inventory.tags,
-                  offerId: group.inventory.offerId,
-                  splitType: group.inventory.splitType || "CUSTOM",
-                  publicNotes: group.inventory.publicNotes,
-                  listPrice: increasedPrice,
-                  face_price: group.inventory.faceValue,
-                  taxed_cost: group.inventory.taxedCost,
-                  cost: group.inventory.cost,
-                  hide_seats: group.inventory.hideSeatNumbers || true,
-                  in_hand:
-                    typeof group.inventory.inHand === "boolean"
-                      ? group.inventory.inHand
-                      : true,
-                  in_hand_date: formattedInHandDate,
-                  instant_transfer:
-                    typeof group.inventory.instantTransfer === "boolean"
-                      ? group.inventory.instantTransfer
-                      : false,
-                  files_available:
-                    typeof group.inventory.filesAvailable === "boolean"
-                      ? group.inventory.filesAvailable
-                      : false,
-                  customSplit: group.inventory.customSplit,
-                  stock_type: group.inventory.stockType || "MOBILE_TRANSFER",
-                  zone: group.inventory.zone,
-                  shown_quantity: group.inventory.shownQuantity,
-                  passthrough: group.inventory.passthrough,
-                  mapping_id,
-                  event_name: event_name,
-                  venue_name: venue_name,
-                  event_date: eventDateObj.toISOString(),
-                  eventId: eventId,
-                  tickets: group.inventory.tickets.map((ticket) => ({
-                    id: ticket.id,
-                    seatNumber: ticket.seatNumber,
-                    notes: ticket.notes,
-                    cost: ticket.cost,
-                    faceValue: ticket.faceValue,
-                    taxedCost: ticket.taxedCost,
-                    sellPrice:
-                      typeof ticket?.sellPrice === "number" &&
-                      !isNaN(ticket?.sellPrice)
-                        ? ticket.sellPrice
-                        : parseFloat(ticket?.cost || ticket?.faceValue || 0),
-                    stockType: ticket.stockType,
-                    eventId: ticket.eventId,
-                    accountId: ticket.accountId,
-                    status: ticket.status,
-                    auditNote: ticket.auditNote,
-                    mapping_id: mapping_id,
-                  })),
-                },
-              };
-            });
-            
-            // Insert in batches for performance
-            const BATCH_SIZE = 500;
-            for (let i = 0; i < groupsToInsert.length; i += BATCH_SIZE) {
-              const batch = groupsToInsert.slice(i, i + BATCH_SIZE);
-              try {
-                await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
-              } catch (error) {
-                console.error(
-                  `[ERROR] Event ${eventId} - Failed to insert ConsecutiveGroup batch:`,
-                  error.message
-                );
-                // Log specific duplicate key errors for debugging
-                // Duplicate key errors are expected during concurrent processing — skip verbose logging
-                // Continue with next batch even if this one fails
-              }
-            }
- 
-            if (LOG_LEVEL >= 2) {
-              this.logWithTime(
-                `[Info SM ${eventId}] Inserted ${groupsToInsert.length} new/updated rows with new inventory IDs.`,
-                "info"
-              );
-            }
-            if (LOG_LEVEL >= 3) {
-              this.logWithTime(
-                `[Debug SM ${eventId}] INSERT operation completed: ${groupsToInsert.length} new rows added to database`,
-                "debug"
-              );
-            }
-            console.log(`[DB INSERT ${eventId}] Added ${groupsToInsert.length} new rows to database`);
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(
+              `[Debug SM ${eventId}] plan: ${JSON.stringify(plan.stats)}`,
+              "debug"
+            );
           }
         }
       }
@@ -1415,7 +915,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
         if (LOG_LEVEL >= 3) {
           // Provide a final summary of all database operations performed
-          const totalOperations = (rowsToDelete?.length || 0) + (rowsToUpdate?.length || 0) + (rowsToInsert?.length || 0);
+          const totalOperations = plan ? plan.stats.creates + plan.stats.patches + plan.stats.deletes : 0;
           const operationSummary = totalOperations > 0 
             ? `${totalOperations} total database operations performed` 
             : 'no database changes needed';
@@ -1428,7 +928,7 @@ async updateEventMetadata(eventId, scrapeResult) {
           );
         }
         // Event completion - only log slow events (>5s) or events with DB ops
-        const totalOps = (rowsToDelete?.length || 0) + (rowsToUpdate?.length || 0) + (rowsToInsert?.length || 0);
+        const totalOps = plan ? plan.stats.creates + plan.stats.patches + plan.stats.deletes : 0;
         const elapsed = (performance.now() - startTime).toFixed(0);
         if (totalOps > 0 || elapsed > 5000) {
           console.log(`[DONE ${eventId}] ${elapsed}ms - ${totalOps > 0 ? `${totalOps} ops` : 'slow'}`);
