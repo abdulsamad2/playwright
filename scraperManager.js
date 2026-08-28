@@ -966,11 +966,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
         // Capture both states for drop detection. Persisted AFTER the
         // transaction commits so a rolled-back scrape never raises an alert.
-        dropContext = {
-          existingRowMap,
-          newRowMap,
-          eventMeta: { mapping_id, event_name, venue_name, event_date },
-        };
+        dropContext = { existingRowMap, newRowMap };
 
         // Identify rows to delete or update
         for (const [rowKey, existingData] of existingRowMap) {
@@ -1462,7 +1458,6 @@ async updateEventMetadata(eventId, scrapeResult) {
         eventId,
         existingRowMap: dropContext.existingRowMap,
         newRowMap: dropContext.newRowMap,
-        eventMeta: dropContext.eventMeta,
       });
     }
 

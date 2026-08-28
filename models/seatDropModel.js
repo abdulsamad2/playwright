@@ -14,14 +14,10 @@ const TTL_DAYS = parseInt(process.env.SEAT_DROP_TTL_DAYS, 10) || 7;
  */
 const seatDropSchema = new mongoose.Schema(
   {
+    // The only link to the event. Name, venue, date and URL are deliberately
+    // NOT copied here: they live on the Event row, they change, and a stale
+    // copy silently disagrees with what the portal displays. Readers join.
     eventId: { type: String, required: true, index: true },
-    mapping_id: { type: String },
-
-    // Denormalized so an alert can be rendered without joining Event
-    event_name: { type: String },
-    venue_name: { type: String },
-    event_date: { type: Date },
-    event_url: { type: String },
 
     section: { type: String, required: true },
     row: { type: String, required: true },

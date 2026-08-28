@@ -357,7 +357,6 @@ export async function recordSeatDrops({
   eventId,
   existingRowMap,
   newRowMap,
-  eventMeta = {},
 }) {
   if (!ENABLED) return 0;
 
@@ -418,11 +417,6 @@ export async function recordSeatDrops({
 
     const docs = withKeys.map(({ drop, dropBase, dropKey }) => ({
       eventId,
-      mapping_id: eventMeta.mapping_id,
-      event_name: eventMeta.event_name,
-      venue_name: eventMeta.venue_name,
-      event_date: eventMeta.event_date,
-      event_url: eventMeta.event_url,
       section: drop.section,
       row: drop.row,
       newSeats: drop.newSeats,
