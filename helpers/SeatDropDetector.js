@@ -357,6 +357,7 @@ export async function recordSeatDrops({
   eventId,
   existingRowMap,
   newRowMap,
+  eventName,
 }) {
   if (!ENABLED) return 0;
 
@@ -417,6 +418,8 @@ export async function recordSeatDrops({
 
     const docs = withKeys.map(({ drop, dropBase, dropKey }) => ({
       eventId,
+      // Snapshot, read only if the event row is gone — see the model comment
+      event_name: eventName,
       section: drop.section,
       row: drop.row,
       newSeats: drop.newSeats,

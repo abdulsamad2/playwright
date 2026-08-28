@@ -14,10 +14,17 @@ const TTL_DAYS = parseInt(process.env.SEAT_DROP_TTL_DAYS, 10) || 7;
  */
 const seatDropSchema = new mongoose.Schema(
   {
-    // The only link to the event. Name, venue, date and URL are deliberately
-    // NOT copied here: they live on the Event row, they change, and a stale
-    // copy silently disagrees with what the portal displays. Readers join.
+    // The only link to the event. Venue, date, URL and mapping_id are
+    // deliberately NOT copied here: they live on the Event row, they change,
+    // and a stale copy silently disagrees with what the portal displays.
     eventId: { type: String, required: true, index: true },
+
+    // The one exception, and only as an epitaph. If the event row is later
+    // deleted this is all that is left to label the drop in history, and a
+    // stale name beats a bare id. Readers must use it ONLY as a fallback when
+    // the join finds nothing — never for search or sorting, which is how the
+    // other copies drifted out of step with the page in the first place.
+    event_name: { type: String },
 
     section: { type: String, required: true },
     row: { type: String, required: true },
