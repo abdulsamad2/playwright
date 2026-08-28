@@ -15,6 +15,7 @@ import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
 import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
 import redisLiveStore from './helpers/RedisLiveStore.js';
+import { recordSeatDrops } from './helpers/SeatDropDetector.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -786,8 +787,12 @@ async updateEventMetadata(eventId, scrapeResult) {
   // save json here as well for scrapeResults 
   // const scrapeResultJson = JSON.stringify(scrapeResult);
   // fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
+  // Populated inside the transaction, consumed after it commits.
+  // withTransaction may retry the callback, so this is assigned, never appended.
+  let dropContext = null;
+
   try {
-    return await session.withTransaction(async () => {
+    const txResult = await session.withTransaction(async () => {
       // Get event data upfront - always fresh, no caching
       const event = await Event.findOne({ Event_ID: eventId })
         .select(
@@ -908,6 +913,8 @@ async updateEventMetadata(eventId, scrapeResult) {
 
           existingRowMap.set(rowKey, {
             _id: group._id,
+            section: group.section,
+            row: group.row,
             seatCount: group.seatCount,
             seats: extractedSeats,
             price: group.inventory?.listPrice,
@@ -945,6 +952,8 @@ async updateEventMetadata(eventId, scrapeResult) {
             : basePrice * (1 + priceIncreasePercentage / 100);
 
           newRowMap.set(rowKey, {
+            section: group.section,
+            row: group.row,
             seatCount: group.inventory.quantity,
             seats: extractedSeats, // Use the normalized and sorted array
             price: increasedPrice,
@@ -955,7 +964,13 @@ async updateEventMetadata(eventId, scrapeResult) {
           });
         });
 
-     
+        // Capture both states for drop detection. Persisted AFTER the
+        // transaction commits so a rolled-back scrape never raises an alert.
+        dropContext = {
+          existingRowMap,
+          newRowMap,
+          eventMeta: { mapping_id, event_name, venue_name, event_date },
+        };
 
         // Identify rows to delete or update
         for (const [rowKey, existingData] of existingRowMap) {
@@ -1440,6 +1455,18 @@ async updateEventMetadata(eventId, scrapeResult) {
           redisLiveStore.refreshSeats(eventId).catch(() => {});
         }
         });
+
+    // Transaction committed — now it is safe to record new seats as a drop
+    if (dropContext) {
+      await recordSeatDrops({
+        eventId,
+        existingRowMap: dropContext.existingRowMap,
+        newRowMap: dropContext.newRowMap,
+        eventMeta: dropContext.eventMeta,
+      });
+    }
+
+    return txResult;
     } catch (error) {
       await this.logError(eventId, "DATABASE_ERROR", error);
       throw error;
