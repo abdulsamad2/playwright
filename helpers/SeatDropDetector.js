@@ -15,7 +15,7 @@
  */
 
 import { getRedisClient, isRedisReady } from "../config/redis.js";
-import { SeatDrop } from "../models/seatDropModel.js";
+import { SeatDrop, Event } from "../models/index.js";
 import { INSTANCE_ID } from "./RedisLiveStore.js";
 
 const ENABLED = process.env.SEAT_DROP_TRACKING !== "0";
@@ -28,6 +28,18 @@ const GRACE_MS =
 // data often enough that one absence means nothing.
 const GONE_CONFIRM_CYCLES =
   parseInt(process.env.DROP_GONE_CONFIRM_CYCLES, 10) || 2;
+
+/**
+ * Cycles a drop must survive before it counts as ordinary inventory.
+ *
+ * At that point the portal stops withholding its listing from the CSV, so the
+ * drop record has done its job and is deleted — keeping a matured drop around
+ * would only be a row nothing reads.
+ *
+ * MUST match DROP_MATURE_CYCLES in the portal: the scraper decides when a drop
+ * matures, the portal decides what to withhold until then.
+ */
+const MATURE_CYCLES = parseInt(process.env.DROP_MATURE_CYCLES, 10) || 10;
 
 const graceKey = (eventId) => `dropgrace:${eventId}`;
 
@@ -238,7 +250,7 @@ async function forgetRemoved(eventId, fields) {
 async function ageActiveDrops(eventId, afterIndex) {
   const active = await SeatDrop.find(
     { eventId, status: "active" },
-    { section: 1, row: 1, newSeats: 1, detectedAt: 1, missCount: 1, firstMissAt: 1 }
+    { section: 1, row: 1, newSeats: 1, detectedAt: 1, missCount: 1, firstMissAt: 1, cyclesSeen: 1 }
   ).lean();
 
   const activeCoverage = new Map();
@@ -255,6 +267,7 @@ async function ageActiveDrops(eventId, afterIndex) {
   const ops = [];
   const graceToClear = [];
   let gone = 0;
+  let matured = 0;
 
   for (const drop of active) {
     const entry = afterIndex.get(srKey(drop.section, drop.row));
@@ -262,6 +275,18 @@ async function ageActiveDrops(eventId, afterIndex) {
     const stillPresent = (drop.newSeats || []).filter((s) => onSale.has(s));
 
     if (stillPresent.length > 0) {
+      const cycles = (drop.cyclesSeen || 1) + 1;
+
+      if (cycles >= MATURE_CYCLES) {
+        // Proven: the portal now exports this listing like any other stock, so
+        // the drop record has nothing left to say. Delete it rather than leave
+        // a row nothing reads. Note it is NOT added to activeCoverage — the
+        // seats stop being "a drop" from here on.
+        ops.push({ deleteOne: { filter: { _id: drop._id } } });
+        matured++;
+        continue;
+      }
+
       // Still (at least partly) on sale — a reappearance clears any miss streak
       cover(drop.section, drop.row, drop.newSeats || []);
       ops.push({
@@ -343,7 +368,14 @@ async function ageActiveDrops(eventId, afterIndex) {
     console.log(`[DROP ${eventId}] ${gone} drop(s) confirmed GONE`);
   }
 
-  return { aged: ops.length, gone, activeCoverage };
+  if (matured > 0) {
+    console.log(
+      `[DROP ${eventId}] ${matured} drop(s) matured at ${MATURE_CYCLES} cycles — ` +
+        `now ordinary inventory, records deleted`
+    );
+  }
+
+  return { aged: ops.length, gone, matured, activeCoverage };
 }
 
 /**
@@ -471,4 +503,52 @@ export async function recordSeatDrops({
   }
 }
 
-export default { diffSeatDrops, recordSeatDrops };
+/**
+ * Delete drops for events that have already started.
+ *
+ * Once a show begins nobody can act on its drops, and the scraper has stopped
+ * touching the event so they would never mature — they would just sit there
+ * until the TTL, and (worse) keep that event's listings quarantined out of the
+ * CSV. This runs here rather than only in the portal's auto-delete because that
+ * path is behind a toggle the operator can switch off.
+ *
+ * One instance does the work: with 150+ running, a Redis lock keeps it to a
+ * single sweep per interval.
+ */
+export async function purgeDropsForPassedEvents() {
+  try {
+    if (isRedisReady()) {
+      const redis = getRedisClient();
+      const held = await redis
+        .set("lock:drops:purge", INSTANCE_ID, "EX", 300, "NX")
+        .catch(() => null);
+      if (!held) return 0;
+    }
+
+    const passed = await Event.distinct("Event_ID", {
+      Event_DateTime: { $lt: new Date() },
+    });
+    if (passed.length === 0) return 0;
+
+    const res = await SeatDrop.deleteMany({ eventId: { $in: passed } });
+    if (res.deletedCount > 0) {
+      console.log(
+        `[DROP] Purged ${res.deletedCount} drop(s) for ${passed.length} passed event(s)`
+      );
+    }
+    return res.deletedCount || 0;
+  } catch (error) {
+    console.error(`[SeatDrop] Passed-event purge failed: ${error.message}`);
+    return 0;
+  }
+}
+
+// Sweep every 30 minutes. Cheap and idempotent; the Redis lock above keeps it
+// to one instance per interval. unref() so this timer never by itself keeps a
+// process alive — importing this module must not stop node from exiting.
+const purgeTimer = setInterval(() => {
+  purgeDropsForPassedEvents().catch(() => {});
+}, 30 * 60 * 1000);
+purgeTimer.unref?.();
+
+export default { diffSeatDrops, recordSeatDrops, purgeDropsForPassedEvents };
