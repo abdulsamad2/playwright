@@ -2,6 +2,11 @@ import mongoose from "mongoose";
 
 const TTL_DAYS = parseInt(process.env.SEAT_DROP_TTL_DAYS, 10) || 7;
 
+// How long a drop stays visible after its seats disappear again. Long enough to
+// notice "it appeared, then went", short enough that the page stays a picture
+// of now rather than a log.
+const GONE_RETENTION_MIN = parseInt(process.env.DROP_GONE_RETENTION_MIN, 10) || 15;
+
 /**
  * SeatDrop — a record of NEW seats appearing on an event.
  *
@@ -100,6 +105,17 @@ seatDropSchema.index({ eventId: 1, status: 1 });
 seatDropSchema.index({ seen: 1, detectedAt: -1 });
 
 // Auto-expire old drops so the collection stays bounded
+// A gone drop expires GONE_RETENTION_MIN after the seats actually vanished
+// (goneAt is the first miss, not the confirmation). Mongo's TTL monitor skips
+// documents whose field is null, so active drops — goneAt: null — are untouched
+// by this index and fall to the detectedAt backstop below instead.
+seatDropSchema.index(
+  { goneAt: 1 },
+  { expireAfterSeconds: GONE_RETENTION_MIN * 60, name: "gone_drop_ttl" }
+);
+
+// Backstop for drops that neither mature nor go gone — an event that stopped
+// being scraped mid-count would otherwise leave its drops here forever.
 seatDropSchema.index({ detectedAt: 1 }, { expireAfterSeconds: TTL_DAYS * 24 * 60 * 60 });
 
 // Counting prior generations of the same drop (see dropKey construction)
