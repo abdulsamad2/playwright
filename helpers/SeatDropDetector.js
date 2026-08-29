@@ -41,6 +41,11 @@ const GONE_CONFIRM_CYCLES =
  */
 const MATURE_CYCLES = parseInt(process.env.DROP_MATURE_CYCLES, 10) || 10;
 
+// Safety margin for "this event has already happened" — see the comment in
+// purgeDropsForPassedEvents for why a direct date comparison fires too early.
+const PASSED_MARGIN_HOURS =
+  parseInt(process.env.DROP_PASSED_MARGIN_HOURS, 10) || 12;
+
 const graceKey = (eventId) => `dropgrace:${eventId}`;
 
 /** "section|row" — the identity a listing keeps across a reprice or resize. */
@@ -357,8 +362,12 @@ async function ageActiveDrops(eventId, afterIndex) {
     try {
       await SeatDrop.bulkWrite(ops, { ordered: false });
     } catch (error) {
+      // activeCoverage must still come back: the caller reads it straight after
+      // and would throw on undefined, which the outer catch would then report
+      // as "detection failed" — turning one failed write into no detection at
+      // all for this scrape.
       console.error(`[SeatDrop] Lifecycle update failed for ${eventId}: ${error.message}`);
-      return { aged: 0, gone: 0 };
+      return { aged: 0, gone: 0, activeCoverage };
     }
   }
 
@@ -410,7 +419,8 @@ export async function recordSeatDrops({
 
     // Age drops already on record BEFORE writing new ones — a drop recorded by
     // this same scrape must not be aged against the scrape that created it.
-    const { activeCoverage } = await ageActiveDrops(eventId, afterIndex);
+    const aged = await ageActiveDrops(eventId, afterIndex);
+    const activeCoverage = aged.activeCoverage ?? new Map();
 
     // First-ever scrape: every seat is "new". That is a baseline, not a drop.
     if (isBaseline) return 0;
@@ -440,15 +450,27 @@ export async function recordSeatDrops({
     // Generation counter, not a timestamp: two instances racing the same scrape
     // compute the same generation and collide on the unique index, while a
     // genuine re-drop of the same seats later gets the next generation.
+    //
+    // It is the highest generation still on record plus one, NOT a count of
+    // them. Drops are deleted now — matured ones immediately, gone ones on a
+    // 15-minute TTL — so a count can fall back onto a number already in use:
+    // with generations 0 and 1 on record, 0 expiring leaves a count of 1, which
+    // collides with the surviving 1 and the new drop is silently rejected.
     const withKeys = await Promise.all(
       genuine.map(async (drop) => {
         const dropBase = `${eventId}|${drop.section}|${drop.row}|${drop.newSeats.join(",")}`;
-        const generation = await SeatDrop.countDocuments({ eventId, dropBase });
-        return { drop, dropBase, dropKey: `${dropBase}|${generation}` };
+        const highest = await SeatDrop.findOne(
+          { eventId, dropBase },
+          { generation: 1 }
+        )
+          .sort({ generation: -1 })
+          .lean();
+        const generation = (highest?.generation ?? -1) + 1;
+        return { drop, dropBase, generation, dropKey: `${dropBase}|${generation}` };
       })
     );
 
-    const docs = withKeys.map(({ drop, dropBase, dropKey }) => ({
+    const docs = withKeys.map(({ drop, dropBase, generation, dropKey }) => ({
       eventId,
       // Snapshot, read only if the event row is gone — see the model comment
       event_name: eventName,
@@ -468,6 +490,7 @@ export async function recordSeatDrops({
       seen: false,
       instanceId: INSTANCE_ID,
       dropBase,
+      generation,
       dropKey,
     }));
 
@@ -525,8 +548,14 @@ export async function purgeDropsForPassedEvents() {
       if (!held) return 0;
     }
 
+    // Event_DateTime holds the venue's LOCAL wall-clock encoded as UTC, while
+    // Date.now() is real UTC. Comparing them directly calls a show "passed" by
+    // the venue's UTC offset — up to 7 hours early for a US west-coast event,
+    // deleting its drops while it is still on sale. The margin covers every US
+    // zone; this is housekeeping, so erring late costs nothing.
+    const cutoff = new Date(Date.now() - PASSED_MARGIN_HOURS * 3600 * 1000);
     const passed = await Event.distinct("Event_ID", {
-      Event_DateTime: { $lt: new Date() },
+      Event_DateTime: { $lt: cutoff },
     });
     if (passed.length === 0) return 0;
 

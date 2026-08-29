@@ -89,7 +89,12 @@ const seatDropSchema = new mongoose.Schema(
     // "eventId|section|row|seat,seat". Stable across repeats.
     dropBase: { type: String, required: true },
 
-    // dropBase + a generation counter. Concurrency guard — see unique index.
+    // Which repeat of the same drop this is. Stored so the next one can be
+    // derived from the highest still on record rather than by counting — see
+    // recordSeatDrops, where counting could reuse a live number after an expiry.
+    generation: { type: Number, default: 0 },
+
+    // dropBase + generation. Concurrency guard — see unique index.
     dropKey: { type: String, required: true },
   },
   {
@@ -119,7 +124,7 @@ seatDropSchema.index(
 seatDropSchema.index({ detectedAt: 1 }, { expireAfterSeconds: TTL_DAYS * 24 * 60 * 60 });
 
 // Counting prior generations of the same drop (see dropKey construction)
-seatDropSchema.index({ eventId: 1, dropBase: 1 });
+seatDropSchema.index({ eventId: 1, dropBase: 1, generation: -1 });
 
 // Two instances racing the same scrape compute the same generation and collide
 // here, so exactly one record is written. A genuine re-drop of the same seats
