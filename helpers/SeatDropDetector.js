@@ -30,16 +30,24 @@ const GONE_CONFIRM_CYCLES =
   parseInt(process.env.DROP_GONE_CONFIRM_CYCLES, 10) || 2;
 
 /**
- * Cycles a drop must survive before it counts as ordinary inventory.
+ * When a drop stops being a drop and becomes ordinary inventory.
  *
- * At that point the portal stops withholding its listing from the CSV, so the
- * drop record has done its job and is deleted — keeping a matured drop around
- * would only be a row nothing reads.
+ * Two conditions, both required, because neither alone means what it looks
+ * like. A cycle is one scrape of that event, and the cadence is not fixed: the
+ * SLA is "within two minutes" but the floor is MIN_TIME_BETWEEN_EVENT_SCRAPES
+ * (500ms), so eighteen cycles can be thirty-six minutes on a busy roster or a
+ * few seconds on an idle one. Counting cycles alone would mature a drop in
+ * seconds; waiting on the clock alone would mature one the scraper had barely
+ * confirmed.
  *
- * MUST match DROP_MATURE_CYCLES in the portal: the scraper decides when a drop
- * matures, the portal decides what to withhold until then.
+ * So: seen alive MATURE_CYCLES times AND at least MATURE_MIN_AGE_MS old.
+ *
+ * Both MUST match the portal's: the scraper decides when a drop matures, the
+ * portal decides what to withhold from the CSV until then.
  */
-const MATURE_CYCLES = parseInt(process.env.DROP_MATURE_CYCLES, 10) || 10;
+const MATURE_CYCLES = parseInt(process.env.DROP_MATURE_CYCLES, 10) || 18;
+const MATURE_MIN_AGE_MS =
+  (parseInt(process.env.DROP_MATURE_MIN_AGE_MIN, 10) || 45) * 60 * 1000;
 
 // Safety margin for "this event has already happened" — see the comment in
 // purgeDropsForPassedEvents for why a direct date comparison fires too early.
@@ -282,7 +290,9 @@ async function ageActiveDrops(eventId, afterIndex) {
     if (stillPresent.length > 0) {
       const cycles = (drop.cyclesSeen || 1) + 1;
 
-      if (cycles >= MATURE_CYCLES) {
+      const ageMs = now.getTime() - new Date(drop.detectedAt).getTime();
+
+      if (cycles >= MATURE_CYCLES && ageMs >= MATURE_MIN_AGE_MS) {
         // Proven: the portal now exports this listing like any other stock, so
         // the drop record has nothing left to say. Delete it rather than leave
         // a row nothing reads. Note it is NOT added to activeCoverage — the
@@ -379,8 +389,8 @@ async function ageActiveDrops(eventId, afterIndex) {
 
   if (matured > 0) {
     console.log(
-      `[DROP ${eventId}] ${matured} drop(s) matured at ${MATURE_CYCLES} cycles — ` +
-        `now ordinary inventory, records deleted`
+      `[DROP ${eventId}] ${matured} drop(s) matured (${MATURE_CYCLES}+ cycles and ` +
+        `${MATURE_MIN_AGE_MS / 60000}+ min) — now ordinary inventory, records deleted`
     );
   }
 
