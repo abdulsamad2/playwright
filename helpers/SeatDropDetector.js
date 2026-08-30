@@ -15,7 +15,7 @@
  */
 
 import { getRedisClient, isRedisReady } from "../config/redis.js";
-import { SeatDrop, Event } from "../models/index.js";
+import { SeatDrop, Event, DropSettings } from "../models/index.js";
 import { INSTANCE_ID } from "./RedisLiveStore.js";
 
 const ENABLED = process.env.SEAT_DROP_TRACKING !== "0";
@@ -32,6 +32,10 @@ const GONE_CONFIRM_CYCLES =
 /**
  * How long a drop is held before it counts as ordinary inventory.
  *
+ * Set from the portal (Seat Drops → the hold control) and stored in
+ * drop_settings; the environment value is only the fallback before anyone has
+ * set one.
+ *
  * Elapsed time, not a cycle count. A cycle is one scrape of that event and the
  * cadence is not fixed — the SLA is two minutes, MIN_TIME_BETWEEN_EVENT_SCRAPES
  * is 500ms — so the same count is a different amount of time on every roster,
@@ -44,8 +48,28 @@ const GONE_CONFIRM_CYCLES =
  * MUST match the portal's: the scraper decides when a drop matures, the portal
  * decides what to withhold from the CSV until then.
  */
-const MATURE_MIN_AGE_MS =
-  (parseInt(process.env.DROP_MATURE_MIN_AGE_MIN, 10) || 45) * 60 * 1000;
+const DEFAULT_HOLD_MIN = parseInt(process.env.DROP_MATURE_MIN_AGE_MIN, 10) || 45;
+
+// The operator can change the hold from the portal, so it is read from the
+// database rather than the environment. Cached briefly: this is consulted on
+// every scrape of every event across 150+ instances, and a value a minute stale
+// only shifts a drop's maturity by a minute.
+const HOLD_CACHE_MS = 60 * 1000;
+let holdCache = { ms: DEFAULT_HOLD_MIN * 60 * 1000, readAt: 0 };
+
+async function getHoldMs() {
+  if (Date.now() - holdCache.readAt < HOLD_CACHE_MS) return holdCache.ms;
+  try {
+    const doc = await DropSettings.findOne({ key: "singleton" }, { holdMinutes: 1 }).lean();
+    const minutes = doc?.holdMinutes ?? DEFAULT_HOLD_MIN;
+    holdCache = { ms: minutes * 60 * 1000, readAt: Date.now() };
+  } catch (error) {
+    // Keep whatever we had rather than lurching to the default on a blip
+    holdCache.readAt = Date.now();
+    console.warn(`[SeatDrop] Could not read hold setting: ${error.message}`);
+  }
+  return holdCache.ms;
+}
 
 // Safety margin for "this event has already happened" — see the comment in
 // purgeDropsForPassedEvents for why a direct date comparison fires too early.
@@ -275,6 +299,7 @@ async function ageActiveDrops(eventId, afterIndex) {
   if (active.length === 0) return { aged: 0, gone: 0, activeCoverage };
 
   const now = new Date();
+  const holdMs = await getHoldMs();
   const ops = [];
   const graceToClear = [];
   let gone = 0;
@@ -288,7 +313,7 @@ async function ageActiveDrops(eventId, afterIndex) {
     if (stillPresent.length > 0) {
       const ageMs = now.getTime() - new Date(drop.detectedAt).getTime();
 
-      if (ageMs >= MATURE_MIN_AGE_MS) {
+      if (ageMs >= holdMs) {
         // Proven: the portal now exports this listing like any other stock, so
         // the drop record has nothing left to say. Delete it rather than leave
         // a row nothing reads. Note it is NOT added to activeCoverage — the
@@ -386,7 +411,7 @@ async function ageActiveDrops(eventId, afterIndex) {
   if (matured > 0) {
     console.log(
       `[DROP ${eventId}] ${matured} drop(s) matured after ` +
-        `${MATURE_MIN_AGE_MS / 60000} min — now ordinary inventory, records deleted`
+        `${holdMs / 60000} min — now ordinary inventory, records deleted`
     );
   }
 
