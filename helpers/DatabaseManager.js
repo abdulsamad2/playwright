@@ -150,6 +150,7 @@ class DatabaseManager {
               eventId,
               section: group.section,
               row: group.row,
+              rowRank: group.rowRank ?? group.inventory.rowRank ?? null,
               seatCount: group.inventory.quantity,
               seatRange: `${Math.min(...group.seats)}-${Math.max(
                 ...group.seats

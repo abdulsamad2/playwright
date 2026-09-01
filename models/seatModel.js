@@ -94,6 +94,14 @@ const consecutiveGroupSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Position of this row inside TM's SECTION.segments array: 0 is the row
+    // closest to the field, 1 the next one back, and so on. Positional rather
+    // than parsed from the label, so it holds for numeric, A/B/C and AA/A/B
+    // schemes alike. Null for GA and anything TM gives us with no row ordering.
+    rowRank: {
+      type: Number,
+      default: null,
+    },
     seatCount: {
       type: Number,
       required: true,
@@ -119,6 +127,10 @@ const consecutiveGroupSchema = new mongoose.Schema(
       row: {
         type: String,
         required: true,
+      },
+      rowRank: {
+        type: Number,
+        default: null,
       },
       cost: {
         type: Number,

@@ -886,6 +886,7 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.inventoryId": 1,
               "inventory.customSplit": 1,
               "inventory.splitType": 1,
+              "inventory.rowRank": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
 
@@ -922,6 +923,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             inventoryId: group.inventory?.inventoryId,
             customSplit: group.inventory?.customSplit,
             splitType: group.inventory?.splitType,
+            rowRank: group.inventory?.rowRank,
           });
         });
 
@@ -1008,13 +1010,24 @@ async updateEventMetadata(eventId, scrapeResult) {
             const splitTypeChanged =
               (existingData.splitType || "") !== (newData.splitType || "");
 
+            // A listing whose seats and price never move is never rewritten, so
+            // a stored rank never corrects itself: rows scraped before rowRank
+            // existed would keep a null forever, and rows written while rowRank
+            // was still taken from TM's array order would keep that stale value
+            // and stay wrong. Comparing the stored rank against the freshly
+            // computed one covers both — the row is rewritten once and then
+            // stays put, because the values match from then on.
+            const rowRankChanged =
+              newData.groupData?.inventory?.rowRank != null &&
+              existingData.rowRank !== newData.groupData.inventory.rowRank;
+
             // Always preserve the existing inventory ID for updates
             // Only generate new inventory IDs for truly new inventory or deleted/re-added rows
             newData.groupData.inventory.inventoryId = existingData.inventoryId;
 
             // Now, decide if the DB record needs an update for any of these fields
              // Force delete-and-insert for all changes to ensure fresh inventory IDs
-             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
+             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged || rowRankChanged) {
                rowsToDelete.push(existingData._id);
                rowsToInsert.push({ rowKey, data: newData });
              } else {
@@ -1170,6 +1183,7 @@ async updateEventMetadata(eventId, scrapeResult) {
                 inHandDate: formattedInHandDate,
                 section: group.section,
                 row: group.row,
+                rowRank: group.rowRank ?? group.inventory.rowRank ?? null,
                 seatCount: group.inventory.quantity,
                 seatRange: `${Math.min(...group.seats)}-${Math.max(
                   ...group.seats
@@ -1186,6 +1200,7 @@ async updateEventMetadata(eventId, scrapeResult) {
                   section: group.section,
                   hideSeatNumbers: group.inventory.hideSeatNumbers || true,
                   row: group.row,
+                  rowRank: group.inventory.rowRank ?? group.rowRank ?? null,
                   cost: group.inventory.cost,
                   stockType: group.inventory.stockType || "MOBILE_TRANSFER",
                   lineType: group.inventory.lineType,
@@ -1300,6 +1315,7 @@ async updateEventMetadata(eventId, scrapeResult) {
                 inHandDate: formattedInHandDate,
                 section: group.section,
                 row: group.row,
+                rowRank: group.rowRank ?? group.inventory.rowRank ?? null,
                 seatCount: group.inventory.quantity,
                 seatRange: `${Math.min(...group.seats)}-${Math.max(
                   ...group.seats
@@ -1317,6 +1333,7 @@ async updateEventMetadata(eventId, scrapeResult) {
                   section: group.section,
                   hideSeatNumbers: group.inventory.hideSeatNumbers || true,
                   row: group.row,
+                  rowRank: group.inventory.rowRank ?? group.rowRank ?? null,
                   cost: group.inventory.cost,
                   stockType: group.inventory.stockType || "MOBILE_TRANSFER",
                   lineType: group.inventory.lineType,
