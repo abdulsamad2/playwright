@@ -30,66 +30,47 @@ const GLOBAL_FILTERS = {
   excludeWheelchair: true, // Set to true to exclude wheelchair accessible seats (sections containing 'WC')
 };
 /**
- * Rank a section's rows by how close they are to the field.
+ * Rank a section's rows front-to-back, from the row label alone.
  *
- * TM lists a section's rows in map-drawing order, not front-to-back. Section
- * 106 of one NFL map runs 22,23,...,31,10,32,33,11,34,12,... so the array index
- * claims row 34 is nearer the field than row 2 — it isn't, and pricing rules
- * built on that index drop the better seat.
+ * TM lists a section's rows in map-drawing order, which says nothing about
+ * position: section 106 of one NFL map runs 22,23,...,31,10,32,33,11,34,12,...
+ * so the array index claims row 34 is nearer the field than row 2.
  *
- * The coordinates in placesNoKeys do encode position: entry [2] is X and [3] is
- * Y, identical for every seat in a row. The field sits at the centre of the
- * map, so ordering rows by their distance from that centre recovers the real
- * front-to-back order without parsing a single row label — which keeps this
- * working for A/B/C and AA/A/B sections too.
+ * The row number is the answer. Venues number from the front, so row 1 is
+ * nearest whatever the seats face — the field in a bowl, the stage on a floor.
+ * It needs no map, no coordinates and no assumption about where the action is.
  *
- * Measured over 1,000 numeric-row sections across 4 stadium maps: distance
- * ordering agrees with the venue's own row numbering 96-100% of the time (961
- * sections ordered exactly right), against 84-92% (446 exact) for the index.
+ * Seat coordinates were tried and abandoned. Ordering rows by distance from the
+ * centre of the map works for a bowl, where the field IS the centre, but
+ * inverts on a floor, where the stage sits at one end and the sections lie
+ * across the middle. On one arena map the five FL-A sections came out exactly
+ * backwards, and the pricing rule then dropped the rows against the stage.
  *
- * All-or-nothing per section: if any row lacks usable coordinates the caller
- * falls back to the array index, so a section is never ranked on a mix of the
- * two.
+ * Only the numbered rows are ranked, and they are ranked among themselves.
+ * Anything else — A/B/C, 34W, GA — is left unranked rather than guessed at.
+ * That costs nothing: an unranked listing is simply never compared against its
+ * neighbours, so a section that mixes 1..40 with a stray 34W still gets a
+ * correct ordering over the forty rows that do carry a number.
  */
-function rankRowsByDistanceFromField(rows, centerX, centerY) {
-  const empty = new Map();
-  if (centerX == null || centerY == null || !Array.isArray(rows)) return empty;
+function rankRowsByRowNumber(rows) {
+  const ranks = new Map();
+  if (!Array.isArray(rows)) return ranks;
 
-  const measured = [];
+  const numbered = [];
   for (const ROW of rows) {
-    const places = ROW?.placesNoKeys;
-    if (!Array.isArray(places) || places.length === 0) return empty;
-    let sumX = 0;
-    let sumY = 0;
-    let n = 0;
-    for (const place of places) {
-      const x = place?.[2];
-      const y = place?.[3];
-      if (typeof x !== "number" || typeof y !== "number") continue;
-      sumX += x;
-      sumY += y;
-      n++;
-    }
-    if (n === 0) return empty;
-    measured.push({
-      ROW,
-      distance: Math.hypot(sumX / n - centerX, sumY / n - centerY),
-    });
+    const label = ROW?.name;
+    if (typeof label !== "string" || !/^\s*\d+\s*$/.test(label)) continue;
+    numbered.push({ ROW, value: parseInt(label, 10) });
   }
 
-  measured.sort((a, b) => a.distance - b.distance);
-  const ranks = new Map();
-  measured.forEach((m, index) => ranks.set(m.ROW, index));
+  numbered.sort((a, b) => a.value - b.value);
+  numbered.forEach((entry, index) => ranks.set(entry.ROW, index));
   return ranks;
 }
 
 //it will break map into seats
 function GetMapSeats(data) {
   let seatArray = [];
-  // The field is at the centre of the map page; row distance is measured from there.
-  const page = data?.pages?.[0];
-  const centerX = typeof page?.width === "number" ? page.width / 2 : null;
-  const centerY = typeof page?.height === "number" ? page.height / 2 : null;
   if (
     data &&
     data.pages &&
@@ -101,18 +82,13 @@ function GetMapSeats(data) {
       if (composit?.segments) {
         composit.segments.map((SECTION) => {
           if (SECTION.segments && SECTION.segments.length > 0) {
-            // rowRank is the row's position within its section counting from the
-            // field, 0 being closest. Derived from seat coordinates rather than
-            // the array order (see rankRowsByDistanceFromField), and never from
-            // the row label, so 1/2/3, A/B/C and AA/A/B all rank correctly.
-            // Falls back to the array index when the map carries no coordinates.
-            const rowRanks = rankRowsByDistanceFromField(
-              SECTION.segments,
-              centerX,
-              centerY,
-            );
-            SECTION.segments.map((ROW, rowIndex) => {
-              const rowRank = rowRanks.has(ROW) ? rowRanks.get(ROW) : rowIndex;
+            // rowRank is the row's position within its section counting from
+            // the front, 0 being closest, taken from the row number. Null when
+            // the section's rows are not all numbered — never TM's array order,
+            // which is unrelated to position.
+            const rowRanks = rankRowsByRowNumber(SECTION.segments);
+            SECTION.segments.map((ROW) => {
+              const rowRank = rowRanks.has(ROW) ? rowRanks.get(ROW) : null;
               ROW.placesNoKeys.map((seat) => {
                 seatArray.push({
                   section: SECTION?.name,
