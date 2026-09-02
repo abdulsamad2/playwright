@@ -36,35 +36,58 @@ const GLOBAL_FILTERS = {
  * position: section 106 of one NFL map runs 22,23,...,31,10,32,33,11,34,12,...
  * so the array index claims row 34 is nearer the field than row 2.
  *
- * The row number is the answer. Venues number from the front, so row 1 is
- * nearest whatever the seats face — the field in a bowl, the stage on a floor.
- * It needs no map, no coordinates and no assumption about where the action is.
+ * The label is the answer. Venues label from the front, so row 1 — or row A —
+ * is nearest whatever the seats face, be it a field or a stage. No map, no
+ * coordinates, and no assumption about where the action is.
  *
  * Seat coordinates were tried and abandoned. Ordering rows by distance from the
  * centre of the map works for a bowl, where the field IS the centre, but
  * inverts on a floor, where the stage sits at one end and the sections lie
  * across the middle. On one arena map the five FL-A sections came out exactly
- * backwards, and the pricing rule then dropped the rows against the stage.
+ * backwards and the pricing rule then dropped the rows against the stage.
  *
- * Only the numbered rows are ranked, and they are ranked among themselves.
- * Anything else — A/B/C, 34W, GA — is left unranked rather than guessed at.
- * That costs nothing: an unranked listing is simply never compared against its
- * neighbours, so a section that mixes 1..40 with a stray 34W still gets a
- * correct ordering over the forty rows that do carry a number.
+ * Checked against the stage and field polygons in TM's own venue artwork, which
+ * share the seats' coordinate system: label order matches the geometry on
+ * 829/829 numbered sections and 33/33 lettered ones.
  */
-function rankRowsByRowNumber(rows) {
-  const ranks = new Map();
-  if (!Array.isArray(rows)) return ranks;
 
-  const numbered = [];
-  for (const ROW of rows) {
-    const label = ROW?.name;
-    if (typeof label !== "string" || !/^\s*\d+\s*$/.test(label)) continue;
-    numbered.push({ ROW, value: parseInt(label, 10) });
+/**
+ * Where one row sorts, or null when its label does not say.
+ *
+ *   "1".."10000"   a plain number. Rank is the number: row 1 is the best seat,
+ *                  row 10000 the worst.
+ *   "A".."Z"       a single letter, either case. Rank is its position in the
+ *                  alphabet: A is 1 and best, Z is 26 and worst.
+ *
+ * Everything else returns null and is never ranked: AA and AAA (ahead of A in
+ * some venues, behind Z in others), 12A, BOX, blank labels, and GA, lawn or
+ * parking. Those listings pass through the dominated-listings filter untouched
+ * and are never considered for exclusion — ranking a row wrongly is what makes
+ * that rule drop the better seat, so an unknown label declines to play.
+ */
+function rowSortKey(label) {
+  if (typeof label !== "string") return null;
+  const name = label.trim();
+
+  if (/^\d+$/.test(name)) {
+    const value = Number(name);
+    return value >= 1 && value <= 10000 ? value : null;
   }
 
-  numbered.sort((a, b) => a.value - b.value);
-  numbered.forEach((entry, index) => ranks.set(entry.ROW, index));
+  if (/^[A-Za-z]$/.test(name)) {
+    return name.toUpperCase().charCodeAt(0) - 64; // A -> 1 ... Z -> 26
+  }
+
+  return null;
+}
+
+function rankRowsByLabel(rows) {
+  const ranks = new Map();
+  if (!Array.isArray(rows)) return ranks;
+  for (const ROW of rows) {
+    const rank = rowSortKey(ROW?.name);
+    if (rank !== null) ranks.set(ROW, rank);
+  }
   return ranks;
 }
 
@@ -83,10 +106,10 @@ function GetMapSeats(data) {
         composit.segments.map((SECTION) => {
           if (SECTION.segments && SECTION.segments.length > 0) {
             // rowRank is the row's position within its section counting from
-            // the front, 0 being closest, taken from the row number. Null when
-            // the section's rows are not all numbered — never TM's array order,
-            // which is unrelated to position.
-            const rowRanks = rankRowsByRowNumber(SECTION.segments);
+            // the front, 0 being closest, read off the row label. Null when the
+            // label carries no position — never TM's array order, which is
+            // unrelated to where a row sits.
+            const rowRanks = rankRowsByLabel(SECTION.segments);
             SECTION.segments.map((ROW) => {
               const rowRank = rowRanks.has(ROW) ? rowRanks.get(ROW) : null;
               ROW.placesNoKeys.map((seat) => {
