@@ -73,6 +73,19 @@ const IP_COOLDOWN_MS = () => parseInt(process.env.IP_COOLDOWN_MS, 10) || 90000;
 // Set JAR_LEASE=0 to fall back to the old sharing behaviour (not recommended).
 const JAR_LEASE = () => process.env.JAR_LEASE !== "0";
 
+// A lease is BOUNDED and RENEWED, not held to the jar's own expiry. ownerId embeds the
+// pid, and releaseFarmJar only runs on the graceful teardown paths — so a PM2 kill (the
+// 750M max_memory_restart, or any crash) stranded this instance's whole jar allocation
+// for up to the jar's full 60 minutes, and the restarted process could not reclaim its
+// own leases because the pid had changed. A live pool now pushes its leases forward
+// every JAR_LEASE_RENEW_MS; a dead one stops, and its jars return to the pool within
+// JAR_LEASE_TTL_MS. A reclaimed jar does land on a second exit IP, spending one of the
+// ~10 it gets before TM revokes it — far cheaper than losing the jar outright.
+const JAR_LEASE_TTL_MS = () =>
+  Math.max(60000, parseInt(process.env.JAR_LEASE_TTL_MS, 10) || 5 * 60 * 1000);
+const JAR_LEASE_RENEW_MS = () =>
+  Math.max(15000, parseInt(process.env.JAR_LEASE_RENEW_MS, 10) || 60 * 1000);
+
 let _leaseSeq = 0;
 const newOwnerId = () => `${process.env.MACHINE_ID || "m"}:${process.pid}:${++_leaseSeq}`;
 
@@ -128,6 +141,32 @@ async function releaseFarmJar(jarId, ownerId) {
       { $unset: { leaseOwner: "", leaseProxy: "", leaseUntil: "", leasedAt: "" } }
     );
   } catch { /* best effort — the lease expires with the jar regardless */ }
+}
+
+// Push every lease this instance still holds forward by one TTL. Matching on leaseOwner
+// as well as _id means a jar we have already lost (our renew stalled long enough for
+// someone else to claim it) is left alone rather than yanked onto a second exit IP.
+async function renewFarmLeases(metas) {
+  const until = new Date(Date.now() + JAR_LEASE_TTL_MS());
+  const ops = [];
+  for (const m of metas) {
+    if (!m || !m.jarId || !m.jarOwner) continue;
+    ops.push({
+      updateOne: {
+        filter: { _id: m.jarId, leaseOwner: m.jarOwner },
+        update: { $set: { leaseUntil: until } },
+      },
+    });
+  }
+  if (!ops.length) return { renewed: 0, lost: 0 };
+  try {
+    const r = await mongoose.connection.db.collection("seed_jars").bulkWrite(ops, { ordered: false });
+    const renewed = r.matchedCount || 0;
+    return { renewed, lost: ops.length - renewed };
+  } catch (e) {
+    console.warn("[SeedFarm] lease renew failed:", e.message);
+    return { renewed: 0, lost: 0 }; // a failed renew is not a lost lease; the next tick retries
+  }
 }
 
 // Legacy shared-jar reader, used only when JAR_LEASE=0. Kept so the old behaviour is one
@@ -1634,6 +1673,7 @@ class BrowserPagePool {
     this._seedJarAt = 0;                 // ms timestamp of the jar
     this._seedInFlight = null;           // dedupe concurrent mints
     this._refreshCursor = 0;             // round-robin target index for rolling refresh
+    this._leaseTimer = null;             // renews this instance's jar leases (JAR_LEASE_TTL_MS)
   }
 
   // Acquire the jar for ONE page on ONE proxy. Returns { cookies, jarId, ownerId } or
@@ -1643,7 +1683,7 @@ class BrowserPagePool {
     if (!SEED_SPLIT()) return null;
     if (SEED_FARM() && JAR_LEASE()) {
       const ownerId = newOwnerId();
-      const lease = await leaseFarmJar(ownerId, proxyKey);
+      const lease = await leaseFarmJar(ownerId, proxyKey, JAR_LEASE_TTL_MS());
       if (lease) return { ...lease, ownerId };
       // Every jar is already leased. Do NOT fall back to a shared one — that is the
       // failure this lease exists to prevent. The page simply does not bind and retries;
@@ -2249,7 +2289,23 @@ class BrowserPagePool {
    * Start a background timer that restarts the browser every 8 minutes
    * to get completely fresh cookies and prevent stale session issues.
    */
+  // Renew every jar this pool holds while the process is alive. Deliberately a timer and
+  // not a piggyback on the request path: a page that is alive but idle still holds its
+  // jar, and must not lose it just because no events were routed to it this minute.
+  _startLeaseHeartbeat() {
+    if (this._leaseTimer || !SEED_FARM() || !JAR_LEASE()) return;
+    this._leaseTimer = setInterval(() => {
+      renewFarmLeases([...this._pageMeta.values()])
+        .then(({ lost }) => {
+          if (lost) console.warn(`[PagePool] ${lost} jar lease(s) no longer held by this instance`);
+        })
+        .catch(() => {});
+    }, JAR_LEASE_RENEW_MS());
+    this._leaseTimer.unref?.();
+  }
+
   _startRestartTimer() {
+    this._startLeaseHeartbeat();
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
 
     const nextRegularDelay = () => {
@@ -2888,6 +2944,10 @@ class BrowserPagePool {
       clearTimeout(this._refreshTimer);
       this._refreshTimer = null;
     }
+    if (this._leaseTimer) {
+      clearInterval(this._leaseTimer);
+      this._leaseTimer = null;
+    }
 
     if (this._batcher) {
       this._batcher.cleanup();
@@ -2990,5 +3050,6 @@ export {
   // same one-jar-one-IP rule instead of re-introducing the fan-out that revokes tokens.
   leaseFarmJar,
   releaseFarmJar,
+  renewFarmLeases,
   newOwnerId
 };
