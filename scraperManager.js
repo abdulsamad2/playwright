@@ -3481,14 +3481,48 @@ async updateEventMetadata(eventId, scrapeResult) {
    *
    * Only meaningful in strict farm-consumer mode (SEED_SPLIT=1, SELF_MINT=0), where a
    * page cannot bind without a farm jar. An initialised pool already holds its leases, so
-   * it can serve; otherwise there has to be a free jar for it to take.
+   * it can serve. Otherwise the answer is not simply "no": the moment a jar is free this
+   * instance should be racing to BUILD its pool, because that is what takes the jar. Only
+   * once the pool is up does it go back to claiming events.
    */
   async canServeEvents() {
     const strictFarmConsumer =
       process.env.SEED_SPLIT === "1" && process.env.SELF_MINT !== "1";
     if (!strictFarmConsumer) return true;
     if (browserPagePool && browserPagePool.initialized) return true;
-    return farmHasFreeJar();
+    // No pool yet. Claiming would lock the stalest events and fail them, so spend the
+    // cycle getting ready instead — but only when a jar exists, since init cannot bind a
+    // page without one and a failed init costs a browser launch and a proxy bind.
+    if (!(await farmHasFreeJar())) return false;
+    await this.ensurePoolReady();
+    return !!(browserPagePool && browserPagePool.initialized);
+  }
+
+  /**
+   * Build the page pool against a free farm jar, so this instance starts claiming again
+   * the moment the farm has something to give it.
+   *
+   * Throttled: a failed init usually means another instance leased the jar between the
+   * probe and the lease, and retrying flat out only burns browser launches and proxies.
+   */
+  async ensurePoolReady() {
+    const now = Date.now();
+    const retryMs = parseInt(process.env.POOL_INIT_RETRY_MS, 10) || 5000;
+    if (now - (this._poolInitAttemptAt || 0) < retryMs) return;
+    this._poolInitAttemptAt = now;
+    try {
+      const proxy = global.proxyManager
+        ? global.proxyManager.getProxyForEvent("pool-init")
+        : null;
+      // Seed against a real event URL, same as the startup pre-init.
+      const randomIds = await redisLiveStore.getRandomActiveEventIds(1);
+      await browserPagePool.init(proxy, null, randomIds?.[0] || null);
+      if (browserPagePool.initialized) {
+        this.logWithTime("Browser page pool ready — resuming event claims", "success");
+      }
+    } catch (err) {
+      this.logWithTime(`Pool not ready yet (${err.message}) — will retry`, "warning");
+    }
   }
 
   /**
@@ -3510,7 +3544,8 @@ async updateEventMetadata(eventId, scrapeResult) {
       // this instance, so a jarless instance was taking the most urgent events away from
       // the instances that could actually scrape them, failing them in under a second and
       // handing them back one round later. Staying out of the queue keeps them available
-      // to a healthy instance immediately.
+      // to a healthy instance immediately. canServeEvents() also does the readying: given
+      // a free jar it builds the pool now rather than waiting to be handed an event first.
       if (!(await this.canServeEvents())) {
         const now = Date.now();
         if (now - (this._noJarLoggedAt || 0) > 30000) {
