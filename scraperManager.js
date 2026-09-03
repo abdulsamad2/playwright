@@ -13,7 +13,7 @@ import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
 import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
-import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
+import { cleanup as cleanupBrowsers, browserPagePool, farmHasFreeJar } from './browser-cookies.js';
 import redisLiveStore from './helpers/RedisLiveStore.js';
 import { recordSeatDrops } from './helpers/SeatDropDetector.js';
 // CSV upload functionality removed
@@ -3477,6 +3477,21 @@ async updateEventMetadata(eventId, scrapeResult) {
   }
 
   /**
+   * Can this instance actually scrape right now?
+   *
+   * Only meaningful in strict farm-consumer mode (SEED_SPLIT=1, SELF_MINT=0), where a
+   * page cannot bind without a farm jar. An initialised pool already holds its leases, so
+   * it can serve; otherwise there has to be a free jar for it to take.
+   */
+  async canServeEvents() {
+    const strictFarmConsumer =
+      process.env.SEED_SPLIT === "1" && process.env.SELF_MINT !== "1";
+    if (!strictFarmConsumer) return true;
+    if (browserPagePool && browserPagePool.initialized) return true;
+    return farmHasFreeJar();
+  }
+
+  /**
    * Get events to process — uses Redis distributed claim system.
    *
    * Instead of every instance reading ALL events and computing priorities,
@@ -3490,6 +3505,23 @@ async updateEventMetadata(eventId, scrapeResult) {
       // How many events can this instance handle per cycle?
       // Each scrape takes ~5-15s, batch of 5 in parallel ≈ one cycle
       const claimCount = config.BATCH_SIZE || 5;
+
+      // Never claim work this instance cannot do. A claim LOCKS the stalest events for
+      // this instance, so a jarless instance was taking the most urgent events away from
+      // the instances that could actually scrape them, failing them in under a second and
+      // handing them back one round later. Staying out of the queue keeps them available
+      // to a healthy instance immediately.
+      if (!(await this.canServeEvents())) {
+        const now = Date.now();
+        if (now - (this._noJarLoggedAt || 0) > 30000) {
+          this._noJarLoggedAt = now;
+          this.logWithTime(
+            "No farm jar and pool not ready — not claiming events, leaving them for instances that can scrape",
+            "warning"
+          );
+        }
+        return [];
+      }
 
       // Atomically claim the stalest events (no other instance can get these)
       const claimed = await redisLiveStore.claimEvents(claimCount);

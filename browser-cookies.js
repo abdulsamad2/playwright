@@ -169,6 +169,34 @@ async function renewFarmLeases(metas) {
   }
 }
 
+// Is there a jar this instance could actually lease right now? In strict farm-consumer
+// mode a page cannot bind without one, so an instance holding none must not CLAIM events:
+// it locks the stalest ones, fails every one of them inside a second, and hands them back
+// marked failed — while the instances that DO hold jars are left with whatever was not
+// locked. Measured on the fleet 2026-09-04: 5 of 8 instances jarless, the one healthy
+// instance at 100% success, and 79 of 196 events past their 3-minute SLA.
+// Cached briefly because this is consulted on every claim cycle.
+let _freeJarProbe = { at: 0, free: false };
+async function farmHasFreeJar(maxAgeMs = 2000) {
+  if (Date.now() - _freeJarProbe.at < maxAgeMs) return _freeJarProbe.free;
+  try {
+    const now = new Date();
+    const doc = await mongoose.connection.db.collection("seed_jars").findOne(
+      {
+        status: "healthy",
+        expiresAt: { $gt: now },
+        $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: now } }],
+      },
+      { projection: { _id: 1 } }
+    );
+    _freeJarProbe = { at: Date.now(), free: !!doc };
+  } catch {
+    // Can't tell → say yes. A Mongo blip must not stop the whole fleet from claiming.
+    _freeJarProbe = { at: Date.now(), free: true };
+  }
+  return _freeJarProbe.free;
+}
+
 // Legacy shared-jar reader, used only when JAR_LEASE=0. Kept so the old behaviour is one
 // env var away if the lease ever needs to be switched off in a hurry.
 let _farmJars = { list: [], at: 0, rr: 0 };
@@ -3051,5 +3079,6 @@ export {
   leaseFarmJar,
   releaseFarmJar,
   renewFarmLeases,
+  farmHasFreeJar,
   newOwnerId
 };
