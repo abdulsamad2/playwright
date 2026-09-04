@@ -36,9 +36,10 @@ const GLOBAL_FILTERS = {
  * position: section 106 of one NFL map runs 22,23,...,31,10,32,33,11,34,12,...
  * so the array index claims row 34 is nearer the field than row 2.
  *
- * The label is the answer. Venues label from the front, so row 1 — or row A —
- * is nearest whatever the seats face, be it a field or a stage. No map, no
- * coordinates, and no assumption about where the action is.
+ * The label is the answer. Venues label from the front, so row 1 — or row A, or
+ * row AA where the rows are doubled letters — is nearest whatever the seats
+ * face, be it a field or a stage. No map, no coordinates, and no assumption
+ * about where the action is.
  *
  * Seat coordinates were tried and abandoned. Ordering rows by distance from the
  * centre of the map works for a bowl, where the field IS the centre, but
@@ -52,18 +53,65 @@ const GLOBAL_FILTERS = {
  */
 
 /**
+ * ── Why a multi-letter row must be a REPEATED letter ─────────────────────────
+ *
+ * This used to be a denylist of codes — GA, WC, ADA and the rest — which only
+ * ever caught the ones somebody had already seen. Read off 1,090,781 production
+ * listings across two full exports, the shape settles it without a list:
+ *
+ *   two letters   ~15,800 listings, every one a doubled letter (AA..UU)
+ *                 216 mixed: WC, MW, VW, LR, RL, RW
+ *   three letters    91 listings, every one a tripled letter (AAA..YYY)
+ *                 130 mixed: ADA, SRO, TBL, WCA, JJW, RAL, BAR, CRT, EDG,
+ *                            ONE, TWO
+ *
+ * Not one AB, AC or BA in either export: these venues run doubled letters, not
+ * base 26. Every mixed-letter label is a seat-type code — access, standing,
+ * table, railing, bar, courtside — with no position in a row order.
+ *
+ * The denylist let twelve of those through, and they were ranked as positions:
+ * ONE became row 9,808, RAL row 11,504, CRT row 1,814. In Atlanta Hawks v
+ * Lakers section FLOOR8 that deleted a real listing — CRT (courtside) at $2,532
+ * dropped as "dominated" by row AAA at $2,264, a better seat only in the sense
+ * that the rule had put courtside 1,813 rows behind it.
+ *
+ * The asymmetry is what makes the shape rule the right default: an unranked
+ * label is kept and never judged, so refusing a genuine row costs one missed
+ * exclusion, while ranking a code deletes real inventory. A venue that truly
+ * runs AA, AB, AC would stop being judged here — visible as a section that
+ * never drops anything, and cheap next to deleting courtside.
+ *
+ * The rank values are unchanged (base 26, so ZZ is still 676): they are stored
+ * on the listing, and moving them would put freshly scraped rows on a different
+ * scale from everything already in the database.
+ */
+const MULTI_LETTER_ROW = /^([A-Z])\1{0,2}$/;
+
+/**
  * Where one row sorts, or null when its label does not say.
  *
- *   "1".."10000"   a plain number. Rank is the number: row 1 is the best seat,
- *                  row 10000 the worst.
- *   "A".."Z"       a single letter, either case. Rank is its position in the
- *                  alphabet: A is 1 and best, Z is 26 and worst.
+ *   "1".."10000"    a plain number. Rank is the number: row 1 is the best seat,
+ *                   row 10000 the worst.
+ *   "A".."Z"        a single letter, either case. Rank is its position in the
+ *                   alphabet: A is 1 and best, Z is 26 and worst.
+ *   "AA".."ZZ"      two letters, and only a DOUBLED one. Rank counts the pairs
+ *                   in alphabetical order, so AA is 1, BB is 28, ZZ is 676.
+ *                   A mixed pair (WC, MW, RL) is a seat-type code, not a row.
+ *   "AAA".."ZZZ"    three letters, and only a TRIPLED one: AAA is 1, BBB is
+ *                   704, ZZZ is 17,576. ADA, SRO, CRT and the like are codes.
  *
- * Everything else returns null and is never ranked: AA and AAA (ahead of A in
- * some venues, behind Z in others), 12A, BOX, blank labels, and GA, lawn or
- * parking. Those listings pass through the dominated-listings filter untouched
- * and are never considered for exclusion — ranking a row wrongly is what makes
- * that rule drop the better seat, so an unknown label declines to play.
+ * Four separate scales, not one. AA is rank 1 of the two-letter rows and A is
+ * rank 1 of the single-letter rows, and neither says anything about the other:
+ * a venue may run A..Z then AA..ZZ behind it, or AA..ZZ in front of A. So a
+ * rank means nothing without the label shape it was read from, and the rule
+ * that consumes it compares a row only against rows of its own shape.
+ *
+ * Everything else returns null and is never ranked: 12A, C35, AAAA and longer,
+ * blank labels, lawn and parking, and every mixed-letter two- or three-letter
+ * label, which is a seat-type code rather than a row. Those listings pass through the
+ * dominated-listings filter untouched and are never considered for exclusion —
+ * ranking a row wrongly is what makes that rule drop the better seat, so an
+ * unknown label declines to play.
  */
 function rowSortKey(label) {
   if (typeof label !== "string") return null;
@@ -74,8 +122,14 @@ function rowSortKey(label) {
     return value >= 1 && value <= 10000 ? value : null;
   }
 
-  if (/^[A-Za-z]$/.test(name)) {
-    return name.toUpperCase().charCodeAt(0) - 64; // A -> 1 ... Z -> 26
+  const upper = name.toUpperCase();
+  if (MULTI_LETTER_ROW.test(upper)) {
+    // Base 26 over the letters, then +1 so every width counts from 1: A, AA and
+    // AAA are each rank 1 of their own scale, ZZ is 676 and ZZZ is 17,576.
+    // Widths are separate scales, so the overlap never gets compared.
+    let rank = 0;
+    for (const ch of upper) rank = rank * 26 + (ch.charCodeAt(0) - 65);
+    return rank + 1;
   }
 
   return null;

@@ -176,23 +176,113 @@ test("a venue lettered A,B,C ranks alphabetically", () => {
   assert.deepEqual([byRow.get("A"), byRow.get("H"), byRow.get("J")], [1, 8, 10]);
 });
 
-test("a doubled letter is left unranked — it is ahead of A in some venues, behind Z in others", () => {
+test("two-letter rows rank on their own scale, counting from AA", () => {
+  // AA is ahead of A in some venues and behind Z in others, so the two widths
+  // are separate scales and each counts from 1. The consumer never compares
+  // across them, which is what makes the shared rank harmless.
   const mapData = mapWith([
     {
       name: "101",
       segments: [
         { name: "AA", placesNoKeys: [["a-1", "1"], ["a-2", "2"]] },
-        { name: "A", placesNoKeys: [["b-1", "1"], ["b-2", "2"]] },
-        { name: "B", placesNoKeys: [["c-1", "1"], ["c-2", "2"]] },
+        { name: "BB", placesNoKeys: [["b-1", "1"], ["b-2", "2"]] },
+        { name: "ZZ", placesNoKeys: [["c-1", "1"], ["c-2", "2"]] },
+        { name: "A", placesNoKeys: [["d-1", "1"], ["d-2", "2"]] },
+      ],
+    },
+  ]);
+  const listings = ["a", "b", "c", "d"].map((p, i) => listingFor(`off-${i}`, [`${p}-1`, `${p}-2`]));
+  const byRow = new Map(run(mapData, listings).map((r) => [r.row, r.rowRank]));
+
+  assert.equal(byRow.get("AA"), 1);
+  assert.equal(byRow.get("BB"), 28, "the pairs still count in base 26: BB is 26 + 2");
+  assert.equal(byRow.get("ZZ"), 676);
+  assert.equal(byRow.get("A"), 1, "rank 1 of a different scale");
+});
+
+test("three-letter rows rank one place wider still", () => {
+  const mapData = mapWith([
+    {
+      name: "101",
+      segments: [
+        { name: "AAA", placesNoKeys: [["a-1", "1"], ["a-2", "2"]] },
+        { name: "BBB", placesNoKeys: [["b-1", "1"], ["b-2", "2"]] },
+        { name: "ZZZ", placesNoKeys: [["c-1", "1"], ["c-2", "2"]] },
       ],
     },
   ]);
   const listings = ["a", "b", "c"].map((p, i) => listingFor(`off-${i}`, [`${p}-1`, `${p}-2`]));
   const byRow = new Map(run(mapData, listings).map((r) => [r.row, r.rowRank]));
 
-  assert.equal(byRow.get("AA"), null, "AA is a coin flip, so it sits the rule out");
-  assert.equal(byRow.get("A"), 1, "the letters that are unambiguous still rank");
-  assert.equal(byRow.get("B"), 2);
+  assert.deepEqual([byRow.get("AAA"), byRow.get("BBB"), byRow.get("ZZZ")], [1, 704, 17576]);
+});
+
+test("a mixed pair or triple is a seat-type code, so it never ranks", () => {
+  // Every two- and three-letter row in 1,090,781 production listings is a
+  // repeated letter; every mixed one is a code. These are the twelve that the
+  // old denylist did not name and so ranked as positions — ONE became row
+  // 9,808 and CRT row 1,814, which is how courtside came to be judged as a
+  // seat 1,813 rows behind row AAA.
+  const codes = ["MW", "VW", "LR", "RL", "RW", "BX",
+                 "JJW", "RAL", "BAR", "CRT", "EDG", "ONE", "TWO"];
+  const mapData = mapWith([
+    {
+      name: "101",
+      segments: codes.map((name, i) => ({
+        name,
+        placesNoKeys: [[`p${i}-1`, "1"], [`p${i}-2`, "2"]],
+      })),
+    },
+  ]);
+  const listings = codes.map((_, i) => listingFor(`off-${i}`, [`p${i}-1`, `p${i}-2`]));
+  const byRow = new Map(run(mapData, listings).map((r) => [r.row, r.rowRank]));
+
+  for (const code of codes) {
+    assert.equal(byRow.get(code), null, `${code} is a code, not a row`);
+  }
+});
+
+test("four letters and up are still a guess, so they never rank", () => {
+  const mapData = mapWith([
+    {
+      name: "101",
+      segments: [
+        { name: "AAAA", placesNoKeys: [["a-1", "1"], ["a-2", "2"]] },
+        { name: "12A", placesNoKeys: [["b-1", "1"], ["b-2", "2"]] },
+        { name: "A", placesNoKeys: [["c-1", "1"], ["c-2", "2"]] },
+      ],
+    },
+  ]);
+  const listings = ["a", "b", "c"].map((p, i) => listingFor(`off-${i}`, [`${p}-1`, `${p}-2`]));
+  const byRow = new Map(run(mapData, listings).map((r) => [r.row, r.rowRank]));
+
+  assert.equal(byRow.get("AAAA"), null);
+  assert.equal(byRow.get("12A"), null);
+  assert.equal(byRow.get("A"), 1);
+});
+
+test("access and standing codes are not rows, whatever their length", () => {
+  // WC and ADA are the shapes of a two- and a three-letter row and are neither.
+  // 156 of the 16,024 two- and three-letter rows in one production export are
+  // codes like these, and ranking one lets the pricing rule delete it.
+  const mapData = mapWith([
+    {
+      name: "101",
+      segments: [
+        { name: "WC", placesNoKeys: [["a-1", "1"], ["a-2", "2"]] },
+        { name: "ADA", placesNoKeys: [["b-1", "1"], ["b-2", "2"]] },
+        { name: "GA", placesNoKeys: [["c-1", "1"], ["c-2", "2"]] },
+        { name: "BB", placesNoKeys: [["d-1", "1"], ["d-2", "2"]] },
+      ],
+    },
+  ]);
+  const listings = ["a", "b", "c", "d"].map((p, i) => listingFor(`off-${i}`, [`${p}-1`, `${p}-2`]));
+  const byRow = new Map(run(mapData, listings).map((r) => [r.row, r.rowRank]));
+
+  assert.equal(byRow.get("WC"), null);
+  assert.equal(byRow.get("ADA"), null);
+  assert.equal(byRow.get("GA"), null);
+  assert.equal(byRow.get("BB"), 28, "a real doubled-letter row still ranks");
 });
 
 test("numbers and letters share one scale, so row A and row 1 both rank 1", () => {

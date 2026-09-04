@@ -94,10 +94,13 @@ const consecutiveGroupSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    // Position of this row inside TM's SECTION.segments array: 0 is the row
-    // closest to the field, 1 the next one back, and so on. Positional rather
-    // than parsed from the label, so it holds for numeric, A/B/C and AA/A/B
-    // schemes alike. Null for GA and anything TM gives us with no row ordering.
+    // Where this row sorts within its section, read off the row label: the
+    // number for "1".."10000", the alphabet position for "A".."Z", and the same
+    // counting one and two places wider for "AA".."ZZ" and "AAA".."ZZZ". Rank 1
+    // is the row closest to the field. Each label shape is its own scale, all
+    // starting at 1, so a rank only orders rows written the same way. Null for
+    // GA, parking and any label on no scale — never TM's array order, which is
+    // map-drawing order and unrelated to where a row sits.
     rowRank: {
       type: Number,
       default: null,
