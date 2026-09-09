@@ -1212,7 +1212,11 @@ async updateEventMetadata(eventId, scrapeResult) {
                   splitType: group.inventory.splitType || "CUSTOM",
                   publicNotes: group.inventory.publicNotes,
                   listPrice: increasedPrice,
-                  face_price: group.inventory.faceValue,
+                  // The pipeline names it originalFaceValue; this column is
+                  // face_price. Reading the wrong key wrote nothing at all, and
+                  // every consumer quietly fell back to cost — including the
+                  // dominated-listings rule, which compares on face.
+                  face_price: group.inventory.originalFaceValue ?? null,
                   taxed_cost: group.inventory.taxedCost,
                   cost: group.inventory.cost,
                   hide_seats: group.inventory.hideSeatNumbers || true,
@@ -1345,7 +1349,11 @@ async updateEventMetadata(eventId, scrapeResult) {
                   splitType: group.inventory.splitType || "CUSTOM",
                   publicNotes: group.inventory.publicNotes,
                   listPrice: increasedPrice,
-                  face_price: group.inventory.faceValue,
+                  // The pipeline names it originalFaceValue; this column is
+                  // face_price. Reading the wrong key wrote nothing at all, and
+                  // every consumer quietly fell back to cost — including the
+                  // dominated-listings rule, which compares on face.
+                  face_price: group.inventory.originalFaceValue ?? null,
                   taxed_cost: group.inventory.taxedCost,
                   cost: group.inventory.cost,
                   hide_seats: group.inventory.hideSeatNumbers || true,
